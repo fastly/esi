@@ -31,7 +31,9 @@ fn handle_request(req: Request) -> Result<(), Error> {
         .map(|c| c.subtype() == mime::HTML)
         .unwrap_or(false)
     {
-        let config = esi::Configuration::default().with_recursion();
+        let config = esi::Configuration::default()
+            .with_recursion()
+            .with_matcher(&|src| !src.contains("ignore"));
 
         let processor = Processor::new(config);
 
