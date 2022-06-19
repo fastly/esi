@@ -58,18 +58,18 @@ pub use crate::error::ExecutionError;
 
 /// An instance of the ESI processor with a given configuration.
 #[derive(Default)]
-pub struct Processor {
-    configuration: Configuration,
+pub struct Processor<'a> {
+    configuration: Configuration<'a>,
 }
 
-impl Processor {
+impl<'a> Processor<'a> {
     /// Construct a new ESI processor with the given configuration.
-    pub fn new(configuration: Configuration) -> Self {
+    pub fn new(configuration: Configuration<'a>) -> Self {
         Self { configuration }
     }
 }
 
-impl Processor {
+impl<'a> Processor<'a> {
     /// Execute the ESI document (`document`) using the provided client request (`original_request`) as context,
     /// and stream the resulting output to the client.
     ///
@@ -131,7 +131,7 @@ impl Processor {
                         src,
                         alt,
                         continue_on_error,
-                    }) => {
+                    }) if (self.configuration.is_match)(&src) => {
                         let resp = match self.send_esi_fragment_request(
                             &original_request,
                             &src,
@@ -185,6 +185,27 @@ impl Processor {
                         } else {
                             error!("No content for fragment");
                         }
+                    }
+                    Event::ESI(Tag::Include {
+                        src,
+                        alt,
+                        continue_on_error,
+                    }) => {
+                        let continue_str = if continue_on_error {
+                            "onerror=\"continue\""
+                        } else {
+                            ""
+                        };
+                        let alt_str = match alt {
+                            Some(alt) => format!("alt=\"{}\"", alt),
+                            None => "".to_string(),
+                        };
+                        let message = format!(
+                            r#"<esi:include src="{}" {} {}></esi:include>"#,
+                            src, alt_str, continue_str
+                        );
+                        xml_writer.write(message.as_bytes())?;
+                        xml_writer.inner().flush().expect("failed to flush output");
                     }
                     Event::XML(event) => {
                         xml_writer.write_event(event)?;
