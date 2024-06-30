@@ -1,6 +1,6 @@
 [package]
 name = "esi"
-version = "0.4.0"
+version = "0.4.1"
 description = "A streaming parser and executor for Edge Side Includes"
 repository = "https://github.com/fastly/esi"
 license = "MIT"

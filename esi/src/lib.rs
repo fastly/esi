@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![doc = include_str!("../../README.md")]
 
 mod config;
 mod document;
@@ -157,13 +157,6 @@ impl Processor {
                     }
                 }
 
-                poll_elements(
-                    &mut elements,
-                    output_writer,
-                    dispatch_fragment_request,
-                    process_fragment_response,
-                )?;
-
                 Ok(())
             },
         )?;
@@ -272,18 +265,8 @@ fn poll_elements(
                     output_writer.inner().write_all(&raw).unwrap();
                 }
                 Element::Fragment(mut request, alt, continue_on_error, pending_request) => {
-                    match pending_request.poll() {
-                        fastly::http::request::PollResult::Pending(pending_request) => {
-                            // Request is still pending, re-add it to the front of the queue and wait for the next poll.
-                            elements.push_front(Element::Fragment(
-                                request,
-                                alt,
-                                continue_on_error,
-                                pending_request,
-                            ));
-                            break;
-                        }
-                        fastly::http::request::PollResult::Done(Ok(res)) => {
+                    match pending_request.wait() {
+                        Ok(res) => {
                             // Let the app process the response if needed.
                             let res = if let Some(process_response) = process_fragment_response {
                                 process_response(&mut request, res)?
@@ -331,9 +314,7 @@ fn poll_elements(
                                     .expect("failed to flush output");
                             }
                         }
-                        fastly::http::request::PollResult::Done(Err(err)) => {
-                            return Err(ExecutionError::RequestError(err))
-                        }
+                        Err(err) => return Err(ExecutionError::RequestError(err)),
                     }
                 }
             }
