@@ -1,0 +1,28 @@
+# This file describes a Fastly Compute package. To learn more visit:
+# https://developer.fastly.com/reference/fastly-toml/
+
+authors = ["kailan@enviark.com"]
+description = ""
+language = "rust"
+manifest_version = 2
+name = "esi_example_variants"
+service_id = ""
+
+[local_server]
+
+  [local_server.backends]
+
+    [local_server.backends.mock-s3]
+      url = "https://mock-s3.edgecompute.app"
+      override_host = "mock-s3.edgecompute.app"
+
+[scripts]
+  build = "cargo build --bin esi_example_variants --release --target wasm32-wasi --color always"
+
+[setup]
+
+  [setup.backends]
+
+    [setup.backends.mock-s3]
+      address = "mock-s3.edgecompute.app"
+      port = 443
