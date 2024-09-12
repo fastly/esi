@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>My Broken Website</title>
+  </head>
+  <body>
+    <header style="background: #f1f1f1; padding: 16px">
+      <h1>My Broken Website</h1>
+    </header>
+    <p>There is <em>some</em> valid content on this page, like the text you're reading right now.</p>
+    <p>But watch this... I'm about to include an ESI fragment that does not exist:</p>
+    <esi:include src="/_fragments/doesnotexist.html"/>
+    <p>If you're seeing this text in the browser, then something is broken.</p>
+  </body>
+</html>
