@@ -23,9 +23,38 @@ pub use crate::error::ExecutionError;
 // re-export quick_xml Reader and Writer
 pub use quick_xml::{Reader, Writer};
 
-type FragmentRequestDispatcher = dyn Fn(Request) -> Result<Option<PendingRequest>>;
+type FragmentRequestDispatcher = dyn Fn(Request) -> Result<PendingFragmentContent>;
 
 type FragmentResponseProcessor = dyn Fn(&mut Request, Response) -> Result<Response>;
+
+/// Representation of a fragment that is either being fetched, has already been fetched (or generated synthetically), or skipped.
+pub enum PendingFragmentContent {
+    PendingRequest(PendingRequest),
+    CompletedRequest(Response),
+    NoContent,
+}
+
+impl From<PendingRequest> for PendingFragmentContent {
+    fn from(value: PendingRequest) -> Self {
+        Self::PendingRequest(value)
+    }
+}
+
+impl From<Response> for PendingFragmentContent {
+    fn from(value: Response) -> Self {
+        Self::CompletedRequest(value)
+    }
+}
+
+impl PendingFragmentContent {
+    fn wait_for_content(self) -> Result<Response> {
+        Ok(match self {
+            Self::PendingRequest(pending_request) => pending_request.wait()?,
+            Self::CompletedRequest(response) => response,
+            Self::NoContent => Response::from_status(StatusCode::NO_CONTENT),
+        })
+    }
+}
 
 /// An instance of the ESI processor with a given configuration.
 pub struct Processor {
@@ -100,7 +129,7 @@ impl Processor {
                     .unwrap_or_else(|| panic!("no host in request: {}", req.get_url()))
                     .to_string();
                 let pending_req = req.send_async(backend)?;
-                Ok(Some(pending_req))
+                Ok(pending_req.into())
             }
         });
 
@@ -220,13 +249,13 @@ fn process_include(
         mut request,
         alt,
         continue_on_error,
-        pending_request,
+        pending_content,
     } = fragment;
 
     // wait for `<esi:include>` request to complete
-    let resp = match pending_request.wait() {
+    let resp = match pending_content.wait_for_content() {
         Ok(r) => r,
-        Err(err) => return Err(ExecutionError::RequestError(err)),
+        Err(err) => return Err(err),
     };
 
     let processed_resp = if let Some(process_response) = process_fragment_response {
@@ -505,23 +534,13 @@ fn send_fragment_request(
 
     let request = req.clone_without_body();
 
-    let pending_request = match dispatch_request(req) {
-        Ok(Some(req)) => req,
-        Ok(None) => {
-            debug!("No pending request returned, skipping");
-            return Ok(None);
-        }
-        Err(err) => {
-            error!("Failed to dispatch request: {:?}", err);
-            return Err(err);
-        }
-    };
+    let pending_content: PendingFragmentContent = dispatch_request(req)?;
 
     Ok(Some(Fragment {
         request,
         alt,
         continue_on_error,
-        pending_request,
+        pending_content,
     }))
 }
 

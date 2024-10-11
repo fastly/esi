@@ -39,7 +39,7 @@ fn handle_request(req: Request) -> Result<(), Error> {
             None,
             Some(&|req| {
                 info!("Sending request {} {}", req.get_method(), req.get_path());
-                Ok(Some(req.with_ttl(120).send_async("mock-s3")?))
+                Ok(req.with_ttl(120).send_async("mock-s3")?.into())
             }),
             Some(&|req, resp| {
                 info!(

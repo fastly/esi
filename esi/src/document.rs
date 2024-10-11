@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
-use crate::Result;
-use fastly::{http::request::PendingRequest, Request};
+use crate::{PendingFragmentContent, Result};
+use fastly::Request;
 use quick_xml::Writer;
 
 pub struct Fragment {
@@ -11,8 +11,8 @@ pub struct Fragment {
     pub(crate) alt: Option<Result<Request>>,
     // Whether to continue on error
     pub(crate) continue_on_error: bool,
-    // The pending request, which can be polled to retrieve the response
-    pub(crate) pending_request: PendingRequest,
+    // The pending fragment response, which can be polled to retrieve the content
+    pub(crate) pending_content: PendingFragmentContent,
 }
 
 /// `Task` is combining raw data and an include fragment for both `attempt` and `except` arms
