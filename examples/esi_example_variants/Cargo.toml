@@ -1,16 +1,13 @@
 [package]
-name = "esi_try_example"
+name = "esi_example_variants"
 version.workspace = true
 authors.workspace = true
 license.workspace = true
 edition.workspace = true
 publish = false
 
-[profile.release]
-debug = 1
-
 [dependencies]
 fastly = "^0.11"
 esi = { path = "../../esi" }
 log = "^0.4"
-env_logger = "0.11.3"
+env_logger = "^0.11"

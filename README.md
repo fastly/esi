@@ -52,7 +52,7 @@ fn handle_request(req: Request) -> Result<(), Error> {
             // of the request URL will be used as the backend name.
             Some(&|req| {
                 println!("Sending request {} {}", req.get_method(), req.get_path());
-                Ok(Some(req.with_ttl(120).send_async("mock-s3")?))
+                Ok(req.with_ttl(120).send_async("mock-s3")?.into())
             }),
             // Optionally provide a method to process fragment responses before they
             // are streamed to the client.
