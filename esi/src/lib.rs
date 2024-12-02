@@ -13,12 +13,11 @@ use log::{debug, error, trace};
 use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 
+pub use crate::config::{Configuration, TagNames};
 pub use crate::document::{Element, Fragment};
+pub use crate::error::ExecutionError;
 pub use crate::error::Result;
 pub use crate::parse::{parse_tags, Event, Include, Tag, Tag::Try};
-
-pub use crate::config::Configuration;
-pub use crate::error::ExecutionError;
 
 // re-export quick_xml Reader and Writer
 pub use quick_xml::{Reader, Writer};
@@ -147,7 +146,7 @@ impl Processor {
         // on each tag / event it finds in the document.
         // The callback function `handle_events` will handle the event.
         parse_tags(
-            &self.configuration.namespace,
+            &self.configuration.tag_names,
             &mut src_document,
             &mut |event| {
                 event_receiver(

@@ -1,4 +1,4 @@
-use esi::{parse_tags, Event, ExecutionError, Tag};
+use esi::{parse_tags, Event, ExecutionError, Tag, TagNames};
 use quick_xml::Reader;
 
 use std::sync::Once;
@@ -17,20 +17,24 @@ fn parse_basic_include() -> Result<(), ExecutionError> {
     let input = "<html><body><esi:include src=\"https://example.com/hello\"/></body></html>";
     let mut parsed = false;
 
-    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
-        if let Event::ESI(Tag::Include {
-            src,
-            alt,
-            continue_on_error,
-        }) = event
-        {
-            assert_eq!(src, "https://example.com/hello");
-            assert_eq!(alt, None);
-            assert!(!continue_on_error);
-            parsed = true;
-        }
-        Ok(())
-    })?;
+    parse_tags(
+        &Default::default(),
+        &mut Reader::from_str(input),
+        &mut |event| {
+            if let Event::ESI(Tag::Include {
+                src,
+                alt,
+                continue_on_error,
+            }) = event
+            {
+                assert_eq!(src, "https://example.com/hello");
+                assert_eq!(alt, None);
+                assert!(!continue_on_error);
+                parsed = true;
+            }
+            Ok(())
+        },
+    )?;
 
     assert!(parsed);
 
@@ -44,20 +48,24 @@ fn parse_advanced_include_with_namespace() -> Result<(), ExecutionError> {
     let input = "<app:include src=\"abc\" alt=\"def\" onerror=\"continue\"/>";
     let mut parsed = false;
 
-    parse_tags("app", &mut Reader::from_str(input), &mut |event| {
-        if let Event::ESI(Tag::Include {
-            src,
-            alt,
-            continue_on_error,
-        }) = event
-        {
-            assert_eq!(src, "abc");
-            assert_eq!(alt, Some("def".to_string()));
-            assert!(continue_on_error);
-            parsed = true;
-        }
-        Ok(())
-    })?;
+    parse_tags(
+        &TagNames::from_namespace_with_defaults("app"),
+        &mut Reader::from_str(input),
+        &mut |event| {
+            if let Event::ESI(Tag::Include {
+                src,
+                alt,
+                continue_on_error,
+            }) = event
+            {
+                assert_eq!(src, "abc");
+                assert_eq!(alt, Some("def".to_string()));
+                assert!(continue_on_error);
+                parsed = true;
+            }
+            Ok(())
+        },
+    )?;
 
     assert!(parsed);
 
@@ -71,20 +79,24 @@ fn parse_open_include() -> Result<(), ExecutionError> {
     let input = "<esi:include src=\"abc\" alt=\"def\" onerror=\"continue\"></esi:include>";
     let mut parsed = false;
 
-    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
-        if let Event::ESI(Tag::Include {
-            src,
-            alt,
-            continue_on_error,
-        }) = event
-        {
-            assert_eq!(src, "abc");
-            assert_eq!(alt, Some("def".to_string()));
-            assert!(continue_on_error);
-            parsed = true;
-        }
-        Ok(())
-    })?;
+    parse_tags(
+        &Default::default(),
+        &mut Reader::from_str(input),
+        &mut |event| {
+            if let Event::ESI(Tag::Include {
+                src,
+                alt,
+                continue_on_error,
+            }) = event
+            {
+                assert_eq!(src, "abc");
+                assert_eq!(alt, Some("def".to_string()));
+                assert!(continue_on_error);
+                parsed = true;
+            }
+            Ok(())
+        },
+    )?;
 
     assert!(parsed);
 
@@ -97,7 +109,11 @@ fn parse_invalid_include() -> Result<(), ExecutionError> {
 
     let input = "<esi:include/>";
 
-    let res = parse_tags("esi", &mut Reader::from_str(input), &mut |_| Ok(()));
+    let res = parse_tags(
+        &Default::default(),
+        &mut Reader::from_str(input),
+        &mut |_| Ok(()),
+    );
 
     assert!(matches!(
         res,
@@ -114,21 +130,25 @@ fn parse_basic_include_with_onerror() -> Result<(), ExecutionError> {
     let input = "<esi:include src=\"/_fragments/content.html\" onerror=\"continue\"/>";
     let mut parsed = false;
 
-    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
-        if let Event::ESI(Tag::Include {
-            src,
-            alt,
-            continue_on_error,
-        }) = event
-        {
-            assert_eq!(src, "/_fragments/content.html");
-            assert_eq!(alt, None);
-            assert!(continue_on_error);
-            parsed = true;
-        }
+    parse_tags(
+        &Default::default(),
+        &mut Reader::from_str(input),
+        &mut |event| {
+            if let Event::ESI(Tag::Include {
+                src,
+                alt,
+                continue_on_error,
+            }) = event
+            {
+                assert_eq!(src, "/_fragments/content.html");
+                assert_eq!(alt, None);
+                assert!(continue_on_error);
+                parsed = true;
+            }
 
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
 
     assert!(parsed);
 
@@ -142,20 +162,24 @@ fn parse_try_accept_only_include() -> Result<(), ExecutionError> {
     let input = "<esi:try><esi:attempt><esi:include src=\"abc\" alt=\"def\" onerror=\"continue\"/></esi:attempt></esi:try>";
     let mut parsed = false;
 
-    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
-        if let Event::ESI(Tag::Include {
-            src,
-            alt,
-            continue_on_error,
-        }) = event
-        {
-            assert_eq!(src, "abc");
-            assert_eq!(alt, Some("def".to_string()));
-            assert!(continue_on_error);
-            parsed = true;
-        }
-        Ok(())
-    })?;
+    parse_tags(
+        &Default::default(),
+        &mut Reader::from_str(input),
+        &mut |event| {
+            if let Event::ESI(Tag::Include {
+                src,
+                alt,
+                continue_on_error,
+            }) = event
+            {
+                assert_eq!(src, "abc");
+                assert_eq!(alt, Some("def".to_string()));
+                assert!(continue_on_error);
+                parsed = true;
+            }
+            Ok(())
+        },
+    )?;
 
     assert!(!parsed);
 
@@ -181,56 +205,60 @@ fn parse_try_accept_except_include() -> Result<(), ExecutionError> {
     let mut accept_include_parsed = false;
     let mut except_include_parsed = false;
 
-    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
-        println!("Event - {event:?}");
-        if let Event::ESI(Tag::Include {
-            ref src,
-            ref alt,
-            ref continue_on_error,
-        }) = event
-        {
-            assert_eq!(src, &"/foo");
-            assert_eq!(alt, &None);
-            assert!(!continue_on_error);
-            plain_include_parsed = true;
-        }
-        if let Event::ESI(Tag::Try {
-            attempt_events,
-            except_events,
-        }) = event
-        {
-            // process accept tasks
-            for attempt_event in attempt_events {
-                if let Event::ESI(Tag::Include {
-                    src,
-                    alt,
-                    continue_on_error,
-                }) = attempt_event
-                {
-                    assert_eq!(src, "/abc");
-                    assert_eq!(alt, None);
-                    assert!(!continue_on_error);
-                    accept_include_parsed = true;
+    parse_tags(
+        &Default::default(),
+        &mut Reader::from_str(input),
+        &mut |event| {
+            println!("Event - {event:?}");
+            if let Event::ESI(Tag::Include {
+                ref src,
+                ref alt,
+                ref continue_on_error,
+            }) = event
+            {
+                assert_eq!(src, &"/foo");
+                assert_eq!(alt, &None);
+                assert!(!continue_on_error);
+                plain_include_parsed = true;
+            }
+            if let Event::ESI(Tag::Try {
+                attempt_events,
+                except_events,
+            }) = event
+            {
+                // process accept tasks
+                for attempt_event in attempt_events {
+                    if let Event::ESI(Tag::Include {
+                        src,
+                        alt,
+                        continue_on_error,
+                    }) = attempt_event
+                    {
+                        assert_eq!(src, "/abc");
+                        assert_eq!(alt, None);
+                        assert!(!continue_on_error);
+                        accept_include_parsed = true;
+                    }
+                }
+                // process except tasks
+                for except_event in except_events {
+                    if let Event::ESI(Tag::Include {
+                        src,
+                        alt,
+                        continue_on_error,
+                    }) = except_event
+                    {
+                        assert_eq!(src, "/xyz");
+                        assert_eq!(alt, None);
+                        assert!(!continue_on_error);
+                        except_include_parsed = true;
+                    }
                 }
             }
-            // process except tasks
-            for except_event in except_events {
-                if let Event::ESI(Tag::Include {
-                    src,
-                    alt,
-                    continue_on_error,
-                }) = except_event
-                {
-                    assert_eq!(src, "/xyz");
-                    assert_eq!(alt, None);
-                    assert!(!continue_on_error);
-                    except_include_parsed = true;
-                }
-            }
-        }
 
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
 
     assert!(!plain_include_parsed);
     assert!(accept_include_parsed);
@@ -266,79 +294,83 @@ fn parse_try_nested() -> Result<(), ExecutionError> {
     let mut accept_include_parsed_level2 = false;
     let mut except_include_parsed_level2 = false;
 
-    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
-        assert_eq!(
-            format!("{event:?}"),
-            r#"ESI(Try { attempt_events: [XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/abc", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA        ") })), XML(Text(BytesText { content: Owned("0xA            ") })), XML(Text(BytesText { content: Owned("0xA                ") })), XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Try { attempt_events: [XML(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/foo", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA            ") }))], except_events: [XML(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/bar", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA                ") }))] }), XML(Text(BytesText { content: Owned("0xA    ") }))], except_events: [XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/xyz", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA        ") })), XML(Empty(BytesStart { buf: Owned("a href=\"/efg\""), name_len: 1 })), XML(Text(BytesText { content: Owned("0xA        just text0xA    ") }))] })"#
-        );
-        if let Event::ESI(Tag::Try {
-            attempt_events,
-            except_events,
-        }) = event
-        {
-            for event in attempt_events {
-                if let Event::ESI(Tag::Include {
-                    ref src,
-                    ref alt,
-                    ref continue_on_error,
-                }) = event
-                {
-                    assert_eq!(src, &"/abc");
-                    assert_eq!(alt, &None);
-                    assert!(!continue_on_error);
-                    accept_include_parsed_level1 = true;
-                }
-                if let Event::ESI(Tag::Try {
-                    attempt_events,
-                    except_events,
-                }) = event
-                {
-                    for event in attempt_events {
-                        if let Event::ESI(Tag::Include {
-                            ref src,
-                            ref alt,
-                            ref continue_on_error,
-                        }) = event
-                        {
-                            assert_eq!(src, &"/foo");
-                            assert_eq!(alt, &None);
-                            assert!(!continue_on_error);
-                            accept_include_parsed_level2 = true;
+    parse_tags(
+        &Default::default(),
+        &mut Reader::from_str(input),
+        &mut |event| {
+            assert_eq!(
+                format!("{event:?}"),
+                r#"ESI(Try { attempt_events: [XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/abc", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA        ") })), XML(Text(BytesText { content: Owned("0xA            ") })), XML(Text(BytesText { content: Owned("0xA                ") })), XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Try { attempt_events: [XML(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/foo", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA            ") }))], except_events: [XML(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/bar", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA                ") }))] }), XML(Text(BytesText { content: Owned("0xA    ") }))], except_events: [XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/xyz", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA        ") })), XML(Empty(BytesStart { buf: Owned("a href=\"/efg\""), name_len: 1 })), XML(Text(BytesText { content: Owned("0xA        just text0xA    ") }))] })"#
+            );
+            if let Event::ESI(Tag::Try {
+                attempt_events,
+                except_events,
+            }) = event
+            {
+                for event in attempt_events {
+                    if let Event::ESI(Tag::Include {
+                        ref src,
+                        ref alt,
+                        ref continue_on_error,
+                    }) = event
+                    {
+                        assert_eq!(src, &"/abc");
+                        assert_eq!(alt, &None);
+                        assert!(!continue_on_error);
+                        accept_include_parsed_level1 = true;
+                    }
+                    if let Event::ESI(Tag::Try {
+                        attempt_events,
+                        except_events,
+                    }) = event
+                    {
+                        for event in attempt_events {
+                            if let Event::ESI(Tag::Include {
+                                ref src,
+                                ref alt,
+                                ref continue_on_error,
+                            }) = event
+                            {
+                                assert_eq!(src, &"/foo");
+                                assert_eq!(alt, &None);
+                                assert!(!continue_on_error);
+                                accept_include_parsed_level2 = true;
+                            }
+                        }
+                        for event in except_events {
+                            if let Event::ESI(Tag::Include {
+                                ref src,
+                                ref alt,
+                                ref continue_on_error,
+                            }) = event
+                            {
+                                assert_eq!(src, &"/bar");
+                                assert_eq!(alt, &None);
+                                assert!(!continue_on_error);
+                                except_include_parsed_level2 = true;
+                            }
                         }
                     }
-                    for event in except_events {
-                        if let Event::ESI(Tag::Include {
-                            ref src,
-                            ref alt,
-                            ref continue_on_error,
-                        }) = event
-                        {
-                            assert_eq!(src, &"/bar");
-                            assert_eq!(alt, &None);
-                            assert!(!continue_on_error);
-                            except_include_parsed_level2 = true;
-                        }
+                }
+
+                for event in except_events {
+                    if let Event::ESI(Tag::Include {
+                        ref src,
+                        ref alt,
+                        ref continue_on_error,
+                    }) = event
+                    {
+                        assert_eq!(src, &"/xyz");
+                        assert_eq!(alt, &None);
+                        assert!(!continue_on_error);
+                        except_include_parsed_level1 = true;
                     }
                 }
             }
 
-            for event in except_events {
-                if let Event::ESI(Tag::Include {
-                    ref src,
-                    ref alt,
-                    ref continue_on_error,
-                }) = event
-                {
-                    assert_eq!(src, &"/xyz");
-                    assert_eq!(alt, &None);
-                    assert!(!continue_on_error);
-                    except_include_parsed_level1 = true;
-                }
-            }
-        }
-
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
 
     assert!(accept_include_parsed_level1);
     assert!(accept_include_parsed_level2);

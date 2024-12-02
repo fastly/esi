@@ -1,4 +1,4 @@
-use crate::{ExecutionError, Result};
+use crate::{ExecutionError, Result, TagNames};
 use log::debug;
 use quick_xml::events::{BytesStart, Event as XmlEvent};
 use quick_xml::name::QName;
@@ -41,28 +41,6 @@ pub enum Tag<'a> {
 pub enum Event<'e> {
     XML(XmlEvent<'e>),
     ESI(Tag<'e>),
-}
-
-// #[derive(Debug)]
-struct TagNames {
-    include: Vec<u8>,
-    comment: Vec<u8>,
-    remove: Vec<u8>,
-    r#try: Vec<u8>,
-    attempt: Vec<u8>,
-    except: Vec<u8>,
-}
-impl TagNames {
-    fn init(namespace: &str) -> Self {
-        Self {
-            include: format!("{namespace}:include",).into_bytes(),
-            comment: format!("{namespace}:comment",).into_bytes(),
-            remove: format!("{namespace}:remove",).into_bytes(),
-            r#try: format!("{namespace}:try",).into_bytes(),
-            attempt: format!("{namespace}:attempt",).into_bytes(),
-            except: format!("{namespace}:except",).into_bytes(),
-        }
-    }
 }
 
 fn do_parse<'a, R>(
@@ -185,7 +163,7 @@ where
 
 /// Parses the ESI document from the given `reader` and calls the `callback` closure upon each successfully parsed ESI tag.
 pub fn parse_tags<'a, R>(
-    namespace: &str,
+    tag_names: &TagNames,
     reader: &mut Reader<R>,
     callback: &mut dyn FnMut(Event<'a>) -> Result<()>,
 ) -> Result<()>
@@ -194,8 +172,6 @@ where
 {
     debug!("Parsing document...");
 
-    // Initialize the ESI tags
-    let tags = TagNames::init(namespace);
     // set the initial depth of nested tags
     let mut depth = 0;
     let mut root = Vec::new();
@@ -208,7 +184,7 @@ where
         &mut root,
         &mut depth,
         &mut current_arm,
-        &tags,
+        tag_names,
     )?;
     debug!("Root: {:?}", root);
 
