@@ -449,6 +449,10 @@ fn event_receiver(
                 except_task,
             });
         }
+
+        Event::ESI(Tag::Assign { name, value }) => {
+            // process assignment
+        }
         Event::XML(event) => {
             debug!("pushing content to buffer, len: {}", queue.len());
             let mut buf = vec![];

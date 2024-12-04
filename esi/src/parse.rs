@@ -33,6 +33,10 @@ pub enum Tag<'a> {
         attempt_events: Vec<Event<'a>>,
         except_events: Vec<Event<'a>>,
     },
+    Assign {
+        name: String,
+        value: String,
+    },
 }
 
 /// Representation of either XML data or a parsed ESI tag.
@@ -51,6 +55,7 @@ struct TagNames {
     r#try: Vec<u8>,
     attempt: Vec<u8>,
     except: Vec<u8>,
+    assign: Vec<u8>,
 }
 impl TagNames {
     fn init(namespace: &str) -> Self {
@@ -61,6 +66,7 @@ impl TagNames {
             r#try: format!("{namespace}:try",).into_bytes(),
             attempt: format!("{namespace}:attempt",).into_bytes(),
             except: format!("{namespace}:except",).into_bytes(),
+            assign: format!("{namespace}:assign",).into_bytes(),
         }
     }
 }
@@ -78,6 +84,7 @@ where
 {
     let mut is_remove_tag = false;
     let mut open_include = false;
+    let mut open_assign = false;
 
     let attempt_events = &mut Vec::new();
     let except_events = &mut Vec::new();
@@ -166,6 +173,24 @@ where
                 return Ok(());
             }
 
+            // Handle <esi:assign> tags, and ignore the contents if they are not self-closing
+            Ok(XmlEvent::Empty(e)) if e.name().into_inner().starts_with(&tag.assign) => {
+                assign_tag_handler(&e, callback, task, *depth)?;
+            }
+
+            Ok(XmlEvent::Start(e)) if e.name().into_inner().starts_with(&tag.assign) => {
+                open_assign = true;
+                assign_tag_handler(&e, callback, task, *depth)?;
+            }
+
+            Ok(XmlEvent::End(e)) if e.name().into_inner().starts_with(&tag.assign) => {
+                if !open_assign {
+                    return unexpected_closing_tag_error(&e);
+                }
+
+                open_assign = false;
+            }
+
             Ok(XmlEvent::Eof) => {
                 debug!("End of document");
                 break;
@@ -249,6 +274,38 @@ fn parse_include<'a>(elem: &BytesStart) -> Result<Tag<'a>> {
     })
 }
 
+fn parse_assign<'a>(elem: &BytesStart) -> Result<Tag<'a>> {
+    let name = match elem
+        .attributes()
+        .flatten()
+        .find(|attr| attr.key.into_inner() == b"name")
+    {
+        Some(attr) => String::from_utf8(attr.value.to_vec()).unwrap(),
+        None => {
+            return Err(ExecutionError::MissingRequiredParameter(
+                String::from_utf8(elem.name().into_inner().to_vec()).unwrap(),
+                "name".to_string(),
+            ));
+        }
+    };
+
+    let value = match elem
+        .attributes()
+        .flatten()
+        .find(|attr| attr.key.into_inner() == b"value")
+    {
+        Some(attr) => String::from_utf8(attr.value.to_vec()).unwrap(),
+        None => {
+            return Err(ExecutionError::MissingRequiredParameter(
+                String::from_utf8(elem.name().into_inner().to_vec()).unwrap(),
+                "value".to_string(),
+            ));
+        }
+    };
+
+    Ok(Tag::Assign { name, value })
+}
+
 // Helper function to handle the end of a <esi:try> tag
 // If the depth is 1, the `callback` closure is called with the `Tag::Try` event
 // Otherwise, a new `Tag::Try` event is pushed to the `task` vector
@@ -287,6 +344,24 @@ fn include_tag_handler<'e>(
         callback(Event::ESI(parse_include(elem)?))?;
     } else {
         task.push(Event::ESI(parse_include(elem)?));
+    }
+
+    Ok(())
+}
+
+// Helper function to handle <esi:assign> tags
+// If the depth is 0, the `callback` closure is called with the `Tag::Assign` event
+// Otherwise, a new `Tag::Assign` event is pushed to the `task` vector
+fn assign_tag_handler<'e>(
+    elem: &BytesStart,
+    callback: &mut dyn FnMut(Event<'e>) -> Result<()>,
+    task: &mut Vec<Event<'e>>,
+    depth: usize,
+) -> Result<()> {
+    if depth == 0 {
+        callback(Event::ESI(parse_assign(elem)?))?;
+    } else {
+        task.push(Event::ESI(parse_assign(elem)?));
     }
 
     Ok(())

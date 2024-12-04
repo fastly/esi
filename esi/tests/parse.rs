@@ -347,3 +347,25 @@ fn parse_try_nested() -> Result<(), ExecutionError> {
 
     Ok(())
 }
+
+#[test]
+fn parse_assign() -> Result<(), ExecutionError> {
+    setup();
+
+    let input = "<esi:assign name=\"foo\" value=\"bar\">";
+    let mut parsed = false;
+
+    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
+        if let Event::ESI(Tag::Assign { name, value }) = event {
+            assert_eq!(name, "foo");
+            assert_eq!(value, "bar");
+            parsed = true;
+        }
+
+        Ok(())
+    })?;
+
+    assert!(parsed);
+
+    Ok(())
+}
