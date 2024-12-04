@@ -10,7 +10,7 @@ use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
 use log::{debug, error, trace};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
 
 pub use crate::document::{Element, Fragment};
@@ -142,6 +142,9 @@ impl Processor {
         // `root_task` is the root task that will be used to fetch tags in recursive manner
         let root_task = &mut Task::new();
 
+        // variables
+        let mut variables = HashMap::new();
+
         let is_escaped = self.configuration.is_escaped_content;
         // Call the library to parse fn `parse_tags` which will call the callback function
         // on each tag / event it finds in the document.
@@ -156,6 +159,7 @@ impl Processor {
                     is_escaped,
                     &original_request_metadata,
                     dispatch_fragment_request,
+                    &mut variables,
                 )
             },
         )?;
@@ -393,6 +397,7 @@ fn event_receiver(
     is_escaped: bool,
     original_request_metadata: &Request,
     dispatch_fragment_request: &FragmentRequestDispatcher,
+    variables: &mut HashMap<String, String>,
 ) -> Result<()> {
     debug!("got {:?}", event);
 
@@ -430,12 +435,14 @@ fn event_receiver(
                 is_escaped,
                 original_request_metadata,
                 dispatch_fragment_request,
+                variables,
             )?;
             let except_task = task_handler(
                 except_events,
                 is_escaped,
                 original_request_metadata,
                 dispatch_fragment_request,
+                variables,
             )?;
 
             trace!(
@@ -450,10 +457,17 @@ fn event_receiver(
             });
         }
         Event::ESI(Tag::Assign { name, value }) => {
-            // process assignment
+            variables.insert(name, value);
         }
         Event::ESI(Tag::Vars { name }) => {
-            // process vars
+            if let Some(name) = name {
+                if let Some(value) = variables.get(&name) {
+                    let value = value.to_owned();
+                    queue.push_back(Element::Raw(value.into_bytes()));
+                }
+            } else {
+                // TODO: long form
+            }
         }
         Event::XML(event) => {
             debug!("pushing content to buffer, len: {}", queue.len());
@@ -473,6 +487,7 @@ fn task_handler(
     is_escaped: bool,
     original_request_metadata: &Request,
     dispatch_fragment_request: &FragmentRequestDispatcher,
+    variables: &mut HashMap<String, String>,
 ) -> Result<Task> {
     let mut task = Task::new();
     for event in events {
@@ -482,6 +497,7 @@ fn task_handler(
             is_escaped,
             original_request_metadata,
             dispatch_fragment_request,
+            variables,
         )?;
     }
     Ok(task)

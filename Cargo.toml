@@ -5,6 +5,7 @@ members = [
     "examples/esi_example_minimal",
     "examples/esi_example_advanced_error_handling",
     "examples/esi_try_example",
+    "examples/esi_vars_example",
 ]
 
 [workspace.package]
