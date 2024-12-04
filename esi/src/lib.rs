@@ -10,6 +10,7 @@ use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
 use log::{debug, error, trace};
+use quick_xml::events::Event as XmlEvent;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
 
@@ -468,6 +469,39 @@ fn event_receiver(
             } else {
                 // TODO: long form
             }
+        }
+        Event::VarsContent(event) => {
+            let mut buf = vec![];
+            let mut cur = event.iter().peekable();
+            while let Some(c) = cur.next() {
+                if *c == b'$' {
+                    if cur.peek() == Some(&&b'(') {
+                        println!("Found a variable!");
+                        cur.next();
+
+                        let mut varbuf = vec![];
+                        while let Some(vc) = cur.next() {
+                            if *vc == b')' {
+                                break;
+                            }
+                            varbuf.push(*vc)
+                        }
+
+                        match String::from_utf8(varbuf) {
+                            Ok(name) => {
+                                if let Some(value) = variables.get(&name) {
+                                    let value = value.to_owned();
+                                    queue.push_back(Element::Raw(value.into_bytes()));
+                                }
+                            }
+                            Err(e) => println!("Failed to parse variable: {}", e),
+                        }
+                    }
+                } else {
+                    buf.push(*c);
+                }
+            }
+            queue.push_back(Element::Raw(buf));
         }
         Event::XML(event) => {
             debug!("pushing content to buffer, len: {}", queue.len());

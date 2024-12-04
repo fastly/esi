@@ -47,6 +47,7 @@ pub enum Tag<'a> {
 #[allow(clippy::upper_case_acronyms)]
 pub enum Event<'e> {
     XML(XmlEvent<'e>),
+    VarsContent(XmlEvent<'e>),
     ESI(Tag<'e>),
 }
 
@@ -220,10 +221,15 @@ where
                 break;
             }
             Ok(e) => {
-                if *depth == 0 {
-                    callback(Event::XML(e.into_owned()))?;
+                let event = if open_vars {
+                    Event::VarsContent(e.into_owned())
                 } else {
-                    task.push(Event::XML(e.into_owned()));
+                    Event::XML(e.into_owned())
+                };
+                if *depth == 0 {
+                    callback(event)?;
+                } else {
+                    task.push(event);
                 }
             }
             _ => {}
