@@ -8,15 +8,26 @@
       <h1>My Variable Website</h1>
     </header>
     <div class="layout" style="display: flex">
-      Assigning "YES" to variable...<br>
-      <esi:assign name="test" value="YES" />
+      Assigning "YES" to variable $test...<br>
+      <esi:assign name="test" value="'YES'" />
       Check (short form): YES=<esi:vars name="test" /><br>
       Check (long form): YES=<esi:vars>$(test)</esi:vars><br>
-      
-      Updating variable to "PERHAPS"...<br>
-      <esi:assign name="test" value="PERHAPS" />
+      <br>
+      Updating variable $test to "PERHAPS"...<br>
+      <esi:assign name="test" value="'PERHAPS'" />
       Check (short form): PERHAPS=<esi:vars name="test" /><br>
       Check (long form): PERHAPS=<esi:vars>$(test)</esi:vars><br>
+      <br>
+      Setting variable $test2 to $test...<br>
+      <esi:assign name="test2" value="$(test)" />
+      Check (short form): PERHAPS=<esi:vars name="test2" /><br>
+      Check (long form): PERHAPS=<esi:vars>$(test2)</esi:vars><br>
+      <br>
+      Setting variable $test3 to a syntax error...<br>
+      <esi:assign name="test3" value="$(t(est_)))" />
+      Check (short form): (EMPTY)=<esi:vars name="test3" />(EMPTY)<br>
+      Check (long form): (EMPTY)=<esi:vars>$(test3)</esi:vars>(EMPTY)<br>
+
       
     </div>
   </body>

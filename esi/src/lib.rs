@@ -3,14 +3,15 @@
 mod config;
 mod document;
 mod error;
+mod expression;
 mod parse;
 
 use document::{FetchState, Task};
+use expression::{evaluate_expression, EvalContext, EvalResult};
 use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
 use log::{debug, error, trace};
-use quick_xml::events::Event as XmlEvent;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
 
@@ -458,7 +459,16 @@ fn event_receiver(
             });
         }
         Event::ESI(Tag::Assign { name, value }) => {
-            variables.insert(name, value);
+            let result = evaluate_expression(value, EvalContext::new(&variables))?;
+            match result {
+                EvalResult::String(s) => {
+                    variables.insert(name, s);
+                }
+                EvalResult::Error(e) => {
+                    println!("Error {} while parsing expression, ignoring.", e);
+                    // do nothing
+                }
+            }
         }
         Event::ESI(Tag::Vars { name }) => {
             if let Some(name) = name {

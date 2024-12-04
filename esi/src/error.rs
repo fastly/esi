@@ -41,6 +41,10 @@ pub enum ExecutionError {
     /// Writer error
     #[error("writer error: {0}")]
     WriterError(#[from] std::io::Error),
+
+    /// Expression parse error
+    #[error("expression failed to parse: `{0}`")]
+    ExpressionParseError(String),
 }
 
 pub type Result<T> = std::result::Result<T, ExecutionError>;
