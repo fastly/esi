@@ -449,9 +449,11 @@ fn event_receiver(
                 except_task,
             });
         }
-
         Event::ESI(Tag::Assign { name, value }) => {
             // process assignment
+        }
+        Event::ESI(Tag::Vars { name }) => {
+            // process vars
         }
         Event::XML(event) => {
             debug!("pushing content to buffer, len: {}", queue.len());

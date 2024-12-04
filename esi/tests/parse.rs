@@ -369,3 +369,45 @@ fn parse_assign() -> Result<(), ExecutionError> {
 
     Ok(())
 }
+
+#[test]
+fn parse_vars_short() -> Result<(), ExecutionError> {
+    setup();
+
+    let input = "<esi:vars name=\"foo\">";
+    let mut parsed = false;
+
+    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
+        if let Event::ESI(Tag::Vars { name }) = event {
+            assert_eq!(name, Some("foo".to_string()));
+            parsed = true;
+        }
+
+        Ok(())
+    })?;
+
+    assert!(parsed);
+
+    Ok(())
+}
+
+#[test]
+fn parse_vars_long() -> Result<(), ExecutionError> {
+    setup();
+
+    let input = "<esi:vars>$(foo)</esi:vars>";
+    let mut parsed = false;
+
+    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
+        if let Event::ESI(Tag::Vars { name }) = event {
+            assert_eq!(name, None);
+            parsed = true;
+        }
+
+        Ok(())
+    })?;
+
+    assert!(parsed);
+
+    Ok(())
+}

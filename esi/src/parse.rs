@@ -37,6 +37,9 @@ pub enum Tag<'a> {
         name: String,
         value: String,
     },
+    Vars {
+        name: Option<String>,
+    },
 }
 
 /// Representation of either XML data or a parsed ESI tag.
@@ -56,6 +59,7 @@ struct TagNames {
     attempt: Vec<u8>,
     except: Vec<u8>,
     assign: Vec<u8>,
+    vars: Vec<u8>,
 }
 impl TagNames {
     fn init(namespace: &str) -> Self {
@@ -67,6 +71,7 @@ impl TagNames {
             attempt: format!("{namespace}:attempt",).into_bytes(),
             except: format!("{namespace}:except",).into_bytes(),
             assign: format!("{namespace}:assign",).into_bytes(),
+            vars: format!("{namespace}:vars",).into_bytes(),
         }
     }
 }
@@ -85,6 +90,7 @@ where
     let mut is_remove_tag = false;
     let mut open_include = false;
     let mut open_assign = false;
+    let mut open_vars = false;
 
     let attempt_events = &mut Vec::new();
     let except_events = &mut Vec::new();
@@ -189,6 +195,24 @@ where
                 }
 
                 open_assign = false;
+            }
+
+            // Handle <esi:vars> tags
+            Ok(XmlEvent::Empty(e)) if e.name().into_inner().starts_with(&tag.vars) => {
+                vars_tag_handler(&e, callback, task, *depth)?;
+            }
+
+            Ok(XmlEvent::Start(e)) if e.name().into_inner().starts_with(&tag.vars) => {
+                open_vars = true;
+                vars_tag_handler(&e, callback, task, *depth)?;
+            }
+
+            Ok(XmlEvent::End(e)) if e.name().into_inner().starts_with(&tag.vars) => {
+                if !open_vars {
+                    return unexpected_closing_tag_error(&e);
+                }
+
+                open_vars = false;
             }
 
             Ok(XmlEvent::Eof) => {
@@ -306,6 +330,16 @@ fn parse_assign<'a>(elem: &BytesStart) -> Result<Tag<'a>> {
     Ok(Tag::Assign { name, value })
 }
 
+fn parse_vars<'a>(elem: &BytesStart) -> Result<Tag<'a>> {
+    let name = elem
+        .attributes()
+        .flatten()
+        .find(|attr| attr.key.into_inner() == b"name")
+        .map(|attr| String::from_utf8(attr.value.to_vec()).unwrap());
+
+    Ok(Tag::Vars { name })
+}
+
 // Helper function to handle the end of a <esi:try> tag
 // If the depth is 1, the `callback` closure is called with the `Tag::Try` event
 // Otherwise, a new `Tag::Try` event is pushed to the `task` vector
@@ -362,6 +396,24 @@ fn assign_tag_handler<'e>(
         callback(Event::ESI(parse_assign(elem)?))?;
     } else {
         task.push(Event::ESI(parse_assign(elem)?));
+    }
+
+    Ok(())
+}
+
+// Helper function to handle <esi:vars> tags
+// If the depth is 0, the `callback` closure is called with the `Tag::Assign` event
+// Otherwise, a new `Tag::Vars` event is pushed to the `task` vector
+fn vars_tag_handler<'e>(
+    elem: &BytesStart,
+    callback: &mut dyn FnMut(Event<'e>) -> Result<()>,
+    task: &mut Vec<Event<'e>>,
+    depth: usize,
+) -> Result<()> {
+    if depth == 0 {
+        callback(Event::ESI(parse_vars(elem)?))?;
+    } else {
+        task.push(Event::ESI(parse_vars(elem)?));
     }
 
     Ok(())
