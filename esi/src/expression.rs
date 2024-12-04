@@ -1,51 +1,41 @@
-use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::Chars;
 
-use crate::{ExecutionError, Result};
+use crate::{ExecutionError, Result, Value, Variables};
 
-pub fn evaluate_expression(raw_expr: String, ctx: EvalContext) -> Result<EvalResult> {
+pub fn evaluate_expression(raw_expr: String, ctx: EvalContext) -> Result<Value> {
     // TODO: this got real ugly, figure out some better way to do this
     let tokens = match lex_expr(raw_expr) {
         Ok(r) => r,
-        Err(ExecutionError::ExpressionParseError(s)) => return Ok(EvalResult::Error(s)),
+        Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
         Err(e) => return Err(e),
     };
     let expr = match parse_expr(tokens) {
         Ok(r) => r,
-        Err(ExecutionError::ExpressionParseError(s)) => return Ok(EvalResult::Error(s)),
+        Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
         Err(e) => return Err(e),
     };
     match eval_expr(expr, ctx) {
         Ok(r) => Ok(r),
-        Err(ExecutionError::ExpressionParseError(s)) => return Ok(EvalResult::Error(s)),
+        Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
         Err(e) => return Err(e),
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum EvalResult {
-    String(String),
-    Error(String),
-}
-
 pub struct EvalContext<'a> {
-    variables: &'a HashMap<String, String>,
+    variables: &'a Variables,
     // request context
 }
 impl EvalContext<'_> {
-    pub fn new(variables: &HashMap<String, String>) -> EvalContext {
+    pub fn new(variables: &Variables) -> EvalContext {
         EvalContext { variables }
     }
 }
 
-fn eval_expr(expr: Expr, ctx: EvalContext) -> Result<EvalResult> {
+fn eval_expr(expr: Expr, ctx: EvalContext) -> Result<Value> {
     let result = match expr {
-        Expr::String(s) => EvalResult::String(s),
-        Expr::Variable(s) => match ctx.variables.get(&s) {
-            Some(value) => EvalResult::String(value.to_owned()),
-            None => EvalResult::String("".to_string()),
-        },
+        Expr::String(s) => Value::String(s),
+        Expr::Variable(s) => ctx.variables.get(&s).clone(),
     };
     Ok(result)
 }
@@ -169,13 +159,8 @@ mod tests {
     #[test]
     fn test_eval_string() -> Result<()> {
         let expr = Expr::String("hello".to_string());
-        let result = eval_expr(
-            expr,
-            EvalContext {
-                variables: &HashMap::new(),
-            },
-        )?;
-        assert_eq!(result, EvalResult::String("hello".to_string()));
+        let result = eval_expr(expr, EvalContext::new(&Variables::new()))?;
+        assert_eq!(result, Value::String("hello".to_string()));
         Ok(())
     }
 
@@ -184,11 +169,12 @@ mod tests {
         let expr = Expr::Variable("hello".to_string());
         let result = eval_expr(
             expr,
-            EvalContext {
-                variables: &HashMap::from([("hello".to_string(), "goodbye".to_string())]),
-            },
+            EvalContext::new(&Variables::from([(
+                "hello".to_string(),
+                Value::String("goodbye".to_string()),
+            )])),
         )?;
-        assert_eq!(result, EvalResult::String("goodbye".to_string()));
+        assert_eq!(result, Value::String("goodbye".to_string()));
         Ok(())
     }
 
@@ -197,12 +183,12 @@ mod tests {
     fn test_evaluation_error() -> Result<()> {
         let result = evaluate_expression(
             "$hello".to_string(),
-            EvalContext::new(&HashMap::from([(
+            EvalContext::new(&Variables::from([(
                 "hello".to_string(),
-                "goodbye".to_string(),
+                Value::String("goodbye".to_string()),
             )])),
         )?;
-        assert_eq!(result, EvalResult::Error("$hello".to_string()));
+        assert_eq!(result, Value::Error("$hello".to_string()));
         Ok(())
     }
 }

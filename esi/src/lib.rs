@@ -5,19 +5,21 @@ mod document;
 mod error;
 mod expression;
 mod parse;
+mod variables;
 
 use document::{FetchState, Task};
-use expression::{evaluate_expression, EvalContext, EvalResult};
+use expression::{evaluate_expression, EvalContext};
 use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
 use log::{debug, error, trace};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 
 pub use crate::document::{Element, Fragment};
 pub use crate::error::Result;
 pub use crate::parse::{parse_tags, Event, Include, Tag, Tag::Try};
+pub use crate::variables::{Value, Variables};
 
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;
@@ -145,7 +147,7 @@ impl Processor {
         let root_task = &mut Task::new();
 
         // variables
-        let mut variables = HashMap::new();
+        let mut variables = Variables::new();
 
         let is_escaped = self.configuration.is_escaped_content;
         // Call the library to parse fn `parse_tags` which will call the callback function
@@ -399,7 +401,7 @@ fn event_receiver(
     is_escaped: bool,
     original_request_metadata: &Request,
     dispatch_fragment_request: &FragmentRequestDispatcher,
-    variables: &mut HashMap<String, String>,
+    variables: &mut Variables,
 ) -> Result<()> {
     debug!("got {:?}", event);
 
@@ -460,24 +462,14 @@ fn event_receiver(
         }
         Event::ESI(Tag::Assign { name, value }) => {
             let result = evaluate_expression(value, EvalContext::new(&variables))?;
-            match result {
-                EvalResult::String(s) => {
-                    variables.insert(name, s);
-                }
-                EvalResult::Error(e) => {
-                    println!("Error {} while parsing expression, ignoring.", e);
-                    // do nothing
-                }
-            }
+            variables.insert(name, result);
         }
         Event::ESI(Tag::Vars { name }) => {
             if let Some(name) = name {
-                if let Some(value) = variables.get(&name) {
-                    let value = value.to_owned();
-                    queue.push_back(Element::Raw(value.into_bytes()));
+                match variables.get(&name) {
+                    &Value::Null => {}
+                    v @ _ => queue.push_back(Element::Raw(v.to_string().into_bytes())),
                 }
-            } else {
-                // TODO: long form
             }
         }
         Event::VarsContent(event) => {
@@ -498,12 +490,10 @@ fn event_receiver(
                         }
 
                         match String::from_utf8(varbuf) {
-                            Ok(name) => {
-                                if let Some(value) = variables.get(&name) {
-                                    let value = value.to_owned();
-                                    queue.push_back(Element::Raw(value.into_bytes()));
-                                }
-                            }
+                            Ok(name) => match variables.get(&name) {
+                                &Value::Null => {}
+                                v @ _ => queue.push_back(Element::Raw(v.to_string().into_bytes())),
+                            },
                             Err(e) => println!("Failed to parse variable: {}", e),
                         }
                     }
@@ -531,7 +521,7 @@ fn task_handler(
     is_escaped: bool,
     original_request_metadata: &Request,
     dispatch_fragment_request: &FragmentRequestDispatcher,
-    variables: &mut HashMap<String, String>,
+    variables: &mut Variables,
 ) -> Result<Task> {
     let mut task = Task::new();
     for event in events {
