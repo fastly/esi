@@ -5,6 +5,7 @@ use std::str::Chars;
 use crate::{ExecutionError, Result};
 
 pub fn evaluate_expression(raw_expr: String, ctx: EvalContext) -> Result<EvalResult> {
+    // TODO: this got real ugly, figure out some better way to do this
     let tokens = match lex_expr(raw_expr) {
         Ok(r) => r,
         Err(ExecutionError::ExpressionParseError(s)) => return Ok(EvalResult::Error(s)),
@@ -95,6 +96,7 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
                         cur.next();
                         result.push(get_variable(&mut cur));
                     }
+                    // TODO: make these errors more useful, i.e. point to the problem
                     _ => return Err(ExecutionError::ExpressionParseError(expr)),
                 }
             }
@@ -106,6 +108,7 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
 }
 
 fn get_string(cur: &mut Peekable<Chars>) -> Token {
+    // TODO: handle escaping
     let mut buf = Vec::new();
 
     while let Some(c) = cur.next() {
@@ -189,6 +192,7 @@ mod tests {
         Ok(())
     }
 
+    // TODO: more negative tests
     #[test]
     fn test_evaluation_error() -> Result<()> {
         let result = evaluate_expression(
