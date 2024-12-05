@@ -395,6 +395,7 @@ fn process_try(
 
 // Receives `Event` from the parser and process it.
 // The result is pushed to a queue of elements or written to the output stream.
+// TODO: combine Variables and Request (and eventually a stdlib object) into a Context
 fn event_receiver(
     event: Event,
     queue: &mut VecDeque<Element>,
@@ -460,6 +461,10 @@ fn event_receiver(
                 except_task,
             });
         }
+        // TODO: For Choose tag, do something like above, but without the task delay aspect
+        //       Collect all the branches in the parser, pass all along with tests here
+        //       Hmm... that might not work actually. I need a way to collect the events for
+        //       each branch and then ... ugh
         Event::ESI(Tag::Assign { name, value }) => {
             let result = evaluate_expression(value, EvalContext::new(&variables))?;
             variables.insert(name, result);
@@ -472,13 +477,20 @@ fn event_receiver(
                 }
             }
         }
+        Event::ESI(Tag::When { .. }) => {
+            println!("THIS SHOULD NEVER APPEAR");
+        }
+        Event::ESI(Tag::Choose { .. }) => {
+            println!("GOT A CHOOSE TAG");
+        }
+
+        // TODO: change to InterpolatedContent
         Event::VarsContent(event) => {
             let mut buf = vec![];
             let mut cur = event.iter().peekable();
             while let Some(c) = cur.next() {
                 if *c == b'$' {
                     if cur.peek() == Some(&&b'(') {
-                        println!("Found a variable!");
                         cur.next();
 
                         let mut varbuf = vec![];

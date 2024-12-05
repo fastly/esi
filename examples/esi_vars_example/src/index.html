@@ -7,7 +7,8 @@
     <header style="background: #f1f1f1; padding: 16px">
       <h1>My Variable Website</h1>
     </header>
-    <div class="layout" style="display: flex">
+    <div>
+      <h3>Variable Tests</h3>
       Assigning "YES" to variable $test...<br>
       <esi:assign name="test" value="'YES'" />
       Check (short form): YES=<esi:vars name="test" /><br>
@@ -28,6 +29,39 @@
       Check (short form): (EMPTY)=<esi:vars name="test3" />(EMPTY)<br>
       Check (long form): (EMPTY)=<esi:vars>$(test3)</esi:vars>(EMPTY)<br>
 
+      <h3>Choose Tests</h3>
+      Simple one branch choose:<br>
+      HELLO=
+      <esi:choose>
+        <esi:when test="$test">
+          HELLO
+        </esi:when>
+      </esi:choose>
+      <br>
+      
+      Choose with otherwise, positive:<br>
+      HELLO=
+      <esi:choose>
+        <esi:when test="$test">
+          HELLO
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
+      
+      Choose with otherwise, negative:<br>
+      GOODBYE=
+      <esi:choose>
+        <esi:when test="$nonexistent">
+          HELLO
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
       
     </div>
   </body>
