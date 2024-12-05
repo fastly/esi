@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use fastly::http::request::SendError;
+use regex::Error;
 
 /// Describes an error encountered during ESI parsing or execution.
 #[derive(Error, Debug)]
@@ -46,6 +47,10 @@ pub enum ExecutionError {
     // TODO: add lexer and eval errors
     #[error("expression failed to parse: `{0}`")]
     ExpressionParseError(String),
+
+    /// An error occurred while creating a regular expression in an eval context
+    #[error("failed to create a regular expression")]
+    RegexError(#[from] regex::Error),
 }
 
 pub type Result<T> = std::result::Result<T, ExecutionError>;

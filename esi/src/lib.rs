@@ -19,7 +19,7 @@ use std::io::{BufRead, Write};
 pub use crate::document::{Element, Fragment};
 pub use crate::error::Result;
 pub use crate::parse::{parse_tags, Event, Include, Tag, Tag::Try};
-pub use crate::variables::{Value, Variables};
+pub use crate::variables::{BoolValue, Value, Variables};
 
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;

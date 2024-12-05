@@ -1,7 +1,9 @@
+use regex::Regex;
 use std::iter::Peekable;
+use std::slice::Iter;
 use std::str::Chars;
 
-use crate::{ExecutionError, Result, Value, Variables};
+use crate::{BoolValue, ExecutionError, Result, Value, Variables};
 
 pub fn evaluate_expression(raw_expr: String, ctx: EvalContext) -> Result<Value> {
     // TODO: this got real ugly, figure out some better way to do this
@@ -10,12 +12,12 @@ pub fn evaluate_expression(raw_expr: String, ctx: EvalContext) -> Result<Value> 
         Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
         Err(e) => return Err(e),
     };
-    let expr = match parse_expr(tokens) {
+    let expr = match parse(tokens) {
         Ok(r) => r,
         Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
         Err(e) => return Err(e),
     };
-    match eval_expr(expr, ctx) {
+    match eval_expr(expr, &ctx) {
         Ok(r) => Ok(r),
         Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
         Err(e) => return Err(e),
@@ -32,10 +34,32 @@ impl EvalContext<'_> {
     }
 }
 
-fn eval_expr(expr: Expr, ctx: EvalContext) -> Result<Value> {
+fn eval_expr(expr: Expr, ctx: &EvalContext) -> Result<Value> {
     let result = match expr {
         Expr::String(s) => Value::String(s),
         Expr::Variable(s) => ctx.variables.get(&s).clone(),
+        Expr::Comparison(c) => {
+            let left = eval_expr(c.left, ctx)?;
+            let right = eval_expr(c.right, ctx)?;
+            match c.operator {
+                Operator::Matches => match (left, right) {
+                    (Value::String(test), Value::String(pattern)) => {
+                        let re = Regex::new(&pattern)?;
+                        if re.is_match(&test) {
+                            Value::Boolean(BoolValue::True)
+                        } else {
+                            Value::Boolean(BoolValue::False)
+                        }
+                    }
+                    _ => {
+                        return Err(ExecutionError::ExpressionParseError(
+                            "incorrect types".to_string(),
+                        ));
+                    }
+                },
+                Operator::MatchesInsensitive => todo!(),
+            }
+        }
     };
     Ok(result)
 }
@@ -44,11 +68,28 @@ fn eval_expr(expr: Expr, ctx: EvalContext) -> Result<Value> {
 enum Expr {
     String(String),
     Variable(String),
+    Comparison(Box<Comparison>),
 }
 
-fn parse_expr(tokens: Vec<Token>) -> Result<Expr> {
-    let mut cur = tokens.iter();
+#[derive(Debug, Clone, PartialEq)]
+struct Comparison {
+    left: Expr,
+    operator: Operator,
+    right: Expr,
+}
 
+fn parse(tokens: Vec<Token>) -> Result<Expr> {
+    let mut cur = tokens.iter().peekable();
+
+    let expr = parse_expr(&mut cur)?;
+    if cur.peek() != None {
+        return Err(ExecutionError::ExpressionParseError(
+            "expected eof".to_string(),
+        ));
+    }
+    Ok(expr)
+}
+fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
     let node = if let Some(token) = cur.next() {
         match token {
             Token::String(s) => Expr::String(s.clone()),
@@ -64,6 +105,28 @@ fn parse_expr(tokens: Vec<Token>) -> Result<Expr> {
             "unexpected end of tokens".to_string(),
         ));
     };
+
+    if cur.peek() == None {
+        return Ok(node);
+    }
+
+    // We must have a Comparison
+    let left = node;
+    let operator = match cur.next().unwrap() {
+        Token::Operator(op) => op,
+        _ => {
+            return Err(ExecutionError::ExpressionParseError(
+                "unexpected token".to_string(),
+            ));
+        }
+    };
+    let right = parse_expr(cur)?;
+
+    let node = Expr::Comparison(Box::new(Comparison {
+        left,
+        operator: operator.clone(),
+        right,
+    }));
 
     Ok(node)
 }
@@ -102,10 +165,12 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
                                 result.push(get_variable(&mut cur));
                             }
                             'a'..'z' => {
-                                // identifier
+                                // TODO: identifier
+                                return Err(ExecutionError::ExpressionParseError(expr));
                             }
                             'A'..'Z' => {
-                                // metadata identifier
+                                // TODO: metadata identifier
+                                return Err(ExecutionError::ExpressionParseError(expr));
                             }
                             _ => return Err(ExecutionError::ExpressionParseError(expr)),
                         }
@@ -120,7 +185,11 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
                 result.push(get_word_operator(&mut cur)?);
             }
             '=' | '!' | '<' | '>' | '|' | '&' => {
-                // normal operator
+                // TODO: normal operator
+                return Err(ExecutionError::ExpressionParseError(expr));
+            }
+            ' ' => {
+                cur.next();
             }
             _ => return Err(ExecutionError::ExpressionParseError(expr)),
         }
@@ -201,11 +270,30 @@ mod tests {
         assert_eq!(tokens, vec![Token::Operator(Operator::MatchesInsensitive)]);
         Ok(())
     }
+    #[test]
+    fn test_lex_comparison() -> Result<()> {
+        let tokens = lex_expr("$(foo) matches 'bar'".to_string())?;
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Variable("foo".to_string()),
+                Token::Operator(Operator::Matches),
+                Token::String("bar".to_string())
+            ]
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_lex_error() -> Result<()> {
+        let token_result = lex_expr("$error".to_string());
+        assert!(token_result.is_err());
+        Ok(())
+    }
 
     #[test]
     fn test_parse_simple_string() -> Result<()> {
         let tokens = lex_expr("'hello'".to_string())?;
-        let expr = parse_expr(tokens)?;
+        let expr = parse(tokens)?;
         assert_eq!(expr, Expr::String("hello".to_string()));
         Ok(())
     }
@@ -213,15 +301,29 @@ mod tests {
     #[test]
     fn test_parse_variable() -> Result<()> {
         let tokens = lex_expr("$(hello)".to_string())?;
-        let expr = parse_expr(tokens)?;
+        let expr = parse(tokens)?;
         assert_eq!(expr, Expr::Variable("hello".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_parse_comparison() -> Result<()> {
+        let tokens = lex_expr("$(foo) matches 'bar'".to_string())?;
+        let expr = parse(tokens)?;
+        assert_eq!(
+            expr,
+            Expr::Comparison(Box::new(Comparison {
+                left: Expr::Variable("foo".to_string()),
+                operator: Operator::Matches,
+                right: Expr::String("bar".to_string())
+            }))
+        );
         Ok(())
     }
 
     #[test]
     fn test_eval_string() -> Result<()> {
         let expr = Expr::String("hello".to_string());
-        let result = eval_expr(expr, EvalContext::new(&Variables::new()))?;
+        let result = eval_expr(expr, &EvalContext::new(&Variables::new()))?;
         assert_eq!(result, Value::String("hello".to_string()));
         Ok(())
     }
@@ -231,12 +333,36 @@ mod tests {
         let expr = Expr::Variable("hello".to_string());
         let result = eval_expr(
             expr,
-            EvalContext::new(&Variables::from([(
+            &EvalContext::new(&Variables::from([(
                 "hello".to_string(),
                 Value::String("goodbye".to_string()),
             )])),
         )?;
         assert_eq!(result, Value::String("goodbye".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_matches_comparison() -> Result<()> {
+        let result = evaluate_expression(
+            "$(hello) matches '^foo'".to_string(),
+            EvalContext::new(&Variables::from([(
+                "hello".to_string(),
+                Value::String("foobar".to_string()),
+            )])),
+        )?;
+        assert_eq!(result, Value::Boolean(BoolValue::True));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_matches_comparison_negative() -> Result<()> {
+        let result = evaluate_expression(
+            "$(hello) matches '^foo'".to_string(),
+            EvalContext::new(&Variables::from([(
+                "hello".to_string(),
+                Value::String("nope".to_string()),
+            )])),
+        )?;
+        assert_eq!(result, Value::Boolean(BoolValue::False));
         Ok(())
     }
 
@@ -250,7 +376,8 @@ mod tests {
                 Value::String("goodbye".to_string()),
             )])),
         )?;
-        assert_eq!(result, Value::Error("hello".to_string()));
+        println!("{:?}", result);
+        assert_eq!(result, Value::Error("$hello".to_string()));
         Ok(())
     }
 }
