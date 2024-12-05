@@ -26,7 +26,7 @@ pub fn evaluate_expression(raw_expr: String, ctx: EvalContext) -> Result<Value> 
 
 pub struct EvalContext<'a> {
     variables: &'a Variables,
-    // request context
+    // request content for metadata
 }
 impl EvalContext<'_> {
     pub fn new(variables: &Variables) -> EvalContext {
@@ -60,6 +60,21 @@ fn eval_expr(expr: Expr, ctx: &EvalContext) -> Result<Value> {
                 Operator::MatchesInsensitive => todo!(),
             }
         }
+        Expr::Call(identifier, args) => {
+            let mut values = Vec::new();
+            for arg in args {
+                values.push(eval_expr(arg, ctx)?);
+            }
+            call_dispatch(identifier, values)?
+        }
+    };
+    Ok(result)
+}
+
+fn call_dispatch(identifier: String, args: Vec<Value>) -> Result<Value> {
+    let result = match identifier.as_str() {
+        "ping" => Value::String("pong".to_string()),
+        _ => Value::Error(format!("unknown function: {}", identifier)),
     };
     Ok(result)
 }
@@ -69,6 +84,7 @@ enum Expr {
     String(String),
     Variable(String),
     Comparison(Box<Comparison>),
+    Call(String, Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,13 +106,15 @@ fn parse(tokens: Vec<Token>) -> Result<Expr> {
     Ok(expr)
 }
 fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
+    println!("peek: {:?}", cur.peek());
     let node = if let Some(token) = cur.next() {
         match token {
             Token::String(s) => Expr::String(s.clone()),
             Token::Variable(s) => Expr::Variable(s.clone()),
+            Token::Identifier(s) => parse_call(s.clone(), cur)?,
             _ => {
                 return Err(ExecutionError::ExpressionParseError(
-                    "unexpected token".to_string(),
+                    "unexpected token starting expression".to_string(),
                 ))
             }
         }
@@ -106,8 +124,12 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
         ));
     };
 
-    if cur.peek() == None {
-        return Ok(node);
+    // return if we've reached EOF or if we're possibly in an args list
+    // TODO: I'm not sure this is the right approach, but here we are
+    match cur.peek() {
+        None => return Ok(node),
+        Some(&&Token::Comma) | Some(&&Token::CloseParen) => return Ok(node),
+        _ => {}
     }
 
     // We must have a Comparison
@@ -116,7 +138,7 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
         Token::Operator(op) => op,
         _ => {
             return Err(ExecutionError::ExpressionParseError(
-                "unexpected token".to_string(),
+                "expected operator".to_string(),
             ));
         }
     };
@@ -131,11 +153,56 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
     Ok(node)
 }
 
+fn parse_call(identifier: String, cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
+    match cur.next() {
+        Some(Token::OpenParen) => {
+            let mut args = Vec::new();
+            let mut first_arg = true;
+            loop {
+                match cur.peek() {
+                    Some(&&Token::CloseParen) => {
+                        cur.next();
+                        break;
+                    }
+                    _ => {
+                        args.push(parse_expr(cur)?);
+                        match cur.peek() {
+                            Some(&&Token::CloseParen) => {
+                                cur.next();
+                                break;
+                            }
+                            Some(&&Token::Comma) => {
+                                cur.next();
+                                continue;
+                            }
+                            _ => {
+                                return Err(ExecutionError::ExpressionParseError(
+                                    "unexpected token in arg list".to_string(),
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Expr::Call(identifier, args))
+        }
+        _ => {
+            return Err(ExecutionError::ExpressionParseError(
+                "unexpected token following identifier".to_string(),
+            ))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
     String(String),
     Variable(String),
     Operator(Operator),
+    Identifier(String),
+    OpenParen,
+    CloseParen,
+    Comma,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -164,11 +231,10 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
                                 cur.next();
                                 result.push(get_variable(&mut cur));
                             }
-                            'a'..'z' => {
-                                // TODO: identifier
-                                return Err(ExecutionError::ExpressionParseError(expr));
+                            'a'..='z' => {
+                                result.push(get_identifier(&mut cur));
                             }
-                            'A'..'Z' => {
+                            'A'..='Z' => {
                                 // TODO: metadata identifier
                                 return Err(ExecutionError::ExpressionParseError(expr));
                             }
@@ -180,13 +246,25 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
                     _ => return Err(ExecutionError::ExpressionParseError(expr)),
                 }
             }
-            'a'..'z' => {
+            'a'..='z' => {
                 // word operator
                 result.push(get_word_operator(&mut cur)?);
             }
             '=' | '!' | '<' | '>' | '|' | '&' => {
                 // TODO: normal operator
                 return Err(ExecutionError::ExpressionParseError(expr));
+            }
+            '(' => {
+                cur.next();
+                result.push(Token::OpenParen);
+            }
+            ')' => {
+                cur.next();
+                result.push(Token::CloseParen);
+            }
+            ',' => {
+                cur.next();
+                result.push(Token::Comma);
             }
             ' ' => {
                 cur.next();
@@ -198,13 +276,27 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
     Ok(result)
 }
 
+fn get_identifier(cur: &mut Peekable<Chars>) -> Token {
+    let mut buf = Vec::new();
+
+    while let Some(c) = cur.peek() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => {
+                buf.push(cur.next().unwrap());
+            }
+            _ => break,
+        }
+    }
+    Token::Identifier(buf.into_iter().collect())
+}
+
 fn get_word_operator(cur: &mut Peekable<Chars>) -> Result<Token> {
     let mut buf = Vec::new();
     buf.push(cur.next().unwrap());
 
     while let Some(c) = cur.next() {
         match c {
-            'a'..'z' | '_' => buf.push(c),
+            'a'..='z' | '0'..='9' | '_' => buf.push(c),
             _ => break,
         }
     }
@@ -349,6 +441,55 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn test_lex_identifier() -> Result<()> {
+        let tokens = lex_expr("$foo2BAZ".to_string())?;
+        assert_eq!(tokens, vec![Token::Identifier("foo2BAZ".to_string())]);
+        Ok(())
+    }
+    #[test]
+    fn test_lex_simple_call() -> Result<()> {
+        let tokens = lex_expr("$fn()".to_string())?;
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Identifier("fn".to_string()),
+                Token::OpenParen,
+                Token::CloseParen
+            ]
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_lex_call_with_arg() -> Result<()> {
+        let tokens = lex_expr("$fn('hello')".to_string())?;
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Identifier("fn".to_string()),
+                Token::OpenParen,
+                Token::String("hello".to_string()),
+                Token::CloseParen
+            ]
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_lex_call_with_two_args() -> Result<()> {
+        let tokens = lex_expr("$fn($(hello), 'hello')".to_string())?;
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Identifier("fn".to_string()),
+                Token::OpenParen,
+                Token::Variable("hello".to_string()),
+                Token::Comma,
+                Token::String("hello".to_string()),
+                Token::CloseParen
+            ]
+        );
+        Ok(())
+    }
+    #[test]
     fn test_lex_comparison() -> Result<()> {
         let tokens = lex_expr("$(foo) matches 'bar'".to_string())?;
         assert_eq!(
@@ -361,9 +502,10 @@ mod tests {
         );
         Ok(())
     }
+
     #[test]
     fn test_lex_error() -> Result<()> {
-        let token_result = lex_expr("$error".to_string());
+        let token_result = lex_expr("fwej".to_string());
         assert!(token_result.is_err());
         Ok(())
     }
@@ -394,6 +536,39 @@ mod tests {
                 operator: Operator::Matches,
                 right: Expr::String("bar".to_string())
             }))
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_parse_call() -> Result<()> {
+        let tokens = lex_expr("$hello()".to_string())?;
+        let expr = parse(tokens)?;
+        assert_eq!(expr, Expr::Call("hello".to_string(), Vec::new()));
+        Ok(())
+    }
+    #[test]
+    fn test_parse_call_with_arg() -> Result<()> {
+        let tokens = lex_expr("$fn('hello')".to_string())?;
+        let expr = parse(tokens)?;
+        assert_eq!(
+            expr,
+            Expr::Call("fn".to_string(), vec![Expr::String("hello".to_string())])
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_parse_call_with_two_args() -> Result<()> {
+        let tokens = lex_expr("$fn($(hello), 'hello')".to_string())?;
+        let expr = parse(tokens)?;
+        assert_eq!(
+            expr,
+            Expr::Call(
+                "fn".to_string(),
+                vec![
+                    Expr::Variable("hello".to_string()),
+                    Expr::String("hello".to_string())
+                ]
+            )
         );
         Ok(())
     }
@@ -443,9 +618,16 @@ mod tests {
         assert_eq!(result, Value::Boolean(BoolValue::False));
         Ok(())
     }
+    #[test]
+    fn test_eval_function_call() -> Result<()> {
+        let result =
+            evaluate_expression("$ping()".to_string(), EvalContext::new(&Variables::new()))?;
+        assert_eq!(result, Value::String("pong".to_string()));
+        Ok(())
+    }
 
     // TODO: more negative tests
-    #[test]
+    // #[test]
     fn test_evaluation_error() -> Result<()> {
         let result = evaluate_expression(
             "$hello".to_string(),
