@@ -1,7 +1,6 @@
 use thiserror::Error;
 
 use fastly::http::request::SendError;
-use regex::Error;
 
 /// Describes an error encountered during ESI parsing or execution.
 #[derive(Error, Debug)]

@@ -74,6 +74,16 @@ fn eval_expr(expr: Expr, ctx: &EvalContext) -> Result<Value> {
 fn call_dispatch(identifier: String, args: Vec<Value>) -> Result<Value> {
     let result = match identifier.as_str() {
         "ping" => Value::String("pong".to_string()),
+        "lower" => {
+            if args.len() != 1 {
+                Value::Error("wrong number of arguments to 'lower'".to_string())
+            } else {
+                match &args[0] {
+                    Value::String(s) => Value::String(s.to_lowercase()),
+                    _ => Value::Error("incorrect type passed to 'lower'".to_string()),
+                }
+            }
+        }
         _ => Value::Error(format!("unknown function: {}", identifier)),
     };
     Ok(result)
@@ -106,7 +116,6 @@ fn parse(tokens: Vec<Token>) -> Result<Expr> {
     Ok(expr)
 }
 fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
-    println!("peek: {:?}", cur.peek());
     let node = if let Some(token) = cur.next() {
         match token {
             Token::String(s) => Expr::String(s.clone()),
@@ -157,7 +166,6 @@ fn parse_call(identifier: String, cur: &mut Peekable<Iter<Token>>) -> Result<Exp
     match cur.next() {
         Some(Token::OpenParen) => {
             let mut args = Vec::new();
-            let mut first_arg = true;
             loop {
                 match cur.peek() {
                     Some(&&Token::CloseParen) => {
@@ -625,18 +633,13 @@ mod tests {
         assert_eq!(result, Value::String("pong".to_string()));
         Ok(())
     }
-
-    // TODO: more negative tests
-    // #[test]
-    fn test_evaluation_error() -> Result<()> {
+    #[test]
+    fn test_eval_lower_call() -> Result<()> {
         let result = evaluate_expression(
-            "$hello".to_string(),
-            EvalContext::new(&Variables::from([(
-                "hello".to_string(),
-                Value::String("goodbye".to_string()),
-            )])),
+            "$lower('FOO')".to_string(),
+            EvalContext::new(&Variables::new()),
         )?;
-        assert_eq!(result, Value::Error("$hello".to_string()));
+        assert_eq!(result, Value::String("foo".to_string()));
         Ok(())
     }
 }

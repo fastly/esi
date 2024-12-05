@@ -486,7 +486,11 @@ fn event_receiver(
         }) => {
             let mut chose_branch = false;
             for (when, events) in when_branches {
-                if let Tag::When { test, match_name } = when {
+                if let Tag::When {
+                    test,
+                    match_name: _,
+                } = when
+                {
                     let result = evaluate_expression(test, EvalContext::new(&variables))?;
                     if result.to_bool() {
                         chose_branch = true;
