@@ -107,7 +107,54 @@
         </esi:when>
       </esi:choose>
       <br>
-      
+
+      <h3>Matches tests</h3>
+      Check if a static string "foobar" matches the regex /bar$/<br>
+      YES =<esi:choose>
+        <esi:when test="'foobar' matches 'bar$'">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Check if a static string "foobar" matches the regex /^nope/<br>
+      NO =<esi:choose>
+        <esi:when test="'foobar' matches '^nope'">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          NO
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Assign "barbaz" to a variable and see if matches the regex /^bar/<br>
+      <esi:assign name="retest" value="'barbaz'" />
+      YES =<esi:choose>
+        <esi:when test="$(retest) matches '^bar'">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Assign "barbaz" to a variables and see if it matches the regex /nope/<br>
+      <esi:assign name="retest" value="'barbaz'" />
+      NO =<esi:choose>
+        <esi:when test="$(retest) matches 'nope'">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          NO
+        </esi:when>
+      </esi:choose>
+      <br>
+
     </div>
   </body>
 </html>
