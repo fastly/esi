@@ -117,9 +117,31 @@ where
     let otherwise_events = &mut Vec::new();
 
     let mut buffer = Vec::new();
+
+    // When you are in the top level of a try or choose block, the
+    // only allowable tags are attempt/except or when/otherwise. All
+    // other data should be eaten.
+    let mut in_try = false;
+    let mut in_choose = false;
+
     // Parse tags and build events vec
     loop {
         match reader.read_event_into(&mut buffer) {
+            // Skip any events received while in the top level of a Try block
+            Ok(XmlEvent::Start(e))
+                if in_try
+                    && !(e.name() == QName(&tag.attempt) || e.name() == QName(&tag.except)) =>
+            {
+                continue
+            }
+            // Skip any events received while in the top level of a When block
+            Ok(XmlEvent::Start(e))
+                if in_choose
+                    && !(e.name() == QName(&tag.when) || e.name() == QName(&tag.otherwise)) =>
+            {
+                continue
+            }
+
             // Handle <esi:remove> tags
             Ok(XmlEvent::Start(e)) if e.name() == QName(&tag.remove) => {
                 is_remove_tag = true;
@@ -161,6 +183,7 @@ where
             Ok(XmlEvent::Start(ref e)) if e.name() == QName(&tag.r#try) => {
                 *current_arm = Some(TryTagArms::Try);
                 *try_depth += 1;
+                in_try = true;
                 continue;
             }
 
@@ -200,6 +223,8 @@ where
 
             Ok(XmlEvent::End(ref e)) if e.name() == QName(&tag.r#try) => {
                 *current_arm = None;
+                in_try = false;
+
                 if *try_depth == 0 {
                     return unexpected_closing_tag_error(e);
                 }
@@ -256,9 +281,11 @@ where
 
             // when/choose
             Ok(XmlEvent::Start(ref e)) if e.name() == QName(&tag.choose) => {
+                in_choose = true;
                 *choose_depth += 1;
             }
             Ok(XmlEvent::End(ref e)) if e.name() == QName(&tag.choose) => {
+                in_choose = false;
                 *choose_depth -= 1;
                 choose_tag_handler(when_branches, otherwise_events, callback, task, use_queue)?;
             }
@@ -318,6 +345,10 @@ where
                 break;
             }
             Ok(e) => {
+                if in_try || in_choose {
+                    continue;
+                }
+
                 let event = if open_vars {
                     Event::VarsContent(e.into_owned())
                 } else {
