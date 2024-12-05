@@ -131,6 +131,17 @@
       </esi:choose>
       <br>
 
+      Check if a static string 'hel\'lo' matches the regex '''l'l''' (triple tick variant)<br>
+      YES =<esi:choose>
+        <esi:when test="'hel\'lo' matches '''l'l'''">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          NO
+        </esi:when>
+      </esi:choose>
+      <br>
+
       Assign "barbaz" to a variable and see if matches the regex /^bar/<br>
       <esi:assign name="retest" value="'barbaz'" />
       YES =<esi:choose>

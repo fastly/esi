@@ -152,7 +152,7 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
         match c {
             '\'' => {
                 cur.next();
-                result.push(get_string(&mut cur));
+                result.push(get_string(&mut cur)?);
             }
             '$' => {
                 cur.next();
@@ -216,17 +216,69 @@ fn get_word_operator(cur: &mut Peekable<Chars>) -> Result<Token> {
     }
 }
 
-fn get_string(cur: &mut Peekable<Chars>) -> Token {
+fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
     // TODO: handle escaping
     let mut buf = Vec::new();
+    let mut triple_tick = false;
+
+    if cur.peek() == Some(&'\'') {
+        // This is either an empty string, or the start of a triple tick string
+        cur.next();
+        if cur.peek() == Some(&'\'') {
+            // It's a triple tick string
+            triple_tick = true;
+            cur.next();
+        } else {
+            // It's an empty string, let's just return it
+            cur.next();
+            return Ok(Token::String("".to_string()));
+        }
+    }
 
     while let Some(c) = cur.next() {
         match c {
-            '\'' => break,
+            '\'' => {
+                if !triple_tick {
+                    break;
+                }
+                if let Some(c2) = cur.next() {
+                    if c2 == '\'' && cur.peek() == Some(&'\'') {
+                        // End of a triple tick string
+                        cur.next();
+                        break;
+                    } else {
+                        // Just two ticks
+                        buf.push(c);
+                        buf.push(c2);
+                    }
+                } else {
+                    // error
+                    return Err(ExecutionError::ExpressionParseError(
+                        "unexpected eof while parsing string".to_string(),
+                    ));
+                };
+            }
+            '\\' => {
+                if triple_tick {
+                    // no escaping inside a triple tick string
+                    buf.push(c);
+                } else {
+                    // in a normal string, we'll ignore this and buffer the
+                    // next char
+                    if let Some(escaped_c) = cur.next() {
+                        buf.push(escaped_c);
+                    } else {
+                        // error
+                        return Err(ExecutionError::ExpressionParseError(
+                            "unexpected eof while parsing string".to_string(),
+                        ));
+                    }
+                }
+            }
             _ => buf.push(c),
         }
     }
-    Token::String(buf.into_iter().collect())
+    Ok(Token::String(buf.into_iter().collect()))
 }
 
 fn get_variable(cur: &mut Peekable<Chars>) -> Token {
@@ -249,6 +301,32 @@ mod tests {
     fn test_lex_simple_string() -> Result<()> {
         let tokens = lex_expr("'hello'".to_string())?;
         assert_eq!(tokens, vec![Token::String("hello".to_string())]);
+        Ok(())
+    }
+    #[test]
+    fn test_lex_escaped_string() -> Result<()> {
+        let tokens = lex_expr(r#"'hel\'lo'"#.to_string())?;
+        assert_eq!(tokens, vec![Token::String("hel\'lo".to_string())]);
+        Ok(())
+    }
+    #[test]
+    fn test_lex_triple_tick_string() -> Result<()> {
+        let tokens = lex_expr(r#"'''h'el''l\'o\'''"#.to_string())?;
+        assert_eq!(tokens, vec![Token::String(r#"h'el''l\'o\"#.to_string())]);
+        Ok(())
+    }
+    #[test]
+    fn test_lex_triple_tick_and_escaping_torture() -> Result<()> {
+        let tokens = lex_expr(r#"'\\\'triple\'/' matches '''\'triple'/'''"#.to_string())?;
+        assert_eq!(tokens[0], tokens[2]);
+        let Token::String(ref test) = tokens[0] else {
+            panic!()
+        };
+        let Token::String(ref pattern) = tokens[2] else {
+            panic!()
+        };
+        let re = Regex::new(pattern)?;
+        assert!(re.is_match(test));
         Ok(())
     }
 
@@ -376,7 +454,6 @@ mod tests {
                 Value::String("goodbye".to_string()),
             )])),
         )?;
-        println!("{:?}", result);
         assert_eq!(result, Value::Error("$hello".to_string()));
         Ok(())
     }
