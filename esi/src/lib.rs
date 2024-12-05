@@ -478,10 +478,50 @@ fn event_receiver(
             }
         }
         Event::ESI(Tag::When { .. }) => {
-            println!("THIS SHOULD NEVER APPEAR");
+            println!("Shouldn't be possible to get a When tag here");
         }
-        Event::ESI(Tag::Choose { .. }) => {
-            println!("GOT A CHOOSE TAG");
+        Event::ESI(Tag::Choose {
+            when_branches,
+            otherwise_events,
+        }) => {
+            let mut chose_branch = false;
+            for (when, events) in when_branches {
+                if let Tag::When { test, match_name } = when {
+                    let result = evaluate_expression(test, EvalContext::new(&variables))?;
+                    if result.to_bool() {
+                        chose_branch = true;
+                        for event in events {
+                            event_receiver(
+                                event,
+                                queue,
+                                is_escaped,
+                                original_request_metadata,
+                                dispatch_fragment_request,
+                                variables,
+                            )?;
+                        }
+                        break;
+                    }
+                } else {
+                    println!(
+                        "Somehow got something other than a When in a Choose: {:?}",
+                        when
+                    );
+                }
+            }
+
+            if !chose_branch {
+                for event in otherwise_events {
+                    event_receiver(
+                        event,
+                        queue,
+                        is_escaped,
+                        original_request_metadata,
+                        dispatch_fragment_request,
+                        variables,
+                    )?;
+                }
+            }
         }
 
         // TODO: change to InterpolatedContent

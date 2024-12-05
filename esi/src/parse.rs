@@ -257,12 +257,10 @@ where
             // when/choose
             Ok(XmlEvent::Start(ref e)) if e.name() == QName(&tag.choose) => {
                 *choose_depth += 1;
-                println!("In a choose!");
             }
             Ok(XmlEvent::End(ref e)) if e.name() == QName(&tag.choose) => {
                 *choose_depth -= 1;
                 choose_tag_handler(when_branches, otherwise_events, callback, task, use_queue)?;
-                println!("Out of a choose!");
             }
 
             Ok(XmlEvent::Start(ref e)) if e.name() == QName(&tag.when) => {
@@ -270,8 +268,6 @@ where
                     // invalid when tag outside of choose
                     return unexpected_opening_tag_error(e);
                 }
-
-                println!("In a when!");
 
                 let when_tag = parse_when(&e)?;
                 let mut when_events = Vec::new();
@@ -291,7 +287,6 @@ where
                 if *choose_depth == 0 {
                     return unexpected_closing_tag_error(&e);
                 }
-                println!("Out of a when!");
 
                 return Ok(());
             }

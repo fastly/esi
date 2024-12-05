@@ -33,7 +33,7 @@
       Simple one branch choose:<br>
       HELLO=
       <esi:choose>
-        <esi:when test="$test">
+        <esi:when test="$(test)">
           HELLO
         </esi:when>
       </esi:choose>
@@ -42,7 +42,7 @@
       Choose with otherwise, positive:<br>
       HELLO=
       <esi:choose>
-        <esi:when test="$test">
+        <esi:when test="$(test)">
           HELLO
         </esi:when>
         <esi:otherwise>
@@ -54,8 +54,53 @@
       Choose with otherwise, negative:<br>
       GOODBYE=
       <esi:choose>
-        <esi:when test="$nonexistent">
+        <esi:when test="$(nonexistent)">
           HELLO
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Two branch choose with otherwise, first positive:<br>
+      HELLO=
+      <esi:choose>
+        <esi:when test="$(test)">
+          HELLO
+        </esi:when>
+        <esi:when test="$(nonexistent)">
+          HELLO2
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
+      
+      Two branch choose with otherwise, second positive:<br>
+      HELLO2=
+      <esi:choose>
+        <esi:when test="$(nonexistent)">
+          HELLO
+        </esi:when>
+        <esi:when test="$(test)">
+          HELLO2
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
+      
+      Two branch choose with otherwise, negative:<br>
+      GOODBYE=
+      <esi:choose>
+        <esi:when test="$(nonexistent)">
+          HELLO
+        </esi:when>
+        <esi:when test="$(alsononexistent)">
+          HELLO2
         </esi:when>
         <esi:otherwise>
           GOODBYE
