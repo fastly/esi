@@ -36,6 +36,7 @@ impl EvalContext<'_> {
 
 fn eval_expr(expr: Expr, ctx: &EvalContext) -> Result<Value> {
     let result = match expr {
+        Expr::Integer(i) => Value::Integer(i),
         Expr::String(s) => Value::String(s),
         Expr::Variable(s) => ctx.variables.get(&s).clone(),
         Expr::Comparison(c) => {
@@ -72,25 +73,81 @@ fn eval_expr(expr: Expr, ctx: &EvalContext) -> Result<Value> {
 }
 
 fn call_dispatch(identifier: String, args: Vec<Value>) -> Result<Value> {
-    let result = match identifier.as_str() {
-        "ping" => Value::String("pong".to_string()),
+    match identifier.as_str() {
+        "ping" => return Ok(Value::String("pong".to_string())),
         "lower" => {
             if args.len() != 1 {
-                Value::Error("wrong number of arguments to 'lower'".to_string())
+                return Ok(Value::Error(
+                    "wrong number of arguments to 'lower'".to_string(),
+                ));
             } else {
                 match &args[0] {
-                    Value::String(s) => Value::String(s.to_lowercase()),
-                    _ => Value::Error("incorrect type passed to 'lower'".to_string()),
+                    Value::String(s) => return Ok(Value::String(s.to_lowercase())),
+                    _ => return Ok(Value::Error("incorrect type passed to 'lower'".to_string())),
                 }
             }
         }
-        _ => Value::Error(format!("unknown function: {}", identifier)),
+        "html_encode" => {
+            if args.len() != 1 {
+                return Ok(Value::Error(
+                    "wrong number of arguments to 'html_encode'".to_string(),
+                ));
+            } else {
+                match &args[0] {
+                    Value::String(s) => {
+                        return Ok(Value::String(html_escape::encode_text(s).to_string()))
+                    }
+                    _ => {
+                        return Ok(Value::Error(
+                            "incorrect type passed to 'html_encode'".to_string(),
+                        ))
+                    }
+                }
+            }
+        }
+        "replace" => {
+            if args.len() < 3 {
+                return Ok(Value::Error(
+                    "wrong number of arguments to 'replace'".to_string(),
+                ));
+            } else {
+                let Value::String(haystack) = &args[0] else {
+                    return Ok(Value::Error(
+                        "incorrect type passed to 'replace'".to_string(),
+                    ));
+                };
+                let Value::String(needle) = &args[1] else {
+                    return Ok(Value::Error(
+                        "incorrect type passed to 'replace'".to_string(),
+                    ));
+                };
+                let Value::String(replacement) = &args[2] else {
+                    return Ok(Value::Error(
+                        "incorrect type passed to 'replace'".to_string(),
+                    ));
+                };
+
+                if args.len() == 4 {
+                    let Value::Integer(count) = &args[3] else {
+                        return Ok(Value::Error(
+                            "incorrect type passed to 'replace'".to_string(),
+                        ));
+                    };
+                    let count: usize = *count as usize; // TODO: do this more safely
+
+                    return Ok(Value::String(haystack.replacen(needle, replacement, count)));
+                } else {
+                    return Ok(Value::String(haystack.replace(needle, replacement)));
+                }
+            }
+        }
+        _ => return Ok(Value::Error(format!("unknown function: {}", identifier))),
     };
-    Ok(result)
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum Expr {
+    Integer(i64),
     String(String),
     Variable(String),
     Comparison(Box<Comparison>),
@@ -118,6 +175,7 @@ fn parse(tokens: Vec<Token>) -> Result<Expr> {
 fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
     let node = if let Some(token) = cur.next() {
         match token {
+            Token::Integer(i) => Expr::Integer(*i),
             Token::String(s) => Expr::String(s.clone()),
             Token::Variable(s) => Expr::Variable(s.clone()),
             Token::Identifier(s) => parse_call(s.clone(), cur)?,
@@ -204,6 +262,7 @@ fn parse_call(identifier: String, cur: &mut Peekable<Iter<Token>>) -> Result<Exp
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
+    Integer(i64),
     String(String),
     Variable(String),
     Operator(Operator),
@@ -254,6 +313,9 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
                     _ => return Err(ExecutionError::ExpressionParseError(expr)),
                 }
             }
+            '0'..='9' | '-' => {
+                result.push(get_integer(&mut cur)?);
+            }
             'a'..='z' => {
                 // word operator
                 result.push(get_word_operator(&mut cur)?);
@@ -282,6 +344,59 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
     }
 
     Ok(result)
+}
+
+fn get_integer(cur: &mut Peekable<Chars>) -> Result<Token> {
+    let mut buf = Vec::new();
+    let c = cur.next().unwrap();
+    buf.push(c);
+
+    if c == '0' {
+        // Zero is a special case, as the only number that can start with a zero.
+        let Some(c) = cur.peek() else {
+            cur.next();
+            // EOF after a zero. That's a valid number.
+            return Ok(Token::Integer(0));
+        };
+        // Make sure the zero isn't followed by another digit.
+        match *c {
+            '0'..='9' => {
+                return Err(ExecutionError::ExpressionParseError(
+                    "invalid number".to_string(),
+                ))
+            }
+            _ => {}
+        }
+    }
+
+    if c == '-' {
+        let Some(c) = cur.next() else {
+            return Err(ExecutionError::ExpressionParseError(
+                "invalid number".to_string(),
+            ));
+        };
+        match c {
+            '1'..='9' => buf.push(c),
+            _ => {
+                return Err(ExecutionError::ExpressionParseError(
+                    "invalid number".to_string(),
+                ))
+            }
+        }
+    }
+
+    while let Some(c) = cur.peek() {
+        match c {
+            '0'..='9' => buf.push(cur.next().unwrap()),
+            _ => break,
+        }
+    }
+    let Ok(num) = buf.into_iter().collect::<String>().parse() else {
+        return Err(ExecutionError::ExpressionParseError(
+            "invalid number".to_string(),
+        ));
+    };
+    Ok(Token::Integer(num))
 }
 
 fn get_identifier(cur: &mut Peekable<Chars>) -> Token {
@@ -397,6 +512,24 @@ fn get_variable(cur: &mut Peekable<Chars>) -> Token {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_lex_integer() -> Result<()> {
+        let tokens = lex_expr("1 23 456789 0 -987654 -32 -1 0".to_string())?;
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Integer(1),
+                Token::Integer(23),
+                Token::Integer(456789),
+                Token::Integer(0),
+                Token::Integer(-987654),
+                Token::Integer(-32),
+                Token::Integer(-1),
+                Token::Integer(0)
+            ]
+        );
+        Ok(())
+    }
     #[test]
     fn test_lex_simple_string() -> Result<()> {
         let tokens = lex_expr("'hello'".to_string())?;
@@ -519,6 +652,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_integer() -> Result<()> {
+        let tokens = lex_expr("1".to_string())?;
+        let expr = parse(tokens)?;
+        assert_eq!(expr, Expr::Integer(1));
+        Ok(())
+    }
+    #[test]
     fn test_parse_simple_string() -> Result<()> {
         let tokens = lex_expr("'hello'".to_string())?;
         let expr = parse(tokens)?;
@@ -640,6 +780,34 @@ mod tests {
             EvalContext::new(&Variables::new()),
         )?;
         assert_eq!(result, Value::String("foo".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_html_encode_call() -> Result<()> {
+        let result = evaluate_expression(
+            "$html_encode('a > b < c')".to_string(),
+            EvalContext::new(&Variables::new()),
+        )?;
+        assert_eq!(result, Value::String("a &gt; b &lt; c".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_replace_call() -> Result<()> {
+        let result = evaluate_expression(
+            "$replace('abc-def-ghi-', '-', '==')".to_string(),
+            EvalContext::new(&Variables::new()),
+        )?;
+        assert_eq!(result, Value::String("abc==def==ghi==".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_eval_replace_call_with_count() -> Result<()> {
+        let result = evaluate_expression(
+            "$replace('abc-def-ghi-', '-', '==', 2)".to_string(),
+            EvalContext::new(&Variables::new()),
+        )?;
+        assert_eq!(result, Value::String("abc==def==ghi-".to_string()));
         Ok(())
     }
 }

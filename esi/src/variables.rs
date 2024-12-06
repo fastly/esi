@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
+    Integer(i64),
     String(String),
     Error(String),
     Boolean(BoolValue),
@@ -17,6 +18,7 @@ pub enum BoolValue {
 impl Value {
     pub fn to_bool(&self) -> bool {
         match self {
+            Value::Integer(_) => true, // TODO: make sure 0 isn't falsey
             Value::String(_) => true,
             Value::Error(_) => false,
             Value::Boolean(b) => *b == BoolValue::True,
@@ -26,6 +28,7 @@ impl Value {
 
     pub fn to_string(&self) -> String {
         match self {
+            Value::Integer(i) => i.to_string(),
             Value::String(s) => s.clone(),
             Value::Boolean(_) => "".to_string(), // TODO: not sure if this is right
             Value::Error(_) => "".to_string(),
