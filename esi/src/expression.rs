@@ -32,12 +32,16 @@ impl EvalContext<'_> {
     pub fn new(variables: &Variables) -> EvalContext {
         EvalContext { variables }
     }
+    pub fn get_metadata(&self, _key: &str) -> Value {
+        Value::Null
+    }
 }
 
 fn eval_expr(expr: Expr, ctx: &EvalContext) -> Result<Value> {
     let result = match expr {
         Expr::Integer(i) => Value::Integer(i),
         Expr::String(s) => Value::String(s),
+        Expr::MetaVariable(s) => ctx.get_metadata(&s).clone(),
         Expr::Variable(s) => ctx.variables.get(&s).clone(),
         Expr::Comparison(c) => {
             let left = eval_expr(c.left, ctx)?;
@@ -149,6 +153,7 @@ fn call_dispatch(identifier: String, args: Vec<Value>) -> Result<Value> {
 enum Expr {
     Integer(i64),
     String(String),
+    MetaVariable(String),
     Variable(String),
     Comparison(Box<Comparison>),
     Call(String, Vec<Expr>),
@@ -178,6 +183,7 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
             Token::Integer(i) => Expr::Integer(*i),
             Token::String(s) => Expr::String(s.clone()),
             Token::Variable(s) => Expr::Variable(s.clone()),
+            Token::MetaVariable(s) => Expr::MetaVariable(s.clone()),
             Token::Identifier(s) => parse_call(s.clone(), cur)?,
             _ => {
                 return Err(ExecutionError::ExpressionParseError(
@@ -265,6 +271,7 @@ enum Token {
     Integer(i64),
     String(String),
     Variable(String),
+    MetaVariable(String),
     Operator(Operator),
     Identifier(String),
     OpenParen,
@@ -296,14 +303,10 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
                         match pc {
                             '(' => {
                                 cur.next();
-                                result.push(get_variable(&mut cur));
+                                result.push(get_variable(&mut cur)?);
                             }
                             'a'..='z' => {
                                 result.push(get_identifier(&mut cur));
-                            }
-                            'A'..='Z' => {
-                                // TODO: metadata identifier
-                                return Err(ExecutionError::ExpressionParseError(expr));
                             }
                             _ => return Err(ExecutionError::ExpressionParseError(expr)),
                         }
@@ -496,8 +499,28 @@ fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
     Ok(Token::String(buf.into_iter().collect()))
 }
 
-fn get_variable(cur: &mut Peekable<Chars>) -> Token {
+fn get_variable(cur: &mut Peekable<Chars>) -> Result<Token> {
     let mut buf = Vec::new();
+    let mut is_meta_variable = false;
+
+    if let Some(c) = cur.next() {
+        match c {
+            'a'..='z' => buf.push(c),
+            'A'..='Z' => {
+                is_meta_variable = true;
+                buf.push(c);
+            }
+            _ => {
+                return Err(ExecutionError::ExpressionParseError(
+                    "unexpected character while parsing variable".to_string(),
+                ))
+            }
+        }
+    } else {
+        return Err(ExecutionError::ExpressionParseError(
+            "unexpected eof while parsing variable".to_string(),
+        ));
+    }
 
     while let Some(c) = cur.next() {
         match c {
@@ -505,7 +528,11 @@ fn get_variable(cur: &mut Peekable<Chars>) -> Token {
             _ => buf.push(c),
         }
     }
-    Token::Variable(buf.into_iter().collect())
+    if is_meta_variable {
+        Ok(Token::MetaVariable(buf.into_iter().collect()))
+    } else {
+        Ok(Token::Variable(buf.into_iter().collect()))
+    }
 }
 
 #[cfg(test)]
@@ -567,6 +594,12 @@ mod tests {
     fn test_lex_variable() -> Result<()> {
         let tokens = lex_expr("$(hello)".to_string())?;
         assert_eq!(tokens, vec![Token::Variable("hello".to_string())]);
+        Ok(())
+    }
+    #[test]
+    fn test_lex_meta_variable() -> Result<()> {
+        let tokens = lex_expr("$(HELLO)".to_string())?;
+        assert_eq!(tokens, vec![Token::MetaVariable("HELLO".to_string())]);
         Ok(())
     }
     #[test]
@@ -665,12 +698,19 @@ mod tests {
         assert_eq!(expr, Expr::String("hello".to_string()));
         Ok(())
     }
-
     #[test]
     fn test_parse_variable() -> Result<()> {
         let tokens = lex_expr("$(hello)".to_string())?;
         let expr = parse(tokens)?;
         assert_eq!(expr, Expr::Variable("hello".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_meta_variable() -> Result<()> {
+        let tokens = lex_expr("$(HELLO)".to_string())?;
+        let expr = parse(tokens)?;
+        assert_eq!(expr, Expr::MetaVariable("HELLO".to_string()));
         Ok(())
     }
     #[test]
