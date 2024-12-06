@@ -11,22 +11,22 @@
       <h3>Variable Tests</h3>
       Assigning "YES" to variable $test...<br>
       <esi:assign name="test" value="'YES'" />
-      Check (short form): YES=<esi:vars name="test" /><br>
+      Check (short form): YES=<esi:vars name="$(test)" /><br>
       Check (long form): YES=<esi:vars>$(test)</esi:vars><br>
       <br>
       Updating variable $test to "PERHAPS"...<br>
       <esi:assign name="test" value="'PERHAPS'" />
-      Check (short form): PERHAPS=<esi:vars name="test" /><br>
+      Check (short form): PERHAPS=<esi:vars name="$(test)" /><br>
       Check (long form): PERHAPS=<esi:vars>$(test)</esi:vars><br>
       <br>
       Setting variable $test2 to $test...<br>
       <esi:assign name="test2" value="$(test)" />
-      Check (short form): PERHAPS=<esi:vars name="test2" /><br>
+      Check (short form): PERHAPS=<esi:vars name="$(test2)" /><br>
       Check (long form): PERHAPS=<esi:vars>$(test2)</esi:vars><br>
       <br>
       Setting variable $test3 to a syntax error...<br>
       <esi:assign name="test3" value="$(t(est_)))" />
-      Check (short form): (EMPTY)=<esi:vars name="test3" />(EMPTY)<br>
+      Check (short form): (EMPTY)=<esi:vars name="$(test3)" />(EMPTY)<br>
       Check (long form): (EMPTY)=<esi:vars>$(test3)</esi:vars>(EMPTY)<br>
 
       <h3>Choose Tests</h3>
@@ -181,6 +181,19 @@
       mycustomname{0}+mycustomname{1}+mycustomname{2} = oobaooba =<esi:choose>
         <esi:when test="'foobar' matches '(oo)(ba)'" matchname="mycustomname">
           <esi:vars name="$(mycustomname{0})" /><esi:vars name="$(mycustomname{1})" /><esi:vars name="$(mycustomname{2})" />
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Match with captures against "foobar" using /(oo)(ba)/ and matchname="mycustomname" (vars long form)<br>
+      mycustomname{0}+mycustomname{1}+mycustomname{2} = oobaooba =<esi:choose>
+        <esi:when test="'foobar' matches '(oo)(ba)'" matchname="mycustomname">
+          <esi:vars>
+            $(mycustomname{0})$(mycustomname{1})$(mycustomname{2})
+          </esi:vars>
         </esi:when>
         <esi:otherwise>
           UH OH

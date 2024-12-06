@@ -535,19 +535,21 @@ fn event_receiver(
                     if cur.peek() == Some(&&b'(') {
                         cur.next();
 
-                        let mut varbuf = vec![];
+                        let mut varbuf = vec!['$' as u8, '(' as u8];
                         while let Some(vc) = cur.next() {
+                            varbuf.push(*vc);
                             if *vc == b')' {
                                 break;
                             }
-                            varbuf.push(*vc)
                         }
 
                         match String::from_utf8(varbuf) {
-                            Ok(name) => match variables.get(&name) {
-                                &Value::Null => {}
-                                v @ _ => queue.push_back(Element::Raw(v.to_string().into_bytes())),
-                            },
+                            Ok(name) => {
+                                println!("Found variable in raw text! {:?}", name);
+                                let result =
+                                    evaluate_expression(name, EvalContext::new(&mut variables))?;
+                                queue.push_back(Element::Raw(result.to_string().into_bytes()));
+                            }
                             Err(e) => println!("Failed to parse variable: {}", e),
                         }
                     }
