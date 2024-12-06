@@ -1,6 +1,6 @@
 use fastly::http::Method;
 use fastly::Request;
-use regex::Regex;
+use regex::RegexBuilder;
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::slice::Iter;
@@ -143,34 +143,30 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
             let left = eval_expr(c.left, ctx)?;
             let right = eval_expr(c.right, ctx)?;
             match c.operator {
-                Operator::Matches => match (left, right) {
-                    (Value::String(test), Value::String(pattern)) => {
-                        let re = Regex::new(&pattern)?;
-                        if let Some(captures) = re.captures(&test) {
-                            for (i, cap) in captures.iter().enumerate() {
-                                let capval = match cap {
-                                    Some(s) => Value::String(s.as_str().to_string()),
-                                    None => Value::Null,
-                                };
-                                ctx.set_variable(
-                                    &ctx.match_name.clone(),
-                                    Some(i.to_string()),
-                                    capval,
-                                );
-                            }
+                Operator::Matches | Operator::MatchesInsensitive => {
+                    let test = left.to_string();
+                    let pattern = right.to_string();
 
-                            Value::Boolean(BoolValue::True)
-                        } else {
-                            Value::Boolean(BoolValue::False)
+                    let re = if c.operator == Operator::Matches {
+                        RegexBuilder::new(&pattern).build()?
+                    } else {
+                        RegexBuilder::new(&pattern).case_insensitive(true).build()?
+                    };
+
+                    if let Some(captures) = re.captures(&test) {
+                        for (i, cap) in captures.iter().enumerate() {
+                            let capval = match cap {
+                                Some(s) => Value::String(s.as_str().to_string()),
+                                None => Value::Null,
+                            };
+                            ctx.set_variable(&ctx.match_name.clone(), Some(i.to_string()), capval);
                         }
+
+                        Value::Boolean(BoolValue::True)
+                    } else {
+                        Value::Boolean(BoolValue::False)
                     }
-                    _ => {
-                        return Err(ExecutionError::ExpressionParseError(
-                            "incorrect types".to_string(),
-                        ));
-                    }
-                },
-                Operator::MatchesInsensitive => todo!(),
+                }
             }
         }
         Expr::Call(identifier, args) => {
@@ -636,6 +632,7 @@ fn get_variable(cur: &mut Peekable<Chars>) -> Result<Token> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
 
     #[test]
     fn test_lex_integer() -> Result<()> {
@@ -903,6 +900,15 @@ mod tests {
         let result = evaluate_expression(
             "$(hello) matches '^foo'".to_string(),
             &mut EvalContext::from([("hello".to_string(), Value::String("foobar".to_string()))]),
+        )?;
+        assert_eq!(result, Value::Boolean(BoolValue::True));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_matches_i_comparison() -> Result<()> {
+        let result = evaluate_expression(
+            "$(hello) matches_i '^foo'".to_string(),
+            &mut EvalContext::from([("hello".to_string(), Value::String("FOOBAR".to_string()))]),
         )?;
         assert_eq!(result, Value::Boolean(BoolValue::True));
         Ok(())
