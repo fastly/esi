@@ -3,7 +3,7 @@
 /// ## Usage Example
 /// ```rust,no_run
 /// let config = esi::Configuration::default()
-///     .with_namespace("app");
+///     .with_tag_names(esi::TagNames::from_namespace_with_defaults("app"));
 /// ```
 #[allow(clippy::return_self_not_must_use)]
 #[derive(Clone, Debug)]
@@ -60,6 +60,7 @@ pub struct TagNames {
 
 impl TagNames {
     /// Returns tag names as defined within the ESI specification within the given namespace.
+    /// e.g. if `namespace` is `esi`, the tag names will be `esi:include`, `esi:comment`, etc.
     pub fn from_namespace_with_defaults(namespace: &str) -> Self {
         Self {
             include: format!("{namespace}:include",).into_bytes(),
