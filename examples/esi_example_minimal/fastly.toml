@@ -1,7 +1,7 @@
 # This file describes a Fastly Compute package. To learn more visit:
 # https://developer.fastly.com/reference/fastly-toml/
 
-authors = ["kailan@enviark.com"]
+authors = ["kblanks@fastly.com"]
 description = ""
 language = "rust"
 manifest_version = 2
