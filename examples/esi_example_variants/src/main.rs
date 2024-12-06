@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    io::Write,
-};
+use std::{collections::HashMap, io::Write};
 
 use esi::{parse_tags, Reader, Writer};
 use fastly::{http::StatusCode, mime, Request, Response};
@@ -56,10 +53,10 @@ fn main() {
         let mut xml_writer = Writer::new(output_writer);
 
         // Parse the ESI document and store it in memory
-        let mut events = VecDeque::new();
+        let mut events = Vec::new();
         let mut beresp_reader = Reader::from_reader(beresp.take_body());
         parse_tags("esi", &mut beresp_reader, &mut |event| {
-            events.push_back(event);
+            events.push(event);
             Ok(())
         })
         .expect("failed to parse ESI template");
@@ -78,7 +75,7 @@ fn main() {
 
         // Process the already-parsed ESI document, replacing the request URLs with the variant URLs
         let result = processor.process_parsed_document(
-            events,
+            events.into(),
             &mut xml_writer,
             Some(&move |req| {
                 let original_url = req.get_url().to_string();
