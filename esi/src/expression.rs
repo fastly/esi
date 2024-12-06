@@ -26,11 +26,15 @@ pub fn evaluate_expression(raw_expr: String, mut ctx: EvalContext) -> Result<Val
 
 pub struct EvalContext<'a> {
     variables: &'a mut Variables,
+    match_name: String,
     // request content for metadata
 }
 impl EvalContext<'_> {
     pub fn new(variables: &mut Variables) -> EvalContext {
-        EvalContext { variables }
+        EvalContext {
+            variables,
+            match_name: "MATCHES".to_string(),
+        }
     }
     pub fn get_variable(&self, key: &str, subkey: Option<String>) -> Value {
         match key {
@@ -42,6 +46,10 @@ impl EvalContext<'_> {
 
     pub fn set_variable(&mut self, key: &str, subkey: Option<String>, value: Value) {
         self.variables.insert(format_key(key, subkey), value);
+    }
+
+    pub fn set_match_name(&mut self, match_name: &str) {
+        self.match_name = match_name.to_string();
     }
 }
 
@@ -70,7 +78,11 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
                                     Some(s) => Value::String(s.as_str().to_string()),
                                     None => Value::Null,
                                 };
-                                ctx.set_variable("MATCHES", Some(i.to_string()), capval);
+                                ctx.set_variable(
+                                    &ctx.match_name.clone(),
+                                    Some(i.to_string()),
+                                    capval,
+                                );
                             }
 
                             Value::Boolean(BoolValue::True)
@@ -839,6 +851,23 @@ mod tests {
         assert_eq!(result, Value::Boolean(BoolValue::True));
 
         let result = evaluate_expression("$(MATCHES{1})".to_string(), EvalContext::new(&mut vars))?;
+        assert_eq!(result, Value::String("fo".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_matches_with_captures_and_match_name() -> Result<()> {
+        let mut vars =
+            Variables::from([("hello".to_string(), Value::String("foobar".to_string()))]);
+
+        let mut ctx = EvalContext::new(&mut vars);
+        ctx.set_match_name("my_custom_name");
+        let result = evaluate_expression("$(hello) matches '^(fo)o'".to_string(), ctx)?;
+        assert_eq!(result, Value::Boolean(BoolValue::True));
+
+        let result = evaluate_expression(
+            "$(my_custom_name{1})".to_string(),
+            EvalContext::new(&mut vars),
+        )?;
         assert_eq!(result, Value::String("fo".to_string()));
         Ok(())
     }
