@@ -166,6 +166,28 @@
       </esi:choose>
       <br>
 
+      Match with captures against "foobar" using /(oo)(ba)/<br>
+      MATCHES{0}+MATCHES{1}+MATCHES{2} = oobaooba =<esi:choose>
+        <esi:when test="'foobar' matches '(oo)(ba)'">
+          <esi:vars name="$(MATCHES{0})" /><esi:vars name="$(MATCHES{1})" /><esi:vars name="$(MATCHES{2})" />
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Match with captures against "foobar" using /(oo)(ba)/ and matchname="mycustomname"<br>
+      mycustomname{0}+mycustomname{1}+mycustomname{2} = oobaooba =<esi:choose>
+        <esi:when test="'foobar' matches '(oo)(ba)'" matchname="mycustomname">
+          <esi:vars name="$(mycustomname{0})" /><esi:vars name="$(mycustomname{1})" /><esi:vars name="$(mycustomname{2})" />
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
     </div>
   </body>
 </html>

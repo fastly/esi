@@ -471,10 +471,8 @@ fn event_receiver(
         }
         Event::ESI(Tag::Vars { name }) => {
             if let Some(name) = name {
-                match variables.get(&name) {
-                    &Value::Null => {}
-                    v @ _ => queue.push_back(Element::Raw(v.to_string().into_bytes())),
-                }
+                let result = evaluate_expression(name, EvalContext::new(&mut variables))?;
+                queue.push_back(Element::Raw(result.to_string().into_bytes()));
             }
         }
         Event::ESI(Tag::When { .. }) => {
