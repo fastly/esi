@@ -402,7 +402,7 @@ fn event_receiver(
     is_escaped: bool,
     original_request_metadata: &Request,
     dispatch_fragment_request: &FragmentRequestDispatcher,
-    variables: &mut Variables,
+    mut variables: &mut Variables,
 ) -> Result<()> {
     debug!("got {:?}", event);
 
@@ -466,7 +466,7 @@ fn event_receiver(
         //       Hmm... that might not work actually. I need a way to collect the events for
         //       each branch and then ... ugh
         Event::ESI(Tag::Assign { name, value }) => {
-            let result = evaluate_expression(value, EvalContext::new(&variables))?;
+            let result = evaluate_expression(value, EvalContext::new(&mut variables))?;
             variables.insert(name, result);
         }
         Event::ESI(Tag::Vars { name }) => {
@@ -491,7 +491,7 @@ fn event_receiver(
                     match_name: _,
                 } = when
                 {
-                    let result = evaluate_expression(test, EvalContext::new(&variables))?;
+                    let result = evaluate_expression(test, EvalContext::new(&mut variables))?;
                     if result.to_bool() {
                         chose_branch = true;
                         for event in events {

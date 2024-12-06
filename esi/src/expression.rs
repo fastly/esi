@@ -5,7 +5,7 @@ use std::str::Chars;
 
 use crate::{BoolValue, ExecutionError, Result, Value, Variables};
 
-pub fn evaluate_expression(raw_expr: String, ctx: EvalContext) -> Result<Value> {
+pub fn evaluate_expression(raw_expr: String, mut ctx: EvalContext) -> Result<Value> {
     // TODO: this got real ugly, figure out some better way to do this
     let tokens = match lex_expr(raw_expr) {
         Ok(r) => r,
@@ -17,7 +17,7 @@ pub fn evaluate_expression(raw_expr: String, ctx: EvalContext) -> Result<Value> 
         Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
         Err(e) => return Err(e),
     };
-    match eval_expr(expr, &ctx) {
+    match eval_expr(expr, &mut ctx) {
         Ok(r) => Ok(r),
         Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
         Err(e) => return Err(e),
@@ -25,27 +25,38 @@ pub fn evaluate_expression(raw_expr: String, ctx: EvalContext) -> Result<Value> 
 }
 
 pub struct EvalContext<'a> {
-    variables: &'a Variables,
+    variables: &'a mut Variables,
     // request content for metadata
 }
 impl EvalContext<'_> {
-    pub fn new(variables: &Variables) -> EvalContext {
+    pub fn new(variables: &mut Variables) -> EvalContext {
         EvalContext { variables }
     }
-    pub fn get_variable(&self, key: &str, _subkey: Option<String>) -> Value {
+    pub fn get_variable(&self, key: &str, subkey: Option<String>) -> Value {
         match key {
             "HTTP_HOST" => Value::Null,
             "QUERY_STRING" => Value::Null,
-            s => self.variables.get(&s).clone(),
+            _ => self.variables.get(&format_key(key, subkey)).clone(),
         }
+    }
+
+    pub fn set_variable(&mut self, key: &str, subkey: Option<String>, value: Value) {
+        self.variables.insert(format_key(key, subkey), value);
     }
 }
 
-fn eval_expr(expr: Expr, ctx: &EvalContext) -> Result<Value> {
+fn format_key(key: &str, subkey: Option<String>) -> String {
+    match subkey {
+        Some(subkey) => format!("{}[{}]", key, subkey),
+        None => format!("{}", key),
+    }
+}
+
+fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
     let result = match expr {
         Expr::Integer(i) => Value::Integer(i),
         Expr::String(s) => Value::String(s),
-        Expr::Variable(s, _) => ctx.get_variable(&s, None).clone(),
+        Expr::Variable(key, subkey) => ctx.get_variable(&key, subkey).clone(),
         Expr::Comparison(c) => {
             let left = eval_expr(c.left, ctx)?;
             let right = eval_expr(c.right, ctx)?;
@@ -53,7 +64,15 @@ fn eval_expr(expr: Expr, ctx: &EvalContext) -> Result<Value> {
                 Operator::Matches => match (left, right) {
                     (Value::String(test), Value::String(pattern)) => {
                         let re = Regex::new(&pattern)?;
-                        if re.is_match(&test) {
+                        if let Some(captures) = re.captures(&test) {
+                            for (i, cap) in captures.iter().enumerate() {
+                                let capval = match cap {
+                                    Some(s) => Value::String(s.as_str().to_string()),
+                                    None => Value::Null,
+                                };
+                                ctx.set_variable("MATCHES", Some(i.to_string()), capval);
+                            }
+
                             Value::Boolean(BoolValue::True)
                         } else {
                             Value::Boolean(BoolValue::False)
@@ -276,8 +295,6 @@ enum Token {
     Identifier(String),
     OpenParen,
     CloseParen,
-    OpenBracket,
-    CloseBracket,
     Comma,
 }
 
@@ -767,7 +784,7 @@ mod tests {
     #[test]
     fn test_eval_string() -> Result<()> {
         let expr = Expr::String("hello".to_string());
-        let result = eval_expr(expr, &EvalContext::new(&Variables::new()))?;
+        let result = eval_expr(expr, &mut EvalContext::new(&mut Variables::new()))?;
         assert_eq!(result, Value::String("hello".to_string()));
         Ok(())
     }
@@ -777,8 +794,21 @@ mod tests {
         let expr = Expr::Variable("hello".to_string(), None);
         let result = eval_expr(
             expr,
-            &EvalContext::new(&Variables::from([(
+            &mut EvalContext::new(&mut Variables::from([(
                 "hello".to_string(),
+                Value::String("goodbye".to_string()),
+            )])),
+        )?;
+        assert_eq!(result, Value::String("goodbye".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_subscripted_variable() -> Result<()> {
+        let expr = Expr::Variable("hello".to_string(), Some("abc".to_string()));
+        let result = eval_expr(
+            expr,
+            &mut EvalContext::new(&mut Variables::from([(
+                "hello[abc]".to_string(),
                 Value::String("goodbye".to_string()),
             )])),
         )?;
@@ -789,7 +819,7 @@ mod tests {
     fn test_eval_matches_comparison() -> Result<()> {
         let result = evaluate_expression(
             "$(hello) matches '^foo'".to_string(),
-            EvalContext::new(&Variables::from([(
+            EvalContext::new(&mut Variables::from([(
                 "hello".to_string(),
                 Value::String("foobar".to_string()),
             )])),
@@ -798,10 +828,25 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn test_eval_matches_with_captures() -> Result<()> {
+        let mut vars =
+            Variables::from([("hello".to_string(), Value::String("foobar".to_string()))]);
+
+        let result = evaluate_expression(
+            "$(hello) matches '^(fo)o'".to_string(),
+            EvalContext::new(&mut vars),
+        )?;
+        assert_eq!(result, Value::Boolean(BoolValue::True));
+
+        let result = evaluate_expression("$(MATCHES{1})".to_string(), EvalContext::new(&mut vars))?;
+        assert_eq!(result, Value::String("fo".to_string()));
+        Ok(())
+    }
+    #[test]
     fn test_eval_matches_comparison_negative() -> Result<()> {
         let result = evaluate_expression(
             "$(hello) matches '^foo'".to_string(),
-            EvalContext::new(&Variables::from([(
+            EvalContext::new(&mut Variables::from([(
                 "hello".to_string(),
                 Value::String("nope".to_string()),
             )])),
@@ -811,8 +856,10 @@ mod tests {
     }
     #[test]
     fn test_eval_function_call() -> Result<()> {
-        let result =
-            evaluate_expression("$ping()".to_string(), EvalContext::new(&Variables::new()))?;
+        let result = evaluate_expression(
+            "$ping()".to_string(),
+            EvalContext::new(&mut Variables::new()),
+        )?;
         assert_eq!(result, Value::String("pong".to_string()));
         Ok(())
     }
@@ -820,7 +867,7 @@ mod tests {
     fn test_eval_lower_call() -> Result<()> {
         let result = evaluate_expression(
             "$lower('FOO')".to_string(),
-            EvalContext::new(&Variables::new()),
+            EvalContext::new(&mut Variables::new()),
         )?;
         assert_eq!(result, Value::String("foo".to_string()));
         Ok(())
@@ -829,7 +876,7 @@ mod tests {
     fn test_eval_html_encode_call() -> Result<()> {
         let result = evaluate_expression(
             "$html_encode('a > b < c')".to_string(),
-            EvalContext::new(&Variables::new()),
+            EvalContext::new(&mut Variables::new()),
         )?;
         assert_eq!(result, Value::String("a &gt; b &lt; c".to_string()));
         Ok(())
@@ -838,7 +885,7 @@ mod tests {
     fn test_eval_replace_call() -> Result<()> {
         let result = evaluate_expression(
             "$replace('abc-def-ghi-', '-', '==')".to_string(),
-            EvalContext::new(&Variables::new()),
+            EvalContext::new(&mut Variables::new()),
         )?;
         assert_eq!(result, Value::String("abc==def==ghi==".to_string()));
         Ok(())
@@ -848,7 +895,7 @@ mod tests {
     fn test_eval_replace_call_with_count() -> Result<()> {
         let result = evaluate_expression(
             "$replace('abc-def-ghi-', '-', '==', 2)".to_string(),
-            EvalContext::new(&Variables::new()),
+            EvalContext::new(&mut Variables::new()),
         )?;
         assert_eq!(result, Value::String("abc==def==ghi-".to_string()));
         Ok(())
