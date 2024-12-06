@@ -32,8 +32,12 @@ impl EvalContext<'_> {
     pub fn new(variables: &Variables) -> EvalContext {
         EvalContext { variables }
     }
-    pub fn get_metadata(&self, _key: &str) -> Value {
-        Value::Null
+    pub fn get_variable(&self, key: &str, _subkey: Option<String>) -> Value {
+        match key {
+            "HTTP_HOST" => Value::Null,
+            "QUERY_STRING" => Value::Null,
+            s => self.variables.get(&s).clone(),
+        }
     }
 }
 
@@ -41,8 +45,7 @@ fn eval_expr(expr: Expr, ctx: &EvalContext) -> Result<Value> {
     let result = match expr {
         Expr::Integer(i) => Value::Integer(i),
         Expr::String(s) => Value::String(s),
-        Expr::MetaVariable(s, _) => ctx.get_metadata(&s).clone(),
-        Expr::Variable(s, _) => ctx.variables.get(&s).clone(),
+        Expr::Variable(s, _) => ctx.get_variable(&s, None).clone(),
         Expr::Comparison(c) => {
             let left = eval_expr(c.left, ctx)?;
             let right = eval_expr(c.right, ctx)?;
@@ -153,7 +156,6 @@ fn call_dispatch(identifier: String, args: Vec<Value>) -> Result<Value> {
 enum Expr {
     Integer(i64),
     String(String),
-    MetaVariable(String, Option<String>),
     Variable(String, Option<String>),
     Comparison(Box<Comparison>),
     Call(String, Vec<Expr>),
@@ -183,7 +185,6 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
             Token::Integer(i) => Expr::Integer(*i),
             Token::String(s) => Expr::String(s.clone()),
             Token::Variable(s, sub) => Expr::Variable(s.clone(), sub.clone()),
-            Token::MetaVariable(s, sub) => Expr::MetaVariable(s.clone(), sub.clone()),
             Token::Identifier(s) => parse_call(s.clone(), cur)?,
             _ => {
                 return Err(ExecutionError::ExpressionParseError(
@@ -271,7 +272,6 @@ enum Token {
     Integer(i64),
     String(String),
     Variable(String, Option<String>),
-    MetaVariable(String, Option<String>),
     Operator(Operator),
     Identifier(String),
     OpenParen,
@@ -505,26 +505,6 @@ fn get_variable(cur: &mut Peekable<Chars>) -> Result<Token> {
     let mut buf = Vec::new();
     let mut subscript_buf = Vec::new();
     let mut has_subscript = false;
-    let mut is_meta_variable = false;
-
-    if let Some(c) = cur.next() {
-        match c {
-            'a'..='z' => buf.push(c),
-            'A'..='Z' => {
-                is_meta_variable = true;
-                buf.push(c);
-            }
-            _ => {
-                return Err(ExecutionError::ExpressionParseError(
-                    "unexpected character while parsing variable".to_string(),
-                ))
-            }
-        }
-    } else {
-        return Err(ExecutionError::ExpressionParseError(
-            "unexpected eof while parsing variable".to_string(),
-        ));
-    }
 
     while let Some(c) = cur.next() {
         match c {
@@ -547,11 +527,7 @@ fn get_variable(cur: &mut Peekable<Chars>) -> Result<Token> {
         None
     };
 
-    if is_meta_variable {
-        Ok(Token::MetaVariable(buf.into_iter().collect(), subscript))
-    } else {
-        Ok(Token::Variable(buf.into_iter().collect(), subscript))
-    }
+    Ok(Token::Variable(buf.into_iter().collect(), subscript))
 }
 
 #[cfg(test)]
@@ -634,12 +610,6 @@ mod tests {
             tokens,
             vec![Token::Variable("hello".to_string(), Some("6".to_string()))]
         );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_meta_variable() -> Result<()> {
-        let tokens = lex_expr("$(HELLO)".to_string())?;
-        assert_eq!(tokens, vec![Token::MetaVariable("HELLO".to_string(), None)]);
         Ok(())
     }
     #[test]
@@ -746,13 +716,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_parse_meta_variable() -> Result<()> {
-        let tokens = lex_expr("$(HELLO)".to_string())?;
-        let expr = parse(tokens)?;
-        assert_eq!(expr, Expr::MetaVariable("HELLO".to_string(), None));
-        Ok(())
-    }
     #[test]
     fn test_parse_comparison() -> Result<()> {
         let tokens = lex_expr("$(foo) matches 'bar'".to_string())?;
