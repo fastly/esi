@@ -5,7 +5,6 @@ mod document;
 mod error;
 mod expression;
 mod parse;
-mod variables;
 
 use document::{FetchState, Task};
 use expression::{evaluate_expression, EvalContext};
@@ -19,7 +18,6 @@ use std::io::{BufRead, Write};
 pub use crate::document::{Element, Fragment};
 pub use crate::error::Result;
 pub use crate::parse::{parse_tags, Event, Include, Tag, Tag::Try};
-pub use crate::variables::{BoolValue, Value, Variables};
 
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;
@@ -146,8 +144,9 @@ impl Processor {
         // `root_task` is the root task that will be used to fetch tags in recursive manner
         let root_task = &mut Task::new();
 
-        // variables
-        let mut variables = Variables::new();
+        // context for the interpreter
+        let mut ctx = EvalContext::new();
+        ctx.set_request(original_request_metadata.clone_without_body());
 
         let is_escaped = self.configuration.is_escaped_content;
         // Call the library to parse fn `parse_tags` which will call the callback function
@@ -163,7 +162,7 @@ impl Processor {
                     is_escaped,
                     &original_request_metadata,
                     dispatch_fragment_request,
-                    &mut variables,
+                    &mut ctx,
                 )
             },
         )?;
@@ -402,10 +401,8 @@ fn event_receiver(
     is_escaped: bool,
     original_request_metadata: &Request,
     dispatch_fragment_request: &FragmentRequestDispatcher,
-    mut variables: &mut Variables,
+    ctx: &mut EvalContext,
 ) -> Result<()> {
-    debug!("got {:?}", event);
-
     match event {
         Event::ESI(Tag::Include {
             src,
@@ -440,14 +437,14 @@ fn event_receiver(
                 is_escaped,
                 original_request_metadata,
                 dispatch_fragment_request,
-                variables,
+                ctx,
             )?;
             let except_task = task_handler(
                 except_events,
                 is_escaped,
                 original_request_metadata,
                 dispatch_fragment_request,
-                variables,
+                ctx,
             )?;
 
             trace!(
@@ -466,12 +463,13 @@ fn event_receiver(
         //       Hmm... that might not work actually. I need a way to collect the events for
         //       each branch and then ... ugh
         Event::ESI(Tag::Assign { name, value }) => {
-            let result = evaluate_expression(value, EvalContext::new(&mut variables))?;
-            variables.insert(name, result);
+            // TODO: the 'name' here might have a subfield, we need to parse it
+            let result = evaluate_expression(value, ctx)?;
+            ctx.set_variable(&name, None, result);
         }
         Event::ESI(Tag::Vars { name }) => {
             if let Some(name) = name {
-                let result = evaluate_expression(name, EvalContext::new(&mut variables))?;
+                let result = evaluate_expression(name, ctx)?;
                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
             }
         }
@@ -485,7 +483,6 @@ fn event_receiver(
             let mut chose_branch = false;
             for (when, events) in when_branches {
                 if let Tag::When { test, match_name } = when {
-                    let mut ctx = EvalContext::new(&mut variables);
                     if let Some(match_name) = match_name {
                         ctx.set_match_name(&match_name);
                     }
@@ -499,7 +496,7 @@ fn event_receiver(
                                 is_escaped,
                                 original_request_metadata,
                                 dispatch_fragment_request,
-                                variables,
+                                ctx,
                             )?;
                         }
                         break;
@@ -520,7 +517,7 @@ fn event_receiver(
                         is_escaped,
                         original_request_metadata,
                         dispatch_fragment_request,
-                        variables,
+                        ctx,
                     )?;
                 }
             }
@@ -546,8 +543,7 @@ fn event_receiver(
                         match String::from_utf8(varbuf) {
                             Ok(name) => {
                                 println!("Found variable in raw text! {:?}", name);
-                                let result =
-                                    evaluate_expression(name, EvalContext::new(&mut variables))?;
+                                let result = evaluate_expression(name, ctx)?;
                                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
                             }
                             Err(e) => println!("Failed to parse variable: {}", e),
@@ -577,7 +573,7 @@ fn task_handler(
     is_escaped: bool,
     original_request_metadata: &Request,
     dispatch_fragment_request: &FragmentRequestDispatcher,
-    variables: &mut Variables,
+    ctx: &mut EvalContext,
 ) -> Result<Task> {
     let mut task = Task::new();
     for event in events {
@@ -587,7 +583,7 @@ fn task_handler(
             is_escaped,
             original_request_metadata,
             dispatch_fragment_request,
-            variables,
+            ctx,
         )?;
     }
     Ok(task)
