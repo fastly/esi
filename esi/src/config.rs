@@ -27,6 +27,10 @@ impl Configuration {
     /// Sets an alternative ESI namespace, which is used to identify ESI instructions.
     ///
     /// For example, setting this to `test` would cause the processor to only match tags like `<test:include>`.
+    #[deprecated(
+        since = "0.6.0",
+        note = "This method is deprecated and will be removed in a future release. Use `with_tag_names(TagNames#from_namespace_with_defaults)` instead."
+    )]
     pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
         self.tag_names = TagNames::from_namespace_with_defaults(&namespace.into());
         self
