@@ -130,7 +130,7 @@ impl Processor {
         );
 
         // `root_task` is the root task that will be used to fetch tags in recursive manner
-        let root_task: &mut Task = &mut Task::new();
+        let root_task = &mut Task::new();
 
         for event in src_events {
             event_receiver(
@@ -169,7 +169,7 @@ impl Processor {
         );
 
         // `root_task` is the root task that will be used to fetch tags in recursive manner
-        let root_task: &mut Task = &mut Task::new();
+        let root_task = &mut Task::new();
 
         // Call the library to parse fn `parse_tags` which will call the callback function
         // on each tag / event it finds in the document.
