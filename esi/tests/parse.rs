@@ -182,7 +182,6 @@ fn parse_try_accept_except_include() -> Result<(), ExecutionError> {
     let mut except_include_parsed = false;
 
     parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
-        println!("Event - {event:?}");
         if let Event::ESI(Tag::Include {
             ref src,
             ref alt,
@@ -269,7 +268,7 @@ fn parse_try_nested() -> Result<(), ExecutionError> {
     parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
         assert_eq!(
             format!("{event:?}"),
-            r#"ESI(Try { attempt_events: [XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/abc", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Try { attempt_events: [XML(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/foo", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA            ") }))], except_events: [XML(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/bar", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA                ") }))] }), XML(Text(BytesText { content: Owned("0xA    ") }))], except_events: [XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/xyz", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA        ") })), XML(Empty(BytesStart { buf: Owned("a href=\"/efg\""), name_len: 1 })), XML(Text(BytesText { content: Owned("0xA        just text0xA    ") }))] })"#
+            r#"ESI(Try { attempt_events: [Content(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/abc", alt: None, continue_on_error: false }), Content(Text(BytesText { content: Owned("0xA        ") })), ESI(Try { attempt_events: [Content(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/foo", alt: None, continue_on_error: false }), Content(Text(BytesText { content: Owned("0xA            ") }))], except_events: [Content(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/bar", alt: None, continue_on_error: false }), Content(Text(BytesText { content: Owned("0xA                ") }))] }), Content(Text(BytesText { content: Owned("0xA    ") }))], except_events: [Content(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/xyz", alt: None, continue_on_error: false }), Content(Text(BytesText { content: Owned("0xA        ") })), Content(Empty(BytesStart { buf: Owned("a href=\"/efg\""), name_len: 1 })), Content(Text(BytesText { content: Owned("0xA        just text0xA    ") }))] })"#
         );
         if let Event::ESI(Tag::Try {
             attempt_events,

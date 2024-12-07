@@ -54,8 +54,8 @@ pub enum Tag<'a> {
 #[derive(Debug)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum Event<'e> {
-    XML(XmlEvent<'e>),
-    VarsContent(XmlEvent<'e>),
+    Content(XmlEvent<'e>),
+    InterpolatedContent(XmlEvent<'e>),
     ESI(Tag<'e>),
 }
 
@@ -350,9 +350,9 @@ where
                 }
 
                 let event = if open_vars {
-                    Event::VarsContent(e.into_owned())
+                    Event::InterpolatedContent(e.into_owned())
                 } else {
-                    Event::XML(e.into_owned())
+                    Event::Content(e.into_owned())
                 };
                 if use_queue {
                     task.push(event);

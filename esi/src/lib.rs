@@ -394,7 +394,6 @@ fn process_try(
 
 // Receives `Event` from the parser and process it.
 // The result is pushed to a queue of elements or written to the output stream.
-// TODO: combine Variables and Request (and eventually a stdlib object) into a Context
 fn event_receiver(
     event: Event,
     queue: &mut VecDeque<Element>,
@@ -519,8 +518,7 @@ fn event_receiver(
             }
         }
 
-        // TODO: change to InterpolatedContent
-        Event::VarsContent(event) => {
+        Event::InterpolatedContent(event) => {
             let mut buf = vec![];
             let mut cur = event.iter().peekable();
             while let Some(c) = cur.next() {
@@ -551,7 +549,7 @@ fn event_receiver(
             }
             queue.push_back(Element::Raw(buf));
         }
-        Event::XML(event) => {
+        Event::Content(event) => {
             debug!("pushing content to buffer, len: {}", queue.len());
             let mut buf = vec![];
             let mut writer = Writer::new(&mut buf);
