@@ -42,10 +42,9 @@ pub enum ExecutionError {
     #[error("writer error: {0}")]
     WriterError(#[from] std::io::Error),
 
-    /// Expression parse error
-    // TODO: add lexer and eval errors
-    #[error("expression failed to parse: `{0}`")]
-    ExpressionParseError(String),
+    /// Expression error
+    #[error("expression failed to evaluate: `{0}`")]
+    ExpressionError(String),
 
     /// An error occurred while creating a regular expression in an eval context
     #[error("failed to create a regular expression")]

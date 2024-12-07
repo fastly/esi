@@ -8,22 +8,27 @@ use std::str::Chars;
 
 use crate::{ExecutionError, Result};
 
-pub fn evaluate_expression(raw_expr: String, ctx: &mut EvalContext) -> Result<Value> {
-    // TODO: this got real ugly, figure out some better way to do this
+pub fn logged_evaluate_expression(raw_expr: String, ctx: &mut EvalContext) -> Value {
+    let result = evaluate_expression(raw_expr, ctx);
+    match result {
+        Value::Error(ref e) => println!("Error occurred during expression evaluation: {}", e),
+        _ => {}
+    }
+    return result;
+}
+
+pub fn evaluate_expression(raw_expr: String, ctx: &mut EvalContext) -> Value {
     let tokens = match lex_expr(raw_expr) {
         Ok(r) => r,
-        Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
-        Err(e) => return Err(e),
+        Err(e) => return Value::Error(format!("lex error: {}", e.to_string())),
     };
     let expr = match parse(tokens) {
         Ok(r) => r,
-        Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
-        Err(e) => return Err(e),
+        Err(e) => return Value::Error(format!("parse error: {}", e.to_string())),
     };
     match eval_expr(expr, ctx) {
-        Ok(r) => Ok(r),
-        Err(ExecutionError::ExpressionParseError(s)) => return Ok(Value::Error(s)),
-        Err(e) => return Err(e),
+        Ok(r) => r,
+        Err(e) => return Value::Error(format!("eval error: {}", e.to_string())),
     }
 }
 
@@ -274,9 +279,7 @@ fn parse(tokens: Vec<Token>) -> Result<Expr> {
 
     let expr = parse_expr(&mut cur)?;
     if cur.peek() != None {
-        return Err(ExecutionError::ExpressionParseError(
-            "expected eof".to_string(),
-        ));
+        return Err(ExecutionError::ExpressionError("expected eof".to_string()));
     }
     Ok(expr)
 }
@@ -288,13 +291,13 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
             Token::Variable(s, sub) => Expr::Variable(s.clone(), sub.clone()),
             Token::Identifier(s) => parse_call(s.clone(), cur)?,
             _ => {
-                return Err(ExecutionError::ExpressionParseError(
+                return Err(ExecutionError::ExpressionError(
                     "unexpected token starting expression".to_string(),
                 ))
             }
         }
     } else {
-        return Err(ExecutionError::ExpressionParseError(
+        return Err(ExecutionError::ExpressionError(
             "unexpected end of tokens".to_string(),
         ));
     };
@@ -312,7 +315,7 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
     let operator = match cur.next().unwrap() {
         Token::Operator(op) => op,
         _ => {
-            return Err(ExecutionError::ExpressionParseError(
+            return Err(ExecutionError::ExpressionError(
                 "expected operator".to_string(),
             ));
         }
@@ -350,7 +353,7 @@ fn parse_call(identifier: String, cur: &mut Peekable<Iter<Token>>) -> Result<Exp
                                 continue;
                             }
                             _ => {
-                                return Err(ExecutionError::ExpressionParseError(
+                                return Err(ExecutionError::ExpressionError(
                                     "unexpected token in arg list".to_string(),
                                 ))
                             }
@@ -361,7 +364,7 @@ fn parse_call(identifier: String, cur: &mut Peekable<Iter<Token>>) -> Result<Exp
             Ok(Expr::Call(identifier, args))
         }
         _ => {
-            return Err(ExecutionError::ExpressionParseError(
+            return Err(ExecutionError::ExpressionError(
                 "unexpected token following identifier".to_string(),
             ))
         }
@@ -409,12 +412,12 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
                             'a'..='z' => {
                                 result.push(get_identifier(&mut cur));
                             }
-                            _ => return Err(ExecutionError::ExpressionParseError(expr)),
+                            _ => return Err(ExecutionError::ExpressionError(expr)),
                         }
                     }
 
                     // TODO: make these errors more useful, i.e. point to the problem
-                    _ => return Err(ExecutionError::ExpressionParseError(expr)),
+                    _ => return Err(ExecutionError::ExpressionError(expr)),
                 }
             }
             '0'..='9' | '-' => {
@@ -426,7 +429,7 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
             }
             '=' | '!' | '<' | '>' | '|' | '&' => {
                 // TODO: normal operator
-                return Err(ExecutionError::ExpressionParseError(expr));
+                return Err(ExecutionError::ExpressionError(expr));
             }
             '(' => {
                 cur.next();
@@ -443,7 +446,7 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
             ' ' => {
                 cur.next();
             }
-            _ => return Err(ExecutionError::ExpressionParseError(expr)),
+            _ => return Err(ExecutionError::ExpressionError(expr)),
         }
     }
 
@@ -465,7 +468,7 @@ fn get_integer(cur: &mut Peekable<Chars>) -> Result<Token> {
         // Make sure the zero isn't followed by another digit.
         match *c {
             '0'..='9' => {
-                return Err(ExecutionError::ExpressionParseError(
+                return Err(ExecutionError::ExpressionError(
                     "invalid number".to_string(),
                 ))
             }
@@ -475,14 +478,14 @@ fn get_integer(cur: &mut Peekable<Chars>) -> Result<Token> {
 
     if c == '-' {
         let Some(c) = cur.next() else {
-            return Err(ExecutionError::ExpressionParseError(
+            return Err(ExecutionError::ExpressionError(
                 "invalid number".to_string(),
             ));
         };
         match c {
             '1'..='9' => buf.push(c),
             _ => {
-                return Err(ExecutionError::ExpressionParseError(
+                return Err(ExecutionError::ExpressionError(
                     "invalid number".to_string(),
                 ))
             }
@@ -496,7 +499,7 @@ fn get_integer(cur: &mut Peekable<Chars>) -> Result<Token> {
         }
     }
     let Ok(num) = buf.into_iter().collect::<String>().parse() else {
-        return Err(ExecutionError::ExpressionParseError(
+        return Err(ExecutionError::ExpressionError(
             "invalid number".to_string(),
         ));
     };
@@ -531,12 +534,11 @@ fn get_word_operator(cur: &mut Peekable<Chars>) -> Result<Token> {
     match s.as_str() {
         "matches" => Ok(Token::Operator(Operator::Matches)),
         "matches_i" => Ok(Token::Operator(Operator::MatchesInsensitive)),
-        _ => Err(ExecutionError::ExpressionParseError(s)),
+        _ => Err(ExecutionError::ExpressionError(s)),
     }
 }
 
 fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
-    // TODO: handle escaping
     let mut buf = Vec::new();
     let mut triple_tick = false;
 
@@ -572,7 +574,7 @@ fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
                     }
                 } else {
                     // error
-                    return Err(ExecutionError::ExpressionParseError(
+                    return Err(ExecutionError::ExpressionError(
                         "unexpected eof while parsing string".to_string(),
                     ));
                 };
@@ -588,7 +590,7 @@ fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
                         buf.push(escaped_c);
                     } else {
                         // error
-                        return Err(ExecutionError::ExpressionParseError(
+                        return Err(ExecutionError::ExpressionError(
                             "unexpected eof while parsing string".to_string(),
                         ));
                     }
@@ -900,7 +902,7 @@ mod tests {
         let result = evaluate_expression(
             "$(hello) matches '^foo'".to_string(),
             &mut EvalContext::from([("hello".to_string(), Value::String("foobar".to_string()))]),
-        )?;
+        );
         assert_eq!(result, Value::Boolean(BoolValue::True));
         Ok(())
     }
@@ -909,7 +911,7 @@ mod tests {
         let result = evaluate_expression(
             "$(hello) matches_i '^foo'".to_string(),
             &mut EvalContext::from([("hello".to_string(), Value::String("FOOBAR".to_string()))]),
-        )?;
+        );
         assert_eq!(result, Value::Boolean(BoolValue::True));
         Ok(())
     }
@@ -918,10 +920,10 @@ mod tests {
         let mut ctx =
             &mut EvalContext::from([("hello".to_string(), Value::String("foobar".to_string()))]);
 
-        let result = evaluate_expression("$(hello) matches '^(fo)o'".to_string(), &mut ctx)?;
+        let result = evaluate_expression("$(hello) matches '^(fo)o'".to_string(), &mut ctx);
         assert_eq!(result, Value::Boolean(BoolValue::True));
 
-        let result = evaluate_expression("$(MATCHES{1})".to_string(), &mut ctx)?;
+        let result = evaluate_expression("$(MATCHES{1})".to_string(), &mut ctx);
         assert_eq!(result, Value::String("fo".to_string()));
         Ok(())
     }
@@ -931,10 +933,10 @@ mod tests {
             &mut EvalContext::from([("hello".to_string(), Value::String("foobar".to_string()))]);
 
         ctx.set_match_name("my_custom_name");
-        let result = evaluate_expression("$(hello) matches '^(fo)o'".to_string(), ctx)?;
+        let result = evaluate_expression("$(hello) matches '^(fo)o'".to_string(), ctx);
         assert_eq!(result, Value::Boolean(BoolValue::True));
 
-        let result = evaluate_expression("$(my_custom_name{1})".to_string(), &mut ctx)?;
+        let result = evaluate_expression("$(my_custom_name{1})".to_string(), &mut ctx);
         assert_eq!(result, Value::String("fo".to_string()));
         Ok(())
     }
@@ -943,19 +945,19 @@ mod tests {
         let result = evaluate_expression(
             "$(hello) matches '^foo'".to_string(),
             &mut EvalContext::from([("hello".to_string(), Value::String("nope".to_string()))]),
-        )?;
+        );
         assert_eq!(result, Value::Boolean(BoolValue::False));
         Ok(())
     }
     #[test]
     fn test_eval_function_call() -> Result<()> {
-        let result = evaluate_expression("$ping()".to_string(), &mut EvalContext::new())?;
+        let result = evaluate_expression("$ping()".to_string(), &mut EvalContext::new());
         assert_eq!(result, Value::String("pong".to_string()));
         Ok(())
     }
     #[test]
     fn test_eval_lower_call() -> Result<()> {
-        let result = evaluate_expression("$lower('FOO')".to_string(), &mut EvalContext::new())?;
+        let result = evaluate_expression("$lower('FOO')".to_string(), &mut EvalContext::new());
         assert_eq!(result, Value::String("foo".to_string()));
         Ok(())
     }
@@ -964,7 +966,7 @@ mod tests {
         let result = evaluate_expression(
             "$html_encode('a > b < c')".to_string(),
             &mut EvalContext::new(),
-        )?;
+        );
         assert_eq!(result, Value::String("a &gt; b &lt; c".to_string()));
         Ok(())
     }
@@ -973,7 +975,7 @@ mod tests {
         let result = evaluate_expression(
             "$replace('abc-def-ghi-', '-', '==')".to_string(),
             &mut EvalContext::new(),
-        )?;
+        );
         assert_eq!(result, Value::String("abc==def==ghi==".to_string()));
         Ok(())
     }
@@ -983,7 +985,7 @@ mod tests {
         let result = evaluate_expression(
             "$replace('abc-def-ghi-', '-', '==', 2)".to_string(),
             &mut EvalContext::new(),
-        )?;
+        );
         assert_eq!(result, Value::String("abc==def==ghi-".to_string()));
         Ok(())
     }
@@ -991,7 +993,7 @@ mod tests {
     #[test]
     fn test_eval_get_request_metadata_method() -> Result<()> {
         let mut ctx = EvalContext::new();
-        let result = evaluate_expression("$(REQUEST_METHOD)".to_string(), &mut ctx)?;
+        let result = evaluate_expression("$(REQUEST_METHOD)".to_string(), &mut ctx);
         assert_eq!(result, Value::String("GET".to_string()));
         Ok(())
     }
@@ -1000,7 +1002,7 @@ mod tests {
         let mut ctx = EvalContext::new();
         ctx.set_request(Request::new(Method::GET, "http://localhost?hello"));
 
-        let result = evaluate_expression("$(QUERY_STRING)".to_string(), &mut ctx)?;
+        let result = evaluate_expression("$(QUERY_STRING)".to_string(), &mut ctx);
         assert_eq!(result, Value::String("hello".to_string()));
         Ok(())
     }

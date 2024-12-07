@@ -458,18 +458,14 @@ fn event_receiver(
                 except_task,
             });
         }
-        // TODO: For Choose tag, do something like above, but without the task delay aspect
-        //       Collect all the branches in the parser, pass all along with tests here
-        //       Hmm... that might not work actually. I need a way to collect the events for
-        //       each branch and then ... ugh
         Event::ESI(Tag::Assign { name, value }) => {
             // TODO: the 'name' here might have a subfield, we need to parse it
-            let result = evaluate_expression(value, ctx)?;
+            let result = evaluate_expression(value, ctx);
             ctx.set_variable(&name, None, result);
         }
         Event::ESI(Tag::Vars { name }) => {
             if let Some(name) = name {
-                let result = evaluate_expression(name, ctx)?;
+                let result = evaluate_expression(name, ctx);
                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
             }
         }
@@ -486,7 +482,7 @@ fn event_receiver(
                     if let Some(match_name) = match_name {
                         ctx.set_match_name(&match_name);
                     }
-                    let result = evaluate_expression(test, ctx)?;
+                    let result = evaluate_expression(test, ctx);
                     if result.to_bool() {
                         chose_branch = true;
                         for event in events {
@@ -543,7 +539,7 @@ fn event_receiver(
                         match String::from_utf8(varbuf) {
                             Ok(name) => {
                                 println!("Found variable in raw text! {:?}", name);
-                                let result = evaluate_expression(name, ctx)?;
+                                let result = evaluate_expression(name, ctx);
                                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
                             }
                             Err(e) => println!("Failed to parse variable: {}", e),
