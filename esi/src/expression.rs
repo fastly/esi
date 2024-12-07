@@ -120,8 +120,14 @@ pub enum BoolValue {
 impl Value {
     pub fn to_bool(&self) -> bool {
         match self {
-            Value::Integer(_) => true, // TODO: make sure 0 isn't falsey
-            Value::String(_) => true,
+            Value::Integer(n) => match n {
+                0 => false,
+                _ => true,
+            },
+            Value::String(s) => match s {
+                s if s == &"".to_string() => false,
+                _ => true,
+            },
             Value::Error(_) => false,
             Value::Boolean(b) => *b == BoolValue::True,
             Value::Null => false,
@@ -1004,6 +1010,36 @@ mod tests {
 
         let result = evaluate_expression("$(QUERY_STRING)".to_string(), &mut ctx);
         assert_eq!(result, Value::String("hello".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_bool_coercion() -> Result<()> {
+        assert_eq!(Value::Boolean(BoolValue::True).to_bool(), true);
+        assert_eq!(Value::Boolean(BoolValue::False).to_bool(), false);
+        assert_eq!(Value::Integer(1).to_bool(), true);
+        assert_eq!(Value::Integer(0).to_bool(), false);
+        assert_eq!(Value::String("".to_string()).to_bool(), false);
+        assert_eq!(Value::String("hello".to_string()).to_bool(), true);
+        assert_eq!(Value::Error("".to_string()).to_bool(), false);
+        assert_eq!(Value::Error("hello".to_string()).to_bool(), false);
+        assert_eq!(Value::Null.to_bool(), false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_string_coercion() -> Result<()> {
+        assert_eq!(Value::Boolean(BoolValue::True).to_string(), "");
+        assert_eq!(Value::Boolean(BoolValue::False).to_string(), "");
+        assert_eq!(Value::Integer(1).to_string(), "1");
+        assert_eq!(Value::Integer(0).to_string(), "0");
+        assert_eq!(Value::String("".to_string()).to_string(), "");
+        assert_eq!(Value::String("hello".to_string()).to_string(), "hello");
+        assert_eq!(Value::Error("".to_string()).to_string(), "");
+        assert_eq!(Value::Error("hello".to_string()).to_string(), "");
+        assert_eq!(Value::Null.to_string(), "");
+
         Ok(())
     }
 }
