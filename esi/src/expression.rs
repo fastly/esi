@@ -54,15 +54,60 @@ impl EvalContext {
     }
     pub fn get_variable(&self, key: &str, subkey: Option<String>) -> Value {
         match key {
-            "HTTP_HOST" => match self.request.get_header("host") {
-                Some(h) => Value::String(h.to_str().unwrap_or_else(|_| "").to_string()),
-                None => Value::Null,
-            },
             "REQUEST_METHOD" => Value::String(self.request.get_method_str().to_string()),
+            "REQUEST_PATH" => Value::String(self.request.get_path().to_string()),
+            "REMOTE_ADDR" => Value::String(match self.request.get_client_ip_addr() {
+                None => "".to_string(),
+                Some(ip) => ip.to_string(),
+            }),
             "QUERY_STRING" => match self.request.get_query_str() {
-                Some(s) => Value::String(s.to_string()),
+                Some(query) => {
+                    match subkey {
+                        None => Value::String(query.to_string()),
+                        Some(field) => {
+                            // TODO: I'm not sure if we should be URL decoding these fields
+                            for s in query.split("&") {
+                                let parts: Vec<_> = s.split("=").collect();
+                                if parts.len() < 2 {
+                                    continue;
+                                } else {
+                                    if parts[0] == field {
+                                        return Value::String(parts[1].to_string());
+                                    }
+                                }
+                            }
+                            return Value::Null;
+                        }
+                    }
+                }
                 None => Value::Null,
             },
+            _ if key.starts_with("HTTP_") => {
+                let header = key.replacen("HTTP_", "", 1);
+                match self.request.get_header(header) {
+                    Some(h) => {
+                        let value = h.to_str().unwrap_or_else(|_| "");
+                        match subkey {
+                            Some(field) => {
+                                for s in value.split("; ") {
+                                    let parts: Vec<_> = s.split("=").collect();
+                                    if parts.len() < 2 {
+                                        continue;
+                                    } else {
+                                        if parts[0] == field {
+                                            return Value::String(parts[1].to_string());
+                                        }
+                                    }
+                                }
+                                return Value::Null;
+                            }
+                            None => Value::String(value.to_string()),
+                        }
+                    }
+                    None => Value::Null,
+                }
+            }
+
             _ => self
                 .vars
                 .get(&format_key(key, subkey))
@@ -1044,19 +1089,80 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_get_request_metadata_method() -> Result<()> {
+    fn test_eval_get_request_method() -> Result<()> {
         let mut ctx = EvalContext::new();
         let result = evaluate_expression("$(REQUEST_METHOD)".to_string(), &mut ctx);
         assert_eq!(result, Value::String("GET".to_string()));
         Ok(())
     }
     #[test]
-    fn test_eval_get_request_metadata_query() -> Result<()> {
+    fn test_eval_get_request_path() -> Result<()> {
+        let mut ctx = EvalContext::new();
+        ctx.set_request(Request::new(Method::GET, "http://localhost/hello/there"));
+
+        let result = evaluate_expression("$(REQUEST_PATH)".to_string(), &mut ctx);
+        assert_eq!(result, Value::String("/hello/there".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_get_request_query() -> Result<()> {
         let mut ctx = EvalContext::new();
         ctx.set_request(Request::new(Method::GET, "http://localhost?hello"));
 
         let result = evaluate_expression("$(QUERY_STRING)".to_string(), &mut ctx);
         assert_eq!(result, Value::String("hello".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_get_request_query_field() -> Result<()> {
+        let mut ctx = EvalContext::new();
+        ctx.set_request(Request::new(Method::GET, "http://localhost?hello=goodbye"));
+
+        let result = evaluate_expression("$(QUERY_STRING{'hello'})".to_string(), &mut ctx);
+        assert_eq!(result, Value::String("goodbye".to_string()));
+        let result = evaluate_expression("$(QUERY_STRING{'nonexistent'})".to_string(), &mut ctx);
+        assert_eq!(result, Value::Null);
+        Ok(())
+    }
+    #[test]
+    fn test_eval_get_remote_addr() -> Result<()> {
+        // This is kind of a useless test as this will always return an empty string.
+        let mut ctx = EvalContext::new();
+        ctx.set_request(Request::new(Method::GET, "http://localhost?hello"));
+
+        let result = evaluate_expression("$(REMOTE_ADDR)".to_string(), &mut ctx);
+        assert_eq!(result, Value::String("".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_get_header() -> Result<()> {
+        // This is kind of a useless test as this will always return an empty string.
+        let mut ctx = EvalContext::new();
+        let mut req = Request::new(Method::GET, "http://localhost");
+        req.set_header("host", "hello.com");
+        req.set_header("foobar", "baz");
+        ctx.set_request(req);
+
+        let result = evaluate_expression("$(HTTP_HOST)".to_string(), &mut ctx);
+        assert_eq!(result, Value::String("hello.com".to_string()));
+        let result = evaluate_expression("$(HTTP_FOOBAR)".to_string(), &mut ctx);
+        assert_eq!(result, Value::String("baz".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_get_header_field() -> Result<()> {
+        // This is kind of a useless test as this will always return an empty string.
+        let mut ctx = EvalContext::new();
+        let mut req = Request::new(Method::GET, "http://localhost");
+        req.set_header("Cookie", "foo=bar; bar=baz");
+        ctx.set_request(req);
+
+        let result = evaluate_expression("$(HTTP_COOKIE{'foo'})".to_string(), &mut ctx);
+        assert_eq!(result, Value::String("bar".to_string()));
+        let result = evaluate_expression("$(HTTP_COOKIE{'bar'})".to_string(), &mut ctx);
+        assert_eq!(result, Value::String("baz".to_string()));
+        let result = evaluate_expression("$(HTTP_COOKIE{'baz'})".to_string(), &mut ctx);
+        assert_eq!(result, Value::Null);
         Ok(())
     }
 
