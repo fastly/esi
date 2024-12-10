@@ -167,7 +167,7 @@ fn format_key(key: &str, subkey: Option<String>) -> String {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    Integer(i64),
+    Integer(i32),
     String(String),
     Error(String),
     Boolean(BoolValue),
@@ -333,7 +333,7 @@ fn call_dispatch(identifier: String, args: Vec<Value>) -> Result<Value> {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Expr {
-    Integer(i64),
+    Integer(i32),
     String(String),
     Variable(String, Option<Box<Expr>>),
     Comparison(Box<Comparison>),
@@ -520,7 +520,7 @@ fn parse_call(identifier: &str, cur: &mut Peekable<Iter<Token>>) -> Result<Expr>
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Integer(i64),
+    Integer(i32),
     String(String),
     Symbol(Symbol),
     OpenParen,
