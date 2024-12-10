@@ -95,7 +95,6 @@ impl TagNames {
 enum ContentType {
     Normal,
     Interpolated,
-    Delete,
 }
 
 fn do_parse<'a, R>(

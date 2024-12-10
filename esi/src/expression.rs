@@ -459,7 +459,6 @@ fn parse_call(identifier: &str, cur: &mut Peekable<Iter<Token>>) -> Result<Expr>
 enum Token {
     Integer(i32),
     String(String),
-    Symbol(Symbol),
     OpenParen,
     CloseParen,
     OpenBracket,
@@ -468,9 +467,6 @@ enum Token {
     Dollar,
     Bareword(String),
 }
-
-#[derive(Debug, Clone, PartialEq)]
-enum Symbol {}
 
 fn lex_expr(expr: String) -> Result<Vec<Token>> {
     let mut result = Vec::new();
@@ -534,7 +530,6 @@ fn lex_interpolated_expr(cur: &mut Peekable<Chars>) -> Result<Vec<Token>> {
         _ => return Err(ExecutionError::ExpressionError("no expression".to_string())),
     }
 
-    let mut seen_paren = false;
     let mut paren_depth = 0;
 
     while let Some(c) = cur.peek() {
@@ -560,7 +555,6 @@ fn lex_interpolated_expr(cur: &mut Peekable<Chars>) -> Result<Vec<Token>> {
                 ));
             }
             '(' => {
-                seen_paren = true;
                 paren_depth += 1;
                 cur.next();
                 result.push(Token::OpenParen);
@@ -570,6 +564,8 @@ fn lex_interpolated_expr(cur: &mut Peekable<Chars>) -> Result<Vec<Token>> {
                 result.push(Token::CloseParen);
                 paren_depth -= 1;
                 if paren_depth <= 0 {
+                    // Either we've found our final match paren, or we hit a closing paren
+                    // without an opening one. Regardless, we can stop here.
                     break;
                 }
             }
