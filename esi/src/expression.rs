@@ -6,7 +6,7 @@ use std::iter::Peekable;
 use std::slice::Iter;
 use std::str::Chars;
 
-use crate::{ExecutionError, Result};
+use crate::{functions, ExecutionError, Result};
 
 pub fn maybe_evaluate_interpolated(
     cur: &mut Peekable<Chars>,
@@ -261,72 +261,9 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
 fn call_dispatch(identifier: String, args: Vec<Value>) -> Result<Value> {
     match identifier.as_str() {
         "ping" => return Ok(Value::String("pong".to_string())),
-        "lower" => {
-            if args.len() != 1 {
-                return Ok(Value::Error(
-                    "wrong number of arguments to 'lower'".to_string(),
-                ));
-            } else {
-                match &args[0] {
-                    Value::String(s) => return Ok(Value::String(s.to_lowercase())),
-                    _ => return Ok(Value::Error("incorrect type passed to 'lower'".to_string())),
-                }
-            }
-        }
-        "html_encode" => {
-            if args.len() != 1 {
-                return Ok(Value::Error(
-                    "wrong number of arguments to 'html_encode'".to_string(),
-                ));
-            } else {
-                match &args[0] {
-                    Value::String(s) => {
-                        return Ok(Value::String(html_escape::encode_text(s).to_string()))
-                    }
-                    _ => {
-                        return Ok(Value::Error(
-                            "incorrect type passed to 'html_encode'".to_string(),
-                        ))
-                    }
-                }
-            }
-        }
-        "replace" => {
-            if args.len() < 3 {
-                return Ok(Value::Error(
-                    "wrong number of arguments to 'replace'".to_string(),
-                ));
-            } else {
-                let Value::String(haystack) = &args[0] else {
-                    return Ok(Value::Error(
-                        "incorrect type passed to 'replace'".to_string(),
-                    ));
-                };
-                let Value::String(needle) = &args[1] else {
-                    return Ok(Value::Error(
-                        "incorrect type passed to 'replace'".to_string(),
-                    ));
-                };
-                let Value::String(replacement) = &args[2] else {
-                    return Ok(Value::Error(
-                        "incorrect type passed to 'replace'".to_string(),
-                    ));
-                };
-
-                if args.len() == 4 {
-                    let Value::Integer(count) = &args[3] else {
-                        return Ok(Value::Error(
-                            "incorrect type passed to 'replace'".to_string(),
-                        ));
-                    };
-                    let count: usize = *count as usize; // TODO: do this more safely
-
-                    return Ok(Value::String(haystack.replacen(needle, replacement, count)));
-                } else {
-                    return Ok(Value::String(haystack.replace(needle, replacement)));
-                }
-            }
-        }
+        "lower" => return Ok(functions::lower(args)),
+        "html_encode" => return Ok(functions::html_encode(args)),
+        "replace" => return Ok(functions::replace(args)),
         _ => return Ok(Value::Error(format!("unknown function: {}", identifier))),
     };
 }
