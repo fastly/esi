@@ -7,7 +7,7 @@ mod expression;
 mod parse;
 
 use document::{FetchState, Task};
-use expression::{evaluate_expression, EvalContext};
+use expression::{logged_evaluate_expression, EvalContext};
 use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
@@ -459,12 +459,12 @@ fn event_receiver(
         }
         Event::ESI(Tag::Assign { name, value }) => {
             // TODO: the 'name' here might have a subfield, we need to parse it
-            let result = evaluate_expression(value, ctx);
+            let result = logged_evaluate_expression(value, ctx);
             ctx.set_variable(&name, None, result);
         }
         Event::ESI(Tag::Vars { name }) => {
             if let Some(name) = name {
-                let result = evaluate_expression(name, ctx);
+                let result = logged_evaluate_expression(name, ctx);
                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
             }
         }
@@ -481,7 +481,7 @@ fn event_receiver(
                     if let Some(match_name) = match_name {
                         ctx.set_match_name(&match_name);
                     }
-                    let result = evaluate_expression(test, ctx);
+                    let result = logged_evaluate_expression(test, ctx);
                     if result.to_bool() {
                         chose_branch = true;
                         for event in events {
@@ -537,7 +537,7 @@ fn event_receiver(
                         match String::from_utf8(varbuf) {
                             Ok(name) => {
                                 println!("Found variable in raw text! {:?}", name);
-                                let result = evaluate_expression(name, ctx);
+                                let result = logged_evaluate_expression(name, ctx);
                                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
                             }
                             Err(e) => println!("Failed to parse variable: {}", e),

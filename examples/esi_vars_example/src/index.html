@@ -28,6 +28,11 @@
       <esi:assign name="test3" value="$(t(est_)))" />
       Check (short form): (EMPTY)=<esi:vars name="$(test3)" />(EMPTY)<br>
       Check (long form): (EMPTY)=<esi:vars>$(test3)</esi:vars>(EMPTY)<br>
+      <br>
+      Setting variable $test4 to the result of function $replace('H-E-L-L-O', '-', '')...<br>
+      <esi:assign name="test4" value="$replace('H-E-L-L-O', '-', '')" />
+      Check (short form): HELLO=<esi:vars name="$(test4)" /><br>
+      Check (long form): HELLO=<esi:vars>$(test4)</esi:vars><br>
 
       <h3>Choose Tests</h3>
       Simple one branch choose:<br>
@@ -38,7 +43,7 @@
         </esi:when>
       </esi:choose>
       <br>
-      
+
       Choose with otherwise, positive:<br>
       HELLO=
       <esi:choose>
@@ -199,6 +204,36 @@
           UH OH
         </esi:when>
       </esi:choose>
+      <br>
+
+      <h3>Interpolation Tests</h3>
+      Interpolated content in a when branch:<br>
+      HELLO=
+      <esi:assign name="interptest" value="'HELLO'" />
+      <esi:choose>
+        <esi:when test="1">
+          $(interptest)
+        </esi:when>
+      </esi:choose>
+      <br>
+
+
+      Interpolated content in an otherwise branch:<br>
+      HELLO=
+      <esi:assign name="interptest" value="'HELLO'" />
+      <esi:choose>
+        <esi:when test="0"></esi:when>
+        <esi:otherwise>
+          $(interptest)
+        </esi:otherwise>
+      </esi:choose>
+      <br>
+
+      Function call in a vars block: $replace('H-E-L-L-O','-','')<br>
+      HELLO=
+      <esi:vars>
+        $replace('H-E-L-L-O','-','')
+      </esi:vars>
       <br>
 
     </div>

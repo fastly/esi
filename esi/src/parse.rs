@@ -91,6 +91,13 @@ impl TagNames {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum ContentType {
+    Normal,
+    Interpolated,
+    Delete,
+}
+
 fn do_parse<'a, R>(
     reader: &mut Reader<R>,
     callback: &mut dyn FnMut(Event<'a>) -> Result<()>,
@@ -100,6 +107,7 @@ fn do_parse<'a, R>(
     choose_depth: &mut usize,
     current_arm: &mut Option<TryTagArms>,
     tag: &TagNames,
+    content_type: ContentType,
 ) -> Result<()>
 where
     R: BufRead,
@@ -127,21 +135,6 @@ where
     // Parse tags and build events vec
     loop {
         match reader.read_event_into(&mut buffer) {
-            // Skip any events received while in the top level of a Try block
-            Ok(XmlEvent::Start(e))
-                if in_try
-                    && !(e.name() == QName(&tag.attempt) || e.name() == QName(&tag.except)) =>
-            {
-                continue
-            }
-            // Skip any events received while in the top level of a When block
-            Ok(XmlEvent::Start(e))
-                if in_choose
-                    && !(e.name() == QName(&tag.when) || e.name() == QName(&tag.otherwise)) =>
-            {
-                continue
-            }
-
             // Handle <esi:remove> tags
             Ok(XmlEvent::Start(e)) if e.name() == QName(&tag.remove) => {
                 is_remove_tag = true;
@@ -205,6 +198,7 @@ where
                         choose_depth,
                         current_arm,
                         tag,
+                        ContentType::Interpolated,
                     )?;
                 } else if e.name() == QName(&tag.except) {
                     *current_arm = Some(TryTagArms::Except);
@@ -217,6 +211,7 @@ where
                         choose_depth,
                         current_arm,
                         tag,
+                        ContentType::Interpolated,
                     )?;
                 }
             }
@@ -244,6 +239,7 @@ where
             }
 
             // Handle <esi:assign> tags, and ignore the contents if they are not self-closing
+            // TODO: assign tags have a long form where the contents are interpolated and assigned to the variable
             Ok(XmlEvent::Empty(e)) if e.name().into_inner().starts_with(&tag.assign) => {
                 assign_tag_handler(&e, callback, task, use_queue)?;
             }
@@ -307,6 +303,7 @@ where
                     choose_depth,
                     current_arm,
                     tag,
+                    ContentType::Interpolated,
                 )?;
                 when_branches.push((when_tag, when_events));
             }
@@ -331,6 +328,7 @@ where
                     choose_depth,
                     current_arm,
                     tag,
+                    ContentType::Interpolated,
                 )?;
             }
             Ok(XmlEvent::End(e)) if e.name() == QName(&tag.otherwise) => {
@@ -349,7 +347,7 @@ where
                     continue;
                 }
 
-                let event = if open_vars {
+                let event = if open_vars || content_type == ContentType::Interpolated {
                     Event::InterpolatedContent(e.into_owned())
                 } else {
                     Event::Content(e.into_owned())
@@ -395,6 +393,7 @@ where
         &mut choose_depth,
         &mut current_arm,
         &tags,
+        ContentType::Normal,
     )?;
     debug!("Root: {:?}", root);
 

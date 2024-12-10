@@ -483,7 +483,7 @@ fn parse_call(identifier: &str, cur: &mut Peekable<Iter<Token>>) -> Result<Expr>
                             _ => {
                                 return Err(ExecutionError::ExpressionError(
                                     "unexpected token in arg list".to_string(),
-                                ))
+                                ));
                             }
                         }
                     }
@@ -649,7 +649,6 @@ fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
             cur.next();
         } else {
             // It's an empty string, let's just return it
-            cur.next();
             return Ok(Token::String("".to_string()));
         }
     }
@@ -721,6 +720,12 @@ mod tests {
                 Token::Integer(0)
             ]
         );
+        Ok(())
+    }
+    #[test]
+    fn test_lex_empty_string() -> Result<()> {
+        let tokens = lex_expr("''".to_string())?;
+        assert_eq!(tokens, vec![Token::String("".to_string())]);
         Ok(())
     }
     #[test]
@@ -849,6 +854,21 @@ mod tests {
                 Token::Bareword("fn".to_string()),
                 Token::OpenParen,
                 Token::String("hello".to_string()),
+                Token::CloseParen
+            ]
+        );
+        Ok(())
+    }
+    #[test]
+    fn test_lex_call_with_empty_string_arg() -> Result<()> {
+        let tokens = lex_expr("$fn('')".to_string())?;
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Dollar,
+                Token::Bareword("fn".to_string()),
+                Token::OpenParen,
+                Token::String("".to_string()),
                 Token::CloseParen
             ]
         );
@@ -1075,6 +1095,15 @@ mod tests {
             &mut EvalContext::new(),
         );
         assert_eq!(result, Value::String("abc==def==ghi==".to_string()));
+        Ok(())
+    }
+    #[test]
+    fn test_eval_replace_call_with_empty_string() -> Result<()> {
+        let result = evaluate_expression(
+            "$replace('abc-def-ghi-', '-', '')".to_string(),
+            &mut EvalContext::new(),
+        );
+        assert_eq!(result, Value::String("abcdefghi".to_string()));
         Ok(())
     }
 
