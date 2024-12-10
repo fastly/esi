@@ -8,6 +8,24 @@ use std::str::Chars;
 
 use crate::{ExecutionError, Result};
 
+pub fn maybe_evaluate_interpolated(
+    cur: &mut Peekable<Chars>,
+    ctx: &mut EvalContext,
+) -> Option<Value> {
+    match evaluate_interpolated(cur, ctx) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            println!("Error while evaluating interpolated expression: {}", e);
+            None
+        }
+    }
+}
+pub fn evaluate_interpolated(cur: &mut Peekable<Chars>, ctx: &mut EvalContext) -> Result<Value> {
+    let tokens = lex_interpolated_expr(cur)?;
+    let expr = parse(tokens)?;
+    eval_expr(expr, ctx)
+}
+
 pub fn logged_evaluate_expression(raw_expr: String, ctx: &mut EvalContext) -> Value {
     let result = evaluate_expression(raw_expr, ctx);
     match result {
@@ -351,6 +369,7 @@ fn parse(tokens: Vec<Token>) -> Result<Expr> {
     }
     Ok(expr)
 }
+
 fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
     let node = if let Some(token) = cur.next() {
         match token {
@@ -564,6 +583,77 @@ fn lex_expr(expr: String) -> Result<Vec<Token>> {
                 cur.next();
             }
             _ => return Err(ExecutionError::ExpressionError(expr)),
+        }
+    }
+
+    Ok(result)
+}
+
+fn lex_interpolated_expr(cur: &mut Peekable<Chars>) -> Result<Vec<Token>> {
+    let mut result = Vec::new();
+
+    match cur.peek() {
+        Some(c) if *c == '$' => {}
+        _ => return Err(ExecutionError::ExpressionError("no expression".to_string())),
+    }
+
+    let mut seen_paren = false;
+    let mut paren_depth = 0;
+
+    while let Some(c) = cur.peek() {
+        match c {
+            '\'' => {
+                cur.next();
+                result.push(get_string(cur)?);
+            }
+            '$' => {
+                cur.next();
+                result.push(Token::Dollar);
+            }
+            '0'..='9' | '-' => {
+                result.push(get_integer(cur)?);
+            }
+            'a'..='z' | 'A'..='Z' => {
+                result.push(get_bareword(cur));
+            }
+            '=' | '!' | '<' | '>' | '|' | '&' => {
+                // TODO: normal operator
+                return Err(ExecutionError::ExpressionError(
+                    "error in lexing interpolated".to_string(),
+                ));
+            }
+            '(' => {
+                seen_paren = true;
+                paren_depth += 1;
+                cur.next();
+                result.push(Token::OpenParen);
+            }
+            ')' => {
+                cur.next();
+                result.push(Token::CloseParen);
+                paren_depth -= 1;
+                if paren_depth <= 0 {
+                    break;
+                }
+            }
+            '{' => {
+                cur.next();
+                result.push(Token::OpenBracket);
+            }
+            '}' => {
+                cur.next();
+                result.push(Token::CloseBracket);
+            }
+            ',' => {
+                cur.next();
+                result.push(Token::Comma);
+            }
+            ' ' => break,
+            _ => {
+                return Err(ExecutionError::ExpressionError(
+                    "error in lexing interpolated".to_string(),
+                ))
+            }
         }
     }
 

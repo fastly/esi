@@ -7,7 +7,7 @@ mod expression;
 mod parse;
 
 use document::{FetchState, Task};
-use expression::{logged_evaluate_expression, EvalContext};
+use expression::{logged_evaluate_expression, maybe_evaluate_interpolated, EvalContext};
 use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
@@ -520,34 +520,36 @@ fn event_receiver(
 
         Event::InterpolatedContent(event) => {
             let mut buf = vec![];
-            let mut cur = event.iter().peekable();
-            while let Some(c) = cur.next() {
-                if *c == b'$' {
-                    if cur.peek() == Some(&&b'(') {
-                        cur.next();
-
-                        let mut varbuf = vec!['$' as u8, '(' as u8];
-                        while let Some(vc) = cur.next() {
-                            varbuf.push(*vc);
-                            if *vc == b')' {
-                                break;
-                            }
+            let event_str =
+                String::from_utf8(event.iter().map(|c| *c).collect()).unwrap_or_default();
+            let mut cur = event_str.chars().peekable();
+            while let Some(c) = cur.peek() {
+                if *c == '$' {
+                    let mut new_cur = cur.clone();
+                    let result = maybe_evaluate_interpolated(&mut new_cur, ctx);
+                    match result {
+                        Some(r) => {
+                            // push what we have so far
+                            queue.push_back(Element::Raw(
+                                buf.into_iter().collect::<String>().into_bytes(),
+                            ));
+                            // push the result
+                            queue.push_back(Element::Raw(r.to_string().into_bytes()));
+                            // setup a new buffer
+                            buf = vec![];
+                            cur = new_cur;
                         }
-
-                        match String::from_utf8(varbuf) {
-                            Ok(name) => {
-                                println!("Found variable in raw text! {:?}", name);
-                                let result = logged_evaluate_expression(name, ctx);
-                                queue.push_back(Element::Raw(result.to_string().into_bytes()));
-                            }
-                            Err(e) => println!("Failed to parse variable: {}", e),
+                        None => {
+                            buf.push(cur.next().unwrap());
                         }
                     }
                 } else {
-                    buf.push(*c);
+                    buf.push(cur.next().unwrap());
                 }
             }
-            queue.push_back(Element::Raw(buf));
+            queue.push_back(Element::Raw(
+                buf.into_iter().collect::<String>().into_bytes(),
+            ));
         }
         Event::Content(event) => {
             debug!("pushing content to buffer, len: {}", queue.len());
