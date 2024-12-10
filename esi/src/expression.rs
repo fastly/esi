@@ -648,7 +648,10 @@ fn lex_interpolated_expr(cur: &mut Peekable<Chars>) -> Result<Vec<Token>> {
                 cur.next();
                 result.push(Token::Comma);
             }
-            ' ' => break,
+            ' ' => {
+                cur.next();
+                continue;
+            }
             _ => {
                 return Err(ExecutionError::ExpressionError(
                     "error in lexing interpolated".to_string(),
