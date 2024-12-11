@@ -1,10 +1,10 @@
 use fastly::http::Method;
 use fastly::Request;
 use regex::RegexBuilder;
-use std::collections::HashMap;
 use std::iter::Peekable;
 use std::slice::Iter;
 use std::str::Chars;
+use std::{collections::HashMap, fmt::Display};
 
 use crate::{functions, ExecutionError, Result};
 
@@ -15,38 +15,37 @@ pub fn maybe_evaluate_interpolated(
     match evaluate_interpolated(cur, ctx) {
         Ok(r) => Some(r),
         Err(e) => {
-            println!("Error while evaluating interpolated expression: {}", e);
+            println!("Error while evaluating interpolated expression: {e}");
             None
         }
     }
 }
 pub fn evaluate_interpolated(cur: &mut Peekable<Chars>, ctx: &mut EvalContext) -> Result<Value> {
     let tokens = lex_interpolated_expr(cur)?;
-    let expr = parse(tokens)?;
+    let expr = parse(&tokens)?;
     eval_expr(expr, ctx)
 }
 
 pub fn logged_evaluate_expression(raw_expr: String, ctx: &mut EvalContext) -> Value {
     let result = evaluate_expression(raw_expr, ctx);
-    match result {
-        Value::Error(ref e) => println!("Error occurred during expression evaluation: {}", e),
-        _ => {}
+    if let Value::Error(ref e) = result {
+        println!("Error occurred during expression evaluation: {e}");
     }
-    return result;
+    result
 }
 
 pub fn evaluate_expression(raw_expr: String, ctx: &mut EvalContext) -> Value {
     let tokens = match lex_expr(raw_expr) {
         Ok(r) => r,
-        Err(e) => return Value::Error(format!("lex error: {}", e.to_string())),
+        Err(e) => return Value::Error(format!("lex error: {e}")),
     };
-    let expr = match parse(tokens) {
+    let expr = match parse(&tokens) {
         Ok(r) => r,
-        Err(e) => return Value::Error(format!("parse error: {}", e.to_string())),
+        Err(e) => return Value::Error(format!("parse error: {e}")),
     };
     match eval_expr(expr, ctx) {
         Ok(r) => r,
-        Err(e) => return Value::Error(format!("eval error: {}", e.to_string())),
+        Err(e) => Value::Error(format!("eval error: {e}")),
     }
 }
 
@@ -56,15 +55,15 @@ pub struct EvalContext {
     request: Request,
 }
 impl EvalContext {
-    pub fn new() -> EvalContext {
-        EvalContext {
+    pub fn new() -> Self {
+        Self {
             vars: HashMap::new(),
             match_name: "MATCHES".to_string(),
             request: Request::new(Method::GET, "http://localhost"),
         }
     }
-    pub fn new_with_vars(vars: HashMap<String, Value>) -> EvalContext {
-        EvalContext {
+    pub fn new_with_vars(vars: HashMap<String, Value>) -> Self {
+        Self {
             vars,
             match_name: "MATCHES".to_string(),
             request: Request::new(Method::GET, "http://localhost"),
@@ -74,56 +73,42 @@ impl EvalContext {
         match key {
             "REQUEST_METHOD" => Value::String(self.request.get_method_str().to_string()),
             "REQUEST_PATH" => Value::String(self.request.get_path().to_string()),
-            "REMOTE_ADDR" => Value::String(match self.request.get_client_ip_addr() {
-                None => "".to_string(),
-                Some(ip) => ip.to_string(),
-            }),
+            "REMOTE_ADDR" => Value::String(
+                self.request
+                    .get_client_ip_addr()
+                    .map_or_else(String::new, |ip| ip.to_string()),
+            ),
             "QUERY_STRING" => match self.request.get_query_str() {
-                Some(query) => {
-                    match subkey {
-                        None => Value::String(query.to_string()),
-                        Some(field) => {
-                            // TODO: I'm not sure if we should be URL decoding these fields
-                            for s in query.split("&") {
-                                let parts: Vec<_> = s.split("=").collect();
-                                if parts.len() < 2 {
-                                    continue;
-                                } else {
-                                    if parts[0] == field {
-                                        return Value::String(parts[1].to_string());
-                                    }
-                                }
-                            }
-                            return Value::Null;
-                        }
+                Some(query) => match subkey {
+                    None => Value::String(query.to_string()),
+                    Some(field) => {
+                        return self
+                            .request
+                            .get_query_parameter(&field)
+                            .map_or_else(|| Value::Null, |v| Value::String(v.to_string()));
                     }
-                }
+                },
                 None => Value::Null,
             },
             _ if key.starts_with("HTTP_") => {
-                let header = key.replacen("HTTP_", "", 1);
-                match self.request.get_header(header) {
-                    Some(h) => {
-                        let value = h.to_str().unwrap_or_else(|_| "");
-                        match subkey {
-                            Some(field) => {
-                                for s in value.split("; ") {
-                                    let parts: Vec<_> = s.split("=").collect();
-                                    if parts.len() < 2 {
-                                        continue;
-                                    } else {
-                                        if parts[0] == field {
-                                            return Value::String(parts[1].to_string());
-                                        }
-                                    }
-                                }
-                                return Value::Null;
-                            }
-                            None => Value::String(value.to_string()),
-                        }
-                    }
-                    None => Value::Null,
-                }
+                let header = key.strip_prefix("HTTP_").unwrap_or_default();
+                self.request.get_header(header).map_or(Value::Null, |h| {
+                    let value = h.to_str().unwrap_or_default();
+                    subkey.map_or_else(
+                        || Value::String(value.to_string()),
+                        |field| {
+                            value
+                                .split(';')
+                                .find_map(|s| {
+                                    s.trim()
+                                        .split_once('=')
+                                        .filter(|(key, _)| *key == field)
+                                        .map(|(_, val)| Value::String(val.to_string()))
+                                })
+                                .unwrap_or(Value::Null)
+                        },
+                    )
+                })
             }
 
             _ => self
@@ -153,16 +138,13 @@ impl EvalContext {
     }
 }
 impl<const N: usize> From<[(String, Value); N]> for EvalContext {
-    fn from(data: [(String, Value); N]) -> EvalContext {
-        EvalContext::new_with_vars(HashMap::from(data))
+    fn from(data: [(String, Value); N]) -> Self {
+        Self::new_with_vars(HashMap::from(data))
     }
 }
 
 fn format_key(key: &str, subkey: Option<String>) -> String {
-    match subkey {
-        Some(subkey) => format!("{}[{}]", key, subkey),
-        None => format!("{}", key),
-    }
+    subkey.map_or_else(|| key.to_string(), |subkey| format!("{key}[{subkey}]"))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,7 +156,7 @@ pub enum Value {
     Null,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoolValue {
     True,
     False,
@@ -183,27 +165,29 @@ pub enum BoolValue {
 impl Value {
     pub fn to_bool(&self) -> bool {
         match self {
-            Value::Integer(n) => match n {
-                0 => false,
-                _ => true,
-            },
-            Value::String(s) => match s {
-                s if s == &"".to_string() => false,
-                _ => true,
-            },
-            Value::Error(_) => false,
-            Value::Boolean(b) => *b == BoolValue::True,
-            Value::Null => false,
+            &Self::Integer(n) => !matches!(n, 0),
+            Self::String(s) => !matches!(s, s if s == &String::new()),
+            Self::Boolean(b) => *b == BoolValue::True,
+            Self::Error(_) | &Self::Null => false,
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Integer(i) => i.to_string(),
-            Value::String(s) => s.clone(),
-            Value::Boolean(_) => "".to_string(), // TODO: not sure if this is right
-            Value::Error(_) => "".to_string(),
-            Value::Null => "".to_string(),
+            Self::Integer(i) => write!(f, "{i}"),
+            Self::String(s) => write!(f, "{s}"),
+            Self::Error(e) => write!(f, "Error: {e}"),
+            Self::Boolean(b) => write!(
+                f,
+                "{}",
+                match b {
+                    BoolValue::True => "true",
+                    BoolValue::False => "false",
+                }
+            ),
+            Self::Null => write!(f, "null"),
         }
     }
 }
@@ -212,10 +196,10 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
     let result = match expr {
         Expr::Integer(i) => Value::Integer(i),
         Expr::String(s) => Value::String(s),
-        Expr::Variable(key, None) => ctx.get_variable(&key, None).clone(),
+        Expr::Variable(key, None) => ctx.get_variable(&key, None),
         Expr::Variable(key, Some(subkey_expr)) => {
             let subkey = eval_expr(*subkey_expr, ctx)?.to_string();
-            ctx.get_variable(&key, Some(subkey)).clone()
+            ctx.get_variable(&key, Some(subkey))
         }
         Expr::Comparison(c) => {
             let left = eval_expr(c.left, ctx)?;
@@ -233,10 +217,8 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
 
                     if let Some(captures) = re.captures(&test) {
                         for (i, cap) in captures.iter().enumerate() {
-                            let capval = match cap {
-                                Some(s) => Value::String(s.as_str().to_string()),
-                                None => Value::Null,
-                            };
+                            let capval =
+                                cap.map_or(Value::Null, |s| Value::String(s.as_str().to_string()));
                             ctx.set_variable(&ctx.match_name.clone(), Some(i.to_string()), capval);
                         }
 
@@ -252,20 +234,20 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
             for arg in args {
                 values.push(eval_expr(arg, ctx)?);
             }
-            call_dispatch(identifier, values)?
+            call_dispatch(&identifier, &values)?
         }
     };
     Ok(result)
 }
 
-fn call_dispatch(identifier: String, args: Vec<Value>) -> Result<Value> {
-    match identifier.as_str() {
-        "ping" => return Ok(Value::String("pong".to_string())),
-        "lower" => return Ok(functions::lower(args)),
-        "html_encode" => return Ok(functions::html_encode(args)),
-        "replace" => return Ok(functions::replace(args)),
-        _ => return Ok(Value::Error(format!("unknown function: {}", identifier))),
-    };
+fn call_dispatch(identifier: &str, args: &[Value]) -> Result<Value> {
+    match identifier {
+        "ping" => Ok(Value::String("pong".to_string())),
+        "lower" => Ok(functions::lower(args)),
+        "html_encode" => Ok(functions::html_encode(args)),
+        "replace" => Ok(functions::replace(args)),
+        _ => Ok(Value::Error(format!("unknown function: {identifier}"))),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -297,11 +279,11 @@ struct Comparison {
 // Call     <- '$' bareword '(' Expr? [',' Expr] ')'
 // BinaryOp <- Expr Operator Expr
 //
-fn parse(tokens: Vec<Token>) -> Result<Expr> {
+fn parse(tokens: &[Token]) -> Result<Expr> {
     let mut cur = tokens.iter().peekable();
 
     let expr = parse_expr(&mut cur)?;
-    if cur.peek() != None {
+    if cur.peek().is_some() {
         return Err(ExecutionError::ExpressionError("expected eof".to_string()));
     }
     Ok(expr)
@@ -347,7 +329,7 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
             let right = parse_expr(cur)?;
             let expr = Expr::Comparison(Box::new(Comparison {
                 left,
-                operator: operator.clone(),
+                operator,
                 right,
             }));
             Ok(expr)
@@ -359,23 +341,19 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
 fn parse_dollar(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
     match cur.next() {
         Some(&Token::OpenParen) => parse_variable(cur),
-        Some(&Token::Bareword(ref s)) => parse_call(s, cur),
-        t => Err(ExecutionError::ExpressionError(format!(
-            "unexpected token: {:?}",
-            t
+        Some(Token::Bareword(s)) => parse_call(s, cur),
+        unexpected => Err(ExecutionError::ExpressionError(format!(
+            "unexpected token: {unexpected:?}",
         ))),
     }
 }
 
 fn parse_variable(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
-    let basename = match cur.next() {
-        Some(&Token::Bareword(ref s)) => s,
-        t => {
-            return Err(ExecutionError::ExpressionError(format!(
-                "unexpected token: {:?}",
-                t
-            )))
-        }
+    let Some(Token::Bareword(basename)) = cur.next() else {
+        return Err(ExecutionError::ExpressionError(format!(
+            "unexpected token: {:?}",
+            cur.next()
+        )));
     };
 
     match cur.next() {
@@ -385,20 +363,19 @@ fn parse_variable(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
             //       if the next token is a bareword instead of trying to parse
             //       an expression.
             let subfield = parse_expr(cur)?;
-            let t = cur.next();
-            if t != Some(&Token::CloseBracket) {
+            let Some(&Token::CloseBracket) = cur.next() else {
                 return Err(ExecutionError::ExpressionError(format!(
                     "unexpected token: {:?}",
-                    t
+                    cur.next()
                 )));
-            }
-            let t = cur.next();
-            if t != Some(&Token::CloseParen) {
+            };
+
+            let Some(&Token::CloseParen) = cur.next() else {
                 return Err(ExecutionError::ExpressionError(format!(
                     "unexpected token: {:?}",
-                    t
+                    cur.next()
                 )));
-            }
+            };
 
             Ok(Expr::Variable(
                 basename.to_string(),
@@ -406,12 +383,9 @@ fn parse_variable(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
             ))
         }
         Some(&Token::CloseParen) => Ok(Expr::Variable(basename.to_string(), None)),
-        t => {
-            return Err(ExecutionError::ExpressionError(format!(
-                "unexpected token: {:?}",
-                t
-            )))
-        }
+        unexpected => Err(ExecutionError::ExpressionError(format!(
+            "unexpected token: {unexpected:?}",
+        ))),
     }
 }
 
@@ -420,38 +394,32 @@ fn parse_call(identifier: &str, cur: &mut Peekable<Iter<Token>>) -> Result<Expr>
         Some(Token::OpenParen) => {
             let mut args = Vec::new();
             loop {
+                if Some(&&Token::CloseParen) == cur.peek() {
+                    cur.next();
+                    break;
+                }
+                args.push(parse_expr(cur)?);
                 match cur.peek() {
                     Some(&&Token::CloseParen) => {
                         cur.next();
                         break;
                     }
+                    Some(&&Token::Comma) => {
+                        cur.next();
+                        continue;
+                    }
                     _ => {
-                        args.push(parse_expr(cur)?);
-                        match cur.peek() {
-                            Some(&&Token::CloseParen) => {
-                                cur.next();
-                                break;
-                            }
-                            Some(&&Token::Comma) => {
-                                cur.next();
-                                continue;
-                            }
-                            _ => {
-                                return Err(ExecutionError::ExpressionError(
-                                    "unexpected token in arg list".to_string(),
-                                ));
-                            }
-                        }
+                        return Err(ExecutionError::ExpressionError(
+                            "unexpected token in arg list".to_string(),
+                        ));
                     }
                 }
             }
             Ok(Expr::Call(identifier.to_string(), args))
         }
-        _ => {
-            return Err(ExecutionError::ExpressionError(
-                "unexpected token following identifier".to_string(),
-            ))
-        }
+        _ => Err(ExecutionError::ExpressionError(
+            "unexpected token following identifier".to_string(),
+        )),
     }
 }
 
@@ -609,13 +577,10 @@ fn get_integer(cur: &mut Peekable<Chars>) -> Result<Token> {
             return Ok(Token::Integer(0));
         };
         // Make sure the zero isn't followed by another digit.
-        match *c {
-            '0'..='9' => {
-                return Err(ExecutionError::ExpressionError(
-                    "invalid number".to_string(),
-                ))
-            }
-            _ => {}
+        if let '0'..='9' = *c {
+            return Err(ExecutionError::ExpressionError(
+                "invalid number".to_string(),
+            ));
         }
     }
 
@@ -675,7 +640,7 @@ fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
             cur.next();
         } else {
             // It's an empty string, let's just return it
-            return Ok(Token::String("".to_string()));
+            return Ok(Token::String(String::new()));
         }
     }
 
@@ -690,11 +655,10 @@ fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
                         // End of a triple tick string
                         cur.next();
                         break;
-                    } else {
-                        // Just two ticks
-                        buf.push(c);
-                        buf.push(c2);
                     }
+                    // Just two ticks
+                    buf.push(c);
+                    buf.push(c2);
                 } else {
                     // error
                     return Err(ExecutionError::ExpressionError(
@@ -940,21 +904,21 @@ mod tests {
     #[test]
     fn test_parse_integer() -> Result<()> {
         let tokens = lex_expr("1".to_string())?;
-        let expr = parse(tokens)?;
+        let expr = parse(&tokens)?;
         assert_eq!(expr, Expr::Integer(1));
         Ok(())
     }
     #[test]
     fn test_parse_simple_string() -> Result<()> {
         let tokens = lex_expr("'hello'".to_string())?;
-        let expr = parse(tokens)?;
+        let expr = parse(&tokens)?;
         assert_eq!(expr, Expr::String("hello".to_string()));
         Ok(())
     }
     #[test]
     fn test_parse_variable() -> Result<()> {
         let tokens = lex_expr("$(hello)".to_string())?;
-        let expr = parse(tokens)?;
+        let expr = parse(&tokens)?;
         assert_eq!(expr, Expr::Variable("hello".to_string(), None));
         Ok(())
     }
@@ -962,7 +926,7 @@ mod tests {
     #[test]
     fn test_parse_comparison() -> Result<()> {
         let tokens = lex_expr("$(foo) matches 'bar'".to_string())?;
-        let expr = parse(tokens)?;
+        let expr = parse(&tokens)?;
         assert_eq!(
             expr,
             Expr::Comparison(Box::new(Comparison {
@@ -976,14 +940,14 @@ mod tests {
     #[test]
     fn test_parse_call() -> Result<()> {
         let tokens = lex_expr("$hello()".to_string())?;
-        let expr = parse(tokens)?;
+        let expr = parse(&tokens)?;
         assert_eq!(expr, Expr::Call("hello".to_string(), Vec::new()));
         Ok(())
     }
     #[test]
     fn test_parse_call_with_arg() -> Result<()> {
         let tokens = lex_expr("$fn('hello')".to_string())?;
-        let expr = parse(tokens)?;
+        let expr = parse(&tokens)?;
         assert_eq!(
             expr,
             Expr::Call("fn".to_string(), vec![Expr::String("hello".to_string())])
@@ -993,7 +957,7 @@ mod tests {
     #[test]
     fn test_parse_call_with_two_args() -> Result<()> {
         let tokens = lex_expr("$fn($(hello), 'hello')".to_string())?;
-        let expr = parse(tokens)?;
+        let expr = parse(&tokens)?;
         assert_eq!(
             expr,
             Expr::Call(
@@ -1238,15 +1202,18 @@ mod tests {
 
     #[test]
     fn test_string_coercion() -> Result<()> {
-        assert_eq!(Value::Boolean(BoolValue::True).to_string(), "");
-        assert_eq!(Value::Boolean(BoolValue::False).to_string(), "");
+        assert_eq!(Value::Boolean(BoolValue::True).to_string(), "true");
+        assert_eq!(Value::Boolean(BoolValue::False).to_string(), "false");
         assert_eq!(Value::Integer(1).to_string(), "1");
         assert_eq!(Value::Integer(0).to_string(), "0");
         assert_eq!(Value::String("".to_string()).to_string(), "");
         assert_eq!(Value::String("hello".to_string()).to_string(), "hello");
-        assert_eq!(Value::Error("".to_string()).to_string(), "");
-        assert_eq!(Value::Error("hello".to_string()).to_string(), "");
-        assert_eq!(Value::Null.to_string(), "");
+        assert_eq!(Value::Error("".to_string()).to_string(), "Error: ");
+        assert_eq!(
+            Value::Error("hello".to_string()).to_string(),
+            "Error: hello"
+        );
+        assert_eq!(Value::Null.to_string(), "null");
 
         Ok(())
     }

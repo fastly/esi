@@ -106,7 +106,7 @@ fn do_parse<'a, R>(
     choose_depth: &mut usize,
     current_arm: &mut Option<TryTagArms>,
     tag: &TagNames,
-    content_type: ContentType,
+    content_type: &ContentType,
 ) -> Result<()>
 where
     R: BufRead,
@@ -197,7 +197,7 @@ where
                         choose_depth,
                         current_arm,
                         tag,
-                        ContentType::Interpolated,
+                        &ContentType::Interpolated,
                     )?;
                 } else if e.name() == QName(&tag.except) {
                     *current_arm = Some(TryTagArms::Except);
@@ -210,7 +210,7 @@ where
                         choose_depth,
                         current_arm,
                         tag,
-                        ContentType::Interpolated,
+                        &ContentType::Interpolated,
                     )?;
                 }
             }
@@ -291,7 +291,7 @@ where
                     return unexpected_opening_tag_error(e);
                 }
 
-                let when_tag = parse_when(&e)?;
+                let when_tag = parse_when(e)?;
                 let mut when_events = Vec::new();
                 do_parse(
                     reader,
@@ -302,7 +302,7 @@ where
                     choose_depth,
                     current_arm,
                     tag,
-                    ContentType::Interpolated,
+                    &ContentType::Interpolated,
                 )?;
                 when_branches.push((when_tag, when_events));
             }
@@ -327,7 +327,7 @@ where
                     choose_depth,
                     current_arm,
                     tag,
-                    ContentType::Interpolated,
+                    &ContentType::Interpolated,
                 )?;
             }
             Ok(XmlEvent::End(e)) if e.name() == QName(&tag.otherwise) => {
@@ -346,7 +346,7 @@ where
                     continue;
                 }
 
-                let event = if open_vars || content_type == ContentType::Interpolated {
+                let event = if open_vars || content_type == &ContentType::Interpolated {
                     Event::InterpolatedContent(e.into_owned())
                 } else {
                     Event::Content(e.into_owned())
@@ -392,7 +392,7 @@ where
         &mut choose_depth,
         &mut current_arm,
         &tags,
-        ContentType::Normal,
+        &ContentType::Normal,
     )?;
     debug!("Root: {:?}", root);
 

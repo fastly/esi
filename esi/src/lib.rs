@@ -521,8 +521,7 @@ fn event_receiver(
 
         Event::InterpolatedContent(event) => {
             let mut buf = vec![];
-            let event_str =
-                String::from_utf8(event.iter().map(|c| *c).collect()).unwrap_or_default();
+            let event_str = String::from_utf8(event.iter().copied().collect()).unwrap_or_default();
             let mut cur = event_str.chars().peekable();
             while let Some(c) = cur.peek() {
                 if *c == '$' {
