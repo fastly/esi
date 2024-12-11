@@ -5,7 +5,7 @@ authors = ["kblanks@fastly.com"]
 description = ""
 language = "rust"
 manifest_version = 2
-name = "esi_example_minimal"
+name = "esi_example_variants"
 service_id = ""
 
 [local_server]
@@ -17,7 +17,7 @@ service_id = ""
       override_host = "mock-s3.edgecompute.app"
 
 [scripts]
-  build = "cargo build --bin esi_example_minimal --release --target wasm32-wasi --color always"
+  build = "cargo build --bin esi_example_variants --release --target wasm32-wasi --color always"
 
 [setup]
 

@@ -111,27 +111,17 @@ impl Processor {
         }
     }
 
-    /// Process an ESI document from a [`quick_xml::Reader`].
-    pub fn process_document(
+    /// Process an ESI document that has already been parsed into a queue of events.
+    pub fn process_parsed_document(
         self,
-        mut src_document: Reader<impl BufRead>,
+        src_events: VecDeque<Event>,
         output_writer: &mut Writer<impl Write>,
         dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
         // Set up fragment request dispatcher. Use what's provided or use a default
-        let dispatch_fragment_request = dispatch_fragment_request.unwrap_or({
-            &|req| {
-                debug!("no dispatch method configured, defaulting to hostname");
-                let backend = req
-                    .get_url()
-                    .host()
-                    .unwrap_or_else(|| panic!("no host in request: {}", req.get_url()))
-                    .to_string();
-                let pending_req = req.send_async(backend)?;
-                Ok(pending_req.into())
-            }
-        });
+        let dispatch_fragment_request =
+            dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
 
         // If there is a source request to mimic, copy its metadata, otherwise use a default request.
         let original_request_metadata = self.original_request_metadata.as_ref().map_or_else(
@@ -142,7 +132,45 @@ impl Processor {
         // `root_task` is the root task that will be used to fetch tags in recursive manner
         let root_task = &mut Task::new();
 
-        let is_escaped = self.configuration.is_escaped_content;
+        for event in src_events {
+            event_receiver(
+                event,
+                &mut root_task.queue,
+                self.configuration.is_escaped_content,
+                &original_request_metadata,
+                dispatch_fragment_request,
+            )?;
+        }
+
+        self.process_root_task(
+            root_task,
+            output_writer,
+            dispatch_fragment_request,
+            process_fragment_response,
+        )
+    }
+
+    /// Process an ESI document from a [`quick_xml::Reader`].
+    pub fn process_document(
+        self,
+        mut src_document: Reader<impl BufRead>,
+        output_writer: &mut Writer<impl Write>,
+        dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        // Set up fragment request dispatcher. Use what's provided or use a default
+        let dispatch_fragment_request =
+            dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
+
+        // If there is a source request to mimic, copy its metadata, otherwise use a default request.
+        let original_request_metadata = self.original_request_metadata.as_ref().map_or_else(
+            || Request::new(Method::GET, "http://localhost"),
+            Request::clone_without_body,
+        );
+
+        // `root_task` is the root task that will be used to fetch tags in recursive manner
+        let root_task = &mut Task::new();
+
         // Call the library to parse fn `parse_tags` which will call the callback function
         // on each tag / event it finds in the document.
         // The callback function `handle_events` will handle the event.
@@ -153,18 +181,34 @@ impl Processor {
                 event_receiver(
                     event,
                     &mut root_task.queue,
-                    is_escaped,
+                    self.configuration.is_escaped_content,
                     &original_request_metadata,
                     dispatch_fragment_request,
                 )
             },
         )?;
 
+        self.process_root_task(
+            root_task,
+            output_writer,
+            dispatch_fragment_request,
+            process_fragment_response,
+        )
+    }
+
+    fn process_root_task(
+        self,
+        root_task: &mut Task,
+        output_writer: &mut Writer<impl Write>,
+        dispatch_fragment_request: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
         // set the root depth to 0
         let mut depth = 0;
 
         debug!("Elements to fetch: {:?}", root_task.queue);
-        // Elements dependent on backend requests got are queued up.
+
+        // Elements dependent on backend requests are queued up.
         // The responses will need to be fetched and processed.
         // Go over the list for any pending responses and write them to the client output stream.
         fetch_elements(
@@ -177,6 +221,17 @@ impl Processor {
 
         Ok(())
     }
+}
+
+fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
+    debug!("no dispatch method configured, defaulting to hostname");
+    let backend = req
+        .get_url()
+        .host()
+        .unwrap_or_else(|| panic!("no host in request: {}", req.get_url()))
+        .to_string();
+    let pending_req = req.send_async(backend)?;
+    Ok(PendingFragmentContent::PendingRequest(pending_req))
 }
 
 // This function is responsible for fetching pending requests and writing their
