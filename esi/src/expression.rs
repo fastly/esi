@@ -9,6 +9,7 @@ use std::{collections::HashMap, fmt::Display};
 use crate::{functions, ExecutionError, Result};
 
 const LEXING_ERROR: &str = "error in lexing interpolated";
+const MISSING_CLOSE_PAREN: &str = "missing closing parenthesis";
 
 pub fn maybe_evaluate_interpolated(
     cur: &mut Peekable<Chars>,
@@ -455,6 +456,7 @@ fn lex_interpolated_expr(cur: &mut Peekable<Chars>) -> Result<Vec<Token>> {
     lex_tokens(cur, single)
 }
 
+// Lexes an expression, stopping at the first closing paren if `single` is true
 fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
     let mut result = Vec::new();
     let mut paren_depth = 0;
@@ -505,6 +507,12 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
                 return Err(ExecutionError::ExpressionError(LEXING_ERROR.to_string()));
             }
         }
+    }
+    // We should have hit the end of the expression
+    if paren_depth != 0 {
+        return Err(ExecutionError::ExpressionError(
+            MISSING_CLOSE_PAREN.to_string(),
+        ));
     }
 
     Ok(result)
@@ -1162,5 +1170,57 @@ mod tests {
         assert_eq!(Value::Null.to_string(), "null");
 
         Ok(())
+    }
+    #[test]
+    fn test_lex_interpolated_basic() -> Result<()> {
+        let mut chars = "$(foo)bar".chars().peekable();
+        let tokens = lex_interpolated_expr(&mut chars)?;
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Dollar,
+                Token::OpenParen,
+                Token::Bareword("foo".to_string()),
+                Token::CloseParen
+            ]
+        );
+        // Verify remaining chars are untouched
+        assert_eq!(chars.collect::<String>(), "bar");
+        Ok(())
+    }
+
+    #[test]
+    fn test_lex_interpolated_nested() -> Result<()> {
+        let mut chars = "$(foo{$(bar)})rest".chars().peekable();
+        let tokens = lex_interpolated_expr(&mut chars)?;
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Dollar,
+                Token::OpenParen,
+                Token::Bareword("foo".to_string()),
+                Token::OpenBracket,
+                Token::Dollar,
+                Token::OpenParen,
+                Token::Bareword("bar".to_string()),
+                Token::CloseParen,
+                Token::CloseBracket,
+                Token::CloseParen
+            ]
+        );
+        assert_eq!(chars.collect::<String>(), "rest");
+        Ok(())
+    }
+
+    #[test]
+    fn test_lex_interpolated_no_dollar() {
+        let mut chars = "foo".chars().peekable();
+        assert!(lex_interpolated_expr(&mut chars).is_err());
+    }
+
+    #[test]
+    fn test_lex_interpolated_incomplete() {
+        let mut chars = "$(foo".chars().peekable();
+        assert!(lex_interpolated_expr(&mut chars).is_err());
     }
 }
