@@ -8,18 +8,21 @@ use std::{collections::HashMap, fmt::Display};
 
 use crate::{functions, ExecutionError, Result};
 
+const LEXING_ERROR: &str = "error in lexing interpolated";
+
 pub fn maybe_evaluate_interpolated(
     cur: &mut Peekable<Chars>,
     ctx: &mut EvalContext,
 ) -> Option<Value> {
-    match evaluate_interpolated(cur, ctx) {
-        Ok(r) => Some(r),
-        Err(e) => {
-            println!("Error while evaluating interpolated expression: {e}");
+    evaluate_interpolated(cur, ctx).map_or_else(
+        |e| {
+            println!("Error while evaluating interpolated expression: {}", e);
             None
-        }
-    }
+        },
+        Some,
+    )
 }
+
 pub fn evaluate_interpolated(cur: &mut Peekable<Chars>, ctx: &mut EvalContext) -> Result<Value> {
     let tokens = lex_interpolated_expr(cur)?;
     let expr = parse(&tokens)?;
@@ -437,70 +440,26 @@ enum Token {
 }
 
 fn lex_expr(expr: String) -> Result<Vec<Token>> {
-    let mut result = Vec::new();
-
     let mut cur = expr.chars().peekable();
-    while let Some(c) = cur.peek() {
-        match c {
-            '\'' => {
-                cur.next();
-                result.push(get_string(&mut cur)?);
-            }
-            '$' => {
-                cur.next();
-                result.push(Token::Dollar);
-            }
-            '0'..='9' | '-' => {
-                result.push(get_integer(&mut cur)?);
-            }
-            'a'..='z' | 'A'..='Z' => {
-                result.push(get_bareword(&mut cur));
-            }
-            '=' | '!' | '<' | '>' | '|' | '&' => {
-                // TODO: normal operator
-                return Err(ExecutionError::ExpressionError(expr));
-            }
-            '(' => {
-                cur.next();
-                result.push(Token::OpenParen);
-            }
-            ')' => {
-                cur.next();
-                result.push(Token::CloseParen);
-            }
-            '{' => {
-                cur.next();
-                result.push(Token::OpenBracket);
-            }
-            '}' => {
-                cur.next();
-                result.push(Token::CloseBracket);
-            }
-            ',' => {
-                cur.next();
-                result.push(Token::Comma);
-            }
-            ' ' => {
-                cur.next();
-            }
-            _ => return Err(ExecutionError::ExpressionError(expr)),
-        }
-    }
-
-    Ok(result)
+    // Lex the expression, but don't stop at the first closing paren
+    let single = false;
+    lex_tokens(&mut cur, single)
 }
 
 fn lex_interpolated_expr(cur: &mut Peekable<Chars>) -> Result<Vec<Token>> {
-    let mut result = Vec::new();
-
-    match cur.peek() {
-        Some(c) if *c == '$' => {}
-        _ => return Err(ExecutionError::ExpressionError("no expression".to_string())),
+    if cur.peek() != Some(&'$') {
+        return Err(ExecutionError::ExpressionError("no expression".to_string()));
     }
+    // Lex the expression, but stop at the first closing paren
+    let single = true;
+    lex_tokens(cur, single)
+}
 
+fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
+    let mut result = Vec::new();
     let mut paren_depth = 0;
 
-    while let Some(c) = cur.peek() {
+    while let Some(&c) = cur.peek() {
         match c {
             '\'' => {
                 cur.next();
@@ -517,46 +476,33 @@ fn lex_interpolated_expr(cur: &mut Peekable<Chars>) -> Result<Vec<Token>> {
                 result.push(get_bareword(cur));
             }
             '=' | '!' | '<' | '>' | '|' | '&' => {
-                // TODO: normal operator
-                return Err(ExecutionError::ExpressionError(
-                    "error in lexing interpolated".to_string(),
-                ));
+                return Err(ExecutionError::ExpressionError(LEXING_ERROR.to_string()));
             }
-            '(' => {
-                paren_depth += 1;
+            '(' | ')' | '{' | '}' | ',' => {
                 cur.next();
-                result.push(Token::OpenParen);
-            }
-            ')' => {
-                cur.next();
-                result.push(Token::CloseParen);
-                paren_depth -= 1;
-                if paren_depth <= 0 {
-                    // Either we've found our final match paren, or we hit a closing paren
-                    // without an opening one. Regardless, we can stop here.
-                    break;
+                match c {
+                    '(' => {
+                        result.push(Token::OpenParen);
+                        paren_depth += 1;
+                    }
+                    ')' => {
+                        result.push(Token::CloseParen);
+                        paren_depth -= 1;
+                        if single && paren_depth <= 0 {
+                            break;
+                        }
+                    }
+                    '{' => result.push(Token::OpenBracket),
+                    '}' => result.push(Token::CloseBracket),
+                    ',' => result.push(Token::Comma),
+                    _ => unreachable!(),
                 }
             }
-            '{' => {
-                cur.next();
-                result.push(Token::OpenBracket);
-            }
-            '}' => {
-                cur.next();
-                result.push(Token::CloseBracket);
-            }
-            ',' => {
-                cur.next();
-                result.push(Token::Comma);
-            }
             ' ' => {
-                cur.next();
-                continue;
+                cur.next(); // Ignore spaces
             }
             _ => {
-                return Err(ExecutionError::ExpressionError(
-                    "error in lexing interpolated".to_string(),
-                ))
+                return Err(ExecutionError::ExpressionError(LEXING_ERROR.to_string()));
             }
         }
     }
