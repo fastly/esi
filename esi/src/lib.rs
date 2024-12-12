@@ -5,6 +5,7 @@ mod document;
 mod error;
 mod expression;
 mod functions;
+mod new_parse;
 mod parse;
 
 use document::{FetchState, Task};
