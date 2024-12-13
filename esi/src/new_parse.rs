@@ -1,11 +1,11 @@
 use nom::branch::alt;
 use nom::bytes::streaming::*;
 use nom::character::streaming::*;
-use nom::combinator::{complete, map, recognize, success};
-use nom::error::Error;
-use nom::multi::fold_many0;
-use nom::sequence::{delimited, pair, preceded, separated_pair};
-use nom::IResult;
+use nom::combinator::{complete, map, not, peek, recognize, success, verify};
+use nom::error::{Error, ParseError};
+use nom::multi::{fold_many0, length_data, many0, many_till};
+use nom::sequence::{delimited, pair, preceded, separated_pair, tuple};
+use nom::{IResult, Parser};
 
 #[derive(Debug)]
 enum Chunk<'a> {
@@ -26,7 +26,7 @@ fn parse(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
 }
 
 fn chunk(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
-    alt((text, alt((esi_tag, html))))(input)
+    alt((text, esi_tag, html))(input)
 }
 
 fn esi_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
@@ -50,10 +50,11 @@ fn esi_tag_name(input: &str) -> IResult<&str, &str, Error<&str>> {
 }
 
 fn attributes(input: &str) -> IResult<&str, Vec<(&str, &str)>, Error<&str>> {
-    map(
-        separated_pair(preceded(multispace1, alpha1), char('='), xmlstring),
-        |(name, value)| vec![(name, value)],
-    )(input)
+    many0(separated_pair(
+        preceded(multispace1, alpha1),
+        char('='),
+        xmlstring,
+    ))(input)
 }
 
 fn xmlstring(input: &str) -> IResult<&str, &str, Error<&str>> {
@@ -66,12 +67,25 @@ fn html(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
 
 fn script(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     map(
-        recognize(delimited(
-            delimited(tag("<script"), alt((is_not(">"), success(""))), char('>')),
-            take_until("</script"),
-            delimited(tag("</script"), alt((is_not(">"), success(""))), char('>')),
+        tuple((
+            recognize(verify(
+                delimited(tag_no_case("<script"), attributes, char('>')),
+                |attrs: &Vec<(&str, &str)>| !attrs.iter().any(|(k, _)| k == &"src"),
+            )),
+            length_data(map(
+                peek(many_till(anychar, tag_no_case("</script"))),
+                |(v, _)| v.len(),
+            )),
+            recognize(delimited(
+                tag_no_case("</script"),
+                alt((is_not(">"), success(""))),
+                char('>'),
+            )),
         )),
-        |s: &str| vec![Chunk::Text(s)],
+        |(start, script, end)| {
+            println!("script parser succeeded");
+            vec![Chunk::Text(start), Chunk::Text(script), Chunk::Text(end)]
+        },
     )(input)
 }
 
@@ -99,13 +113,18 @@ mod tests {
     #[test]
     fn test_new_parse() {
         let x = parse(
-            "<a>foo</a><bar />baz<esi:vars name=\"$hello\"><baz><script> less < more </script>",
+            "<a>foo</a><bar />baz<esi:vars name=\"$hello\"><sCripT src=\"whatever\"><baz><script> less < more </script>",
         );
         println!("{:?}", x);
     }
     #[test]
     fn test_new_parse_script() {
-        let x = script("<script> less < more </script>");
+        let x = script("<sCripT> less < more </scRIpt>");
+        println!("{:?}", x);
+    }
+    #[test]
+    fn test_new_parse_script_with_src() {
+        let x = parse("<sCripT src=\"whatever\">");
         println!("{:?}", x);
     }
     #[test]
