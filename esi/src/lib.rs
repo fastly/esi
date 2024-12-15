@@ -8,7 +8,7 @@ mod functions;
 mod parse;
 
 use document::{FetchState, Task};
-use expression::{logged_evaluate_expression, maybe_evaluate_interpolated, EvalContext};
+use expression::{evaluate_expression, try_evaluate_interpolated, EvalContext};
 use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
@@ -150,7 +150,7 @@ impl Processor {
             )?;
         }
 
-        self.process_root_task(
+        Self::process_root_task(
             root_task,
             output_writer,
             dispatch_fragment_request,
@@ -201,7 +201,7 @@ impl Processor {
             },
         )?;
 
-        self.process_root_task(
+        Self::process_root_task(
             root_task,
             output_writer,
             dispatch_fragment_request,
@@ -210,7 +210,6 @@ impl Processor {
     }
 
     fn process_root_task(
-        self,
         root_task: &mut Task,
         output_writer: &mut Writer<impl Write>,
         dispatch_fragment_request: &FragmentRequestDispatcher,
@@ -520,12 +519,12 @@ fn event_receiver(
         }
         Event::ESI(Tag::Assign { name, value }) => {
             // TODO: the 'name' here might have a subfield, we need to parse it
-            let result = logged_evaluate_expression(value, ctx);
+            let result = evaluate_expression(&value, ctx)?;
             ctx.set_variable(&name, None, result);
         }
         Event::ESI(Tag::Vars { name }) => {
             if let Some(name) = name {
-                let result = logged_evaluate_expression(name, ctx);
+                let result = evaluate_expression(&name, ctx)?;
                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
             }
         }
@@ -542,7 +541,7 @@ fn event_receiver(
                     if let Some(match_name) = match_name {
                         ctx.set_match_name(&match_name);
                     }
-                    let result = logged_evaluate_expression(test, ctx);
+                    let result = evaluate_expression(&test, ctx)?;
                     if result.to_bool() {
                         chose_branch = true;
                         for event in events {
@@ -558,10 +557,7 @@ fn event_receiver(
                         break;
                     }
                 } else {
-                    println!(
-                        "Somehow got something other than a When in a Choose: {:?}",
-                        when
-                    );
+                    println!("Somehow got something other than a When in a Choose: {when:?}",);
                 }
             }
 
@@ -586,7 +582,7 @@ fn event_receiver(
             while let Some(c) = cur.peek() {
                 if *c == '$' {
                     let mut new_cur = cur.clone();
-                    let result = maybe_evaluate_interpolated(&mut new_cur, ctx);
+                    let result = try_evaluate_interpolated(&mut new_cur, ctx);
                     match result {
                         Some(r) => {
                             // push what we have so far

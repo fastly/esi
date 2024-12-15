@@ -49,6 +49,10 @@ pub enum ExecutionError {
     /// An error occurred while creating a regular expression in an eval context
     #[error("failed to create a regular expression")]
     RegexError(#[from] regex::Error),
+
+    /// An error occurred while creating a regular expression in an eval context
+    #[error("failed to execute a function: `{0}`")]
+    FunctionError(String),
 }
 
 pub type Result<T> = std::result::Result<T, ExecutionError>;
