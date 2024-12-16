@@ -6,10 +6,18 @@ The implementation is a subset of the [ESI Language Specification 1.0](https://w
 
 - `<esi:include>` (+ `alt`, `onerror="continue"`)
 - `<esi:try>` | `<esi:attempt>` | `<esi:except>`
+- `<esi:vars>` | `<esi:assign>`
+- `<esi:choose>` | `<esi:when>` | `<esi:otherwise>`
 - `<esi:comment>`
 - `<esi:remove>`
 
 Other tags will be ignored and served to the client as-is.
+
+This implementation also includes an expression interpreter and library of functions that can be used. Current functions include:
+
+- `$lower(string)`
+- `$html_encode(string)`
+- `$replace(haystack, needle, replacement [, count])`
 
 ## Example Usage
 

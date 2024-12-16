@@ -9,10 +9,12 @@ repository = "https://github.com/fastly/esi"
 readme = "./README.md"
 
 [dependencies]
-quick-xml = "0.36.0"
-thiserror = "^1.0"
+quick-xml = "0.37.1"
+thiserror = "2.0.6"
 fastly = "^0.11"
 log = "^0.4"
+regex = "1.11.1"
+html-escape = "0.2.13"
 
 [dev-dependencies]
 env_logger = "^0.11"
