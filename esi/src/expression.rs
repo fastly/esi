@@ -971,26 +971,26 @@ mod tests {
     }
     #[test]
     fn test_eval_matches_with_captures() -> Result<()> {
-        let mut ctx =
+        let ctx =
             &mut EvalContext::from([("hello".to_string(), Value::String("foobar".to_string()))]);
 
-        let result = evaluate_expression("$(hello) matches '^(fo)o'", &mut ctx)?;
+        let result = evaluate_expression("$(hello) matches '^(fo)o'", ctx)?;
         assert_eq!(result, Value::Boolean(BoolValue::True));
 
-        let result = evaluate_expression("$(MATCHES{1})", &mut ctx)?;
+        let result = evaluate_expression("$(MATCHES{1})", ctx)?;
         assert_eq!(result, Value::String("fo".to_string()));
         Ok(())
     }
     #[test]
     fn test_eval_matches_with_captures_and_match_name() -> Result<()> {
-        let mut ctx =
+        let ctx =
             &mut EvalContext::from([("hello".to_string(), Value::String("foobar".to_string()))]);
 
         ctx.set_match_name("my_custom_name");
         let result = evaluate_expression("$(hello) matches '^(fo)o'", ctx)?;
         assert_eq!(result, Value::Boolean(BoolValue::True));
 
-        let result = evaluate_expression("$(my_custom_name{1})", &mut ctx)?;
+        let result = evaluate_expression("$(my_custom_name{1})", ctx)?;
         assert_eq!(result, Value::String("fo".to_string()));
         Ok(())
     }
@@ -1128,13 +1128,13 @@ mod tests {
 
     #[test]
     fn test_bool_coercion() -> Result<()> {
-        assert_eq!(Value::Boolean(BoolValue::True).to_bool(), true);
-        assert_eq!(Value::Boolean(BoolValue::False).to_bool(), false);
-        assert_eq!(Value::Integer(1).to_bool(), true);
-        assert_eq!(Value::Integer(0).to_bool(), false);
-        assert_eq!(Value::String("".to_string()).to_bool(), false);
-        assert_eq!(Value::String("hello".to_string()).to_bool(), true);
-        assert_eq!(Value::Null.to_bool(), false);
+        assert!(Value::Boolean(BoolValue::True).to_bool());
+        assert!(!Value::Boolean(BoolValue::False).to_bool());
+        assert!(Value::Integer(1).to_bool());
+        assert!(!Value::Integer(0).to_bool());
+        assert!(!Value::String("".to_string()).to_bool());
+        assert!(Value::String("hello".to_string()).to_bool());
+        assert!(!Value::Null.to_bool());
 
         Ok(())
     }
