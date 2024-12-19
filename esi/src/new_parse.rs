@@ -55,7 +55,132 @@ fn no_esi_chunk(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
 }
 
 fn esi_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
-    alt((esi_vars, esi_comment, esi_remove, esi_text, esi_include))(input)
+    alt((
+        esi_vars,
+        esi_comment,
+        esi_remove,
+        esi_text,
+        esi_include,
+        esi_choose,
+        esi_when,
+        esi_otherwise,
+        esi_attempt,
+        esi_except,
+        esi_try,
+        esi_assign,
+    ))(input)
+}
+
+fn esi_assign(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    alt((esi_assign_short, esi_assign_long))(input)
+}
+
+fn esi_assign_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        delimited(
+            tag("<esi:assign"),
+            attributes,
+            preceded(multispace0, alt((tag(">"), tag("/>")))),
+        ),
+        |attrs| vec![Chunk::Esi(Tag::Assign(attrs, None))],
+    )(input)
+}
+
+fn esi_assign_long(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        tuple((
+            delimited(
+                tag("<esi:assign"),
+                attributes,
+                preceded(multispace0, alt((tag(">"), tag("/>")))),
+            ),
+            parse_interpolated,
+            tag("</esi:assign>"),
+        )),
+        |(attrs, chunks, _)| vec![Chunk::Esi(Tag::Assign(attrs, Some(chunks)))],
+    )(input)
+}
+fn esi_except(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        delimited(
+            tag("<esi:except>"),
+            parse_interpolated,
+            tag("</esi:except>"),
+        ),
+        |v| vec![Chunk::Esi(Tag::Except(v))],
+    )(input)
+}
+fn esi_attempt(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        delimited(
+            tag("<esi:attempt>"),
+            parse_interpolated,
+            tag("</esi:attempt>"),
+        ),
+        |v| vec![Chunk::Esi(Tag::Attempt(v))],
+    )(input)
+}
+fn esi_try(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(delimited(tag("<esi:try>"), parse, tag("</esi:try>")), |v| {
+        let mut attempts = vec![];
+        let mut except = None;
+        for chunk in v {
+            match chunk {
+                Chunk::Esi(Tag::Attempt(cs)) => attempts.push(cs),
+                Chunk::Esi(Tag::Except(cs)) => {
+                    except = Some(cs);
+                }
+                _ => {}
+            }
+        }
+        vec![Chunk::Esi(Tag::Try(attempts, except))]
+    })(input)
+}
+
+fn esi_otherwise(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        delimited(
+            tag("<esi:otherwise>"),
+            parse_interpolated,
+            tag("</esi:otherwise>"),
+        ),
+        |v| vec![Chunk::Esi(Tag::Otherwise(v))],
+    )(input)
+}
+
+fn esi_when(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        tuple((
+            delimited(
+                tag("<esi:when"),
+                attributes,
+                preceded(multispace0, alt((tag(">"), tag("/>")))),
+            ),
+            parse_interpolated,
+            tag("</esi:when>"),
+        )),
+        |(attrs, v, _)| vec![Chunk::Esi(Tag::When(attrs, v))],
+    )(input)
+}
+
+fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        delimited(tag("<esi:choose>"), parse, tag("</esi:choose>")),
+        |v| {
+            let mut whens = vec![];
+            let mut otherwise = None;
+            for chunk in v {
+                match chunk {
+                    Chunk::Esi(Tag::When(..)) => whens.push(chunk),
+                    Chunk::Esi(Tag::Otherwise(cs)) => {
+                        otherwise = Some(cs);
+                    }
+                    _ => {}
+                }
+            }
+            vec![Chunk::Esi(Tag::Choose(whens, otherwise))]
+        },
+    )(input)
 }
 
 fn esi_vars(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
@@ -123,7 +248,7 @@ fn esi_include(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             attributes,
             preceded(multispace0, alt((tag(">"), tag("/>")))),
         ),
-        |attrs| vec![Chunk::EsiStartTag(Tag::Include, attrs)],
+        |attrs| vec![Chunk::Esi(Tag::Include(attrs))],
     )(input)
 }
 
@@ -160,10 +285,7 @@ fn script(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
                 char('>'),
             )),
         )),
-        |(start, script, end)| {
-            println!("script parser succeeded");
-            vec![Chunk::Html(start), Chunk::Text(script), Chunk::Html(end)]
-        },
+        |(start, script, end)| vec![Chunk::Html(start), Chunk::Text(script), Chunk::Html(end)],
     )(input)
 }
 
@@ -223,7 +345,30 @@ hello <br>
 <esi:remove>should not appear</esi:remove>
 <esi:comment text="also should not appear" />
 <esi:text> this <esi:vars>$(should)</esi> appear unchanged</esi:text>
-<esi:include src="http://whatever" />"#;
+<esi:include src="whatever" />
+<esi:choose>
+should not appear
+</esi:choose>
+<esi:choose>
+should not appear
+<esi:when test="whatever">hi</esi:when>
+<esi:otherwise>goodbye</esi:otherwise>
+should not appear
+</esi:choose>
+<esi:try>
+should not appear
+<esi:attempt>
+attempt 1
+</esi:attempt>
+should not appear
+<esi:attempt>
+attempt 2
+</esi:attempt>
+should not appear
+<esi:except>
+exception!
+</esi:except>
+</esi:try>"#;
         let output = parse(input);
         println!("{input}");
         println!("{:?}", output);
@@ -263,6 +408,13 @@ hello <br>
     #[test]
     fn test_new_parse_interpolated() {
         let x = parse("hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>");
+        println!("{:?}", x);
+    }
+    #[test]
+    fn test_new_parse_examples() {
+        let x = parse(include_str!(
+            "../../examples/esi_vars_example/src/index.html"
+        ));
         println!("{:?}", x);
     }
 }
