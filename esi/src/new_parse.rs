@@ -40,8 +40,22 @@ fn interpolated_chunk(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     alt((interpolated_text, interpolation, esi_tag, html))(input)
 }
 
+fn parse_without_esi(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    fold_many0(
+        complete(no_esi_chunk),
+        Vec::new,
+        |mut acc: Vec<Chunk>, mut item| {
+            acc.append(&mut item);
+            acc
+        },
+    )(input)
+}
+fn no_esi_chunk(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    alt((text, html))(input)
+}
+
 fn esi_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
-    alt((esi_vars,))(input)
+    alt((esi_vars, esi_comment, esi_remove, esi_text, esi_include))(input)
 }
 
 fn esi_vars(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
@@ -69,6 +83,47 @@ fn esi_vars_long(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     map(
         delimited(tag("<esi:vars>"), parse_interpolated, tag("</esi:vars>")),
         |v| v,
+    )(input)
+}
+
+fn esi_comment(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        delimited(
+            tag("<esi:comment"),
+            attributes,
+            preceded(multispace0, alt((tag(">"), tag("/>")))),
+        ),
+        |_| vec![],
+    )(input)
+}
+fn esi_remove(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        delimited(tag("<esi:remove>"), parse, tag("</esi:remove>")),
+        |_| vec![],
+    )(input)
+}
+
+fn esi_text(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        tuple((
+            tag("<esi:text>"),
+            length_data(map(
+                peek(many_till(anychar, tag("</esi:text>"))),
+                |(v, _)| v.len(),
+            )),
+            tag("</esi:text>"),
+        )),
+        |(_, v, _)| vec![Chunk::Text(v)],
+    )(input)
+}
+fn esi_include(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(
+        delimited(
+            tag("<esi:include"),
+            attributes,
+            preceded(multispace0, alt((tag(">"), tag("/>")))),
+        ),
+        |attrs| vec![Chunk::EsiStartTag(Tag::Include, attrs)],
     )(input)
 }
 
@@ -164,7 +219,11 @@ hello <br>
 </esi:vars>
 <sCripT src="whatever">
 <baz>
-<script> less < more </script>"#;
+<script> less < more </script>
+<esi:remove>should not appear</esi:remove>
+<esi:comment text="also should not appear" />
+<esi:text> this <esi:vars>$(should)</esi> appear unchanged</esi:text>
+<esi:include src="http://whatever" />"#;
         let output = parse(input);
         println!("{input}");
         println!("{:?}", output);
