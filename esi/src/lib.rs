@@ -7,6 +7,7 @@ mod expression;
 mod functions;
 mod new_parse;
 mod parse;
+mod parser_types;
 
 use document::{FetchState, Task};
 use expression::{evaluate_expression, try_evaluate_interpolated, EvalContext};
