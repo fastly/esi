@@ -2,15 +2,15 @@ use nom::branch::alt;
 use nom::bytes::complete::is_not as complete_is_not;
 use nom::bytes::streaming::*;
 use nom::character::streaming::*;
-use nom::combinator::{complete, map, map_res, not, peek, recognize, success, verify};
-use nom::error::{Error, ParseError};
-use nom::multi::{fold_many0, length_data, length_value, many0, many1, many_till};
-use nom::sequence::{delimited, pair, preceded, separated_pair, tuple};
-use nom::{IResult, Parser};
+use nom::combinator::{complete, map, map_res, opt, peek, recognize, success, verify};
+use nom::error::Error;
+use nom::multi::{fold_many0, length_data, many0, many1, many_till, separated_list0};
+use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
+use nom::{AsChar, IResult};
 
 use crate::parser_types::*;
 
-fn parse(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+pub fn parse(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     fold_many0(
         complete(chunk),
         Vec::new,
@@ -37,21 +37,7 @@ fn parse_interpolated(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
 }
 
 fn interpolated_chunk(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
-    alt((interpolated_text, interpolation, esi_tag, html))(input)
-}
-
-fn parse_without_esi(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
-    fold_many0(
-        complete(no_esi_chunk),
-        Vec::new,
-        |mut acc: Vec<Chunk>, mut item| {
-            acc.append(&mut item);
-            acc
-        },
-    )(input)
-}
-fn no_esi_chunk(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
-    alt((text, html))(input)
+    alt((interpolated_text, interpolated_expression, esi_tag, html))(input)
 }
 
 fn esi_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
@@ -195,8 +181,12 @@ fn esi_vars_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             preceded(multispace0, alt((tag(">"), tag("/>")))),
         ),
         |attrs| {
-            if let Some((k, v)) = attrs.iter().find(|(k, v)| *k == "name") {
-                Ok(vec![Chunk::Expr(v)])
+            if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "name") {
+                if let Ok((_, expr)) = expression(v) {
+                    Ok(expr)
+                } else {
+                    Err("failed to parse expression")
+                }
             } else {
                 Err("no name field in short form vars")
             }
@@ -318,10 +308,134 @@ fn interpolated_text(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
         vec![Chunk::Text(s)]
     })(input)
 }
-fn interpolation(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+
+fn is_alphanumeric_or_underscore(c: char) -> bool {
+    c.is_alphanum() || c == '_'
+}
+
+fn is_lower_alphanumeric_or_underscore(c: char) -> bool {
+    c.is_ascii_lowercase() || c.is_numeric() || c == '_'
+}
+
+fn fn_name(input: &str) -> IResult<&str, &str, Error<&str>> {
+    preceded(char('$'), take_while1(is_lower_alphanumeric_or_underscore))(input)
+}
+
+fn var_name(input: &str) -> IResult<&str, (&str, Option<&str>, Option<Symbol>), Error<&str>> {
+    tuple((
+        take_while1(is_alphanumeric_or_underscore),
+        opt(delimited(char('{'), var_key, char('}'))),
+        opt(preceded(char('|'), fn_nested_argument)),
+    ))(input)
+}
+
+fn not_dollar_or_curlies(input: &str) -> IResult<&str, &str, Error<&str>> {
+    take_till(|c: char| "${},\"".contains(c))(input)
+}
+
+// TODO: handle escaping
+fn single_quoted_string(input: &str) -> IResult<&str, &str, Error<&str>> {
+    delimited(
+        char('\''),
+        take_till(|c: char| c == '\'' || !c.is_ascii()),
+        char('\''),
+    )(input)
+}
+fn triple_quoted_string(input: &str) -> IResult<&str, &str, Error<&str>> {
+    delimited(
+        tag("'''"),
+        length_data(map(peek(many_till(anychar, tag("'''"))), |(v, _)| v.len())),
+        tag("'''"),
+    )(input)
+}
+
+fn string(input: &str) -> IResult<&str, &str, Error<&str>> {
+    alt((single_quoted_string, triple_quoted_string))(input)
+}
+
+fn fn_string(input: &str) -> IResult<&str, &str, Error<&str>> {
+    alt((single_quoted_string, triple_quoted_string))(input)
+}
+
+fn var_key(input: &str) -> IResult<&str, &str, Error<&str>> {
+    alt((
+        single_quoted_string,
+        triple_quoted_string,
+        not_dollar_or_curlies,
+    ))(input)
+}
+
+fn fn_argument(input: &str) -> IResult<&str, Vec<Symbol>, Error<&str>> {
+    let (input, mut parsed) = separated_list0(
+        tuple((multispace0, char(','), multispace0)),
+        fn_nested_argument,
+    )(input)?;
+
+    // If the parsed list contains a single empty string element return an empty vec
+    if parsed.len() == 1 && parsed[0] == Symbol::String(None) {
+        parsed = vec![];
+    }
+    Ok((input, parsed))
+}
+
+fn fn_nested_argument(input: &str) -> IResult<&str, Symbol, Error<&str>> {
+    alt((
+        function,
+        variable,
+        map(fn_string, |string| {
+            if string.is_empty() {
+                Symbol::String(None)
+            } else {
+                Symbol::String(Some(string))
+            }
+        }),
+    ))(input)
+}
+
+fn function(input: &str) -> IResult<&str, Symbol, Error<&str>> {
+    let (input, parsed) = tuple((
+        fn_name,
+        delimited(
+            terminated(char('('), multispace0),
+            fn_argument,
+            preceded(multispace0, char(')')),
+        ),
+    ))(input)?;
+
+    let (name, args) = parsed;
+
+    Ok((input, Symbol::Function { name, args }))
+}
+
+fn variable(input: &str) -> IResult<&str, Symbol, Error<&str>> {
+    let (input, parsed) = delimited(tag("$("), var_name, char(')'))(input)?;
+
+    let (name, key, default) = parsed;
+    let default = default.map(Box::new);
+
+    Ok((input, Symbol::Variable { name, key, default }))
+}
+
+fn interpolated_expression(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+    map(alt((function, variable)), |symbol| {
+        vec![Chunk::Expr(symbol)]
+    })(input)
+}
+
+fn expression(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     map(
-        recognize(delimited(tag("$("), is_not(")"), tag(")"))),
-        |s: &str| vec![Chunk::Expr(s)],
+        alt((
+            function,
+            variable,
+            map(string, |string| {
+                if string.is_empty() {
+                    Symbol::String(None)
+                } else {
+                    Symbol::String(Some(string))
+                }
+            }),
+        )),
+        |symbol| vec![Chunk::Expr(symbol)],
     )(input)
 }
 
@@ -335,7 +449,7 @@ mod tests {
 <a>foo</a>
 <bar />
 baz
-<esi:vars name="$hello">
+<esi:vars name="$(hello)">
 <esi:vars>
 hello <br>
 </esi:vars>
@@ -369,52 +483,92 @@ should not appear
 exception!
 </esi:except>
 </esi:try>"#;
-        let output = parse(input);
-        println!("{input}");
-        println!("{:?}", output);
+        let (rest, _) = parse(input).unwrap();
+        // Just test to make sure it parsed the whole thing
+        assert_eq!(rest.len(), 0);
     }
     #[test]
     fn test_new_parse_script() {
-        let x = script("<sCripT> less < more </scRIpt>");
-        println!("{:?}", x);
+        let (rest, x) = script("<sCripT> less < more </scRIpt>").unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [
+                Chunk::Html("<sCripT>"),
+                Chunk::Text(" less < more "),
+                Chunk::Html("</scRIpt>")
+            ]
+        );
     }
     #[test]
     fn test_new_parse_script_with_src() {
-        let x = parse("<sCripT src=\"whatever\">");
-        println!("{:?}", x);
+        let (rest, x) = parse("<sCripT src=\"whatever\">").unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(x, [Chunk::Html("<sCripT src=\"whatever\">")]);
     }
     #[test]
     fn test_new_parse_esi_vars_short() {
-        let x = esi_tag(r#"<esi:vars name="hello">"#);
-        println!("{:?}", x);
+        let (rest, x) = esi_tag(r#"<esi:vars name="$(hello)">"#).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [Chunk::Expr(Symbol::Variable {
+                name: "hello",
+                key: None,
+                default: None
+            })]
+        );
     }
     #[test]
     fn test_new_parse_esi_vars_long() {
-        let x = esi_tag(
-            r#"<esi:vars>hello<esi:vars><br></esi:vars><esi:vars name="bleh" />there</esi:vars>"#,
+        let (rest, x) = parse(
+            r#"<esi:vars>hello<esi:vars><br></esi:vars><esi:vars name="$(bleh)" />there</esi:vars>"#,
+        ).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [
+                Chunk::Text("hello"),
+                Chunk::Html("<br>"),
+                Chunk::Expr(Symbol::Variable {
+                    name: "bleh",
+                    key: None,
+                    default: None
+                }),
+                Chunk::Text("there")
+            ]
         );
-        println!("{:?}", x);
     }
     #[test]
     fn test_new_parse_plain_text() {
-        let x = parse("hello\nthere");
-        println!("{:?}", x);
-    }
-    #[test]
-    fn test_new_parse_esi_end_tag() {
-        let x = parse("</esi:vars>");
-        println!("{:?}", x);
+        let (rest, x) = parse("hello\nthere").unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(x, [Chunk::Text("hello\nthere")]);
     }
     #[test]
     fn test_new_parse_interpolated() {
-        let x = parse("hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>");
-        println!("{:?}", x);
+        let (rest, x) = parse("hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>").unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [
+                Chunk::Text("hello $(foo)"),
+                Chunk::Text("goodbye "),
+                Chunk::Expr(Symbol::Variable {
+                    name: "foo",
+                    key: None,
+                    default: None
+                })
+            ]
+        );
     }
     #[test]
     fn test_new_parse_examples() {
-        let x = parse(include_str!(
+        let (rest, _) = parse(include_str!(
             "../../examples/esi_vars_example/src/index.html"
-        ));
-        println!("{:?}", x);
+        ))
+        .unwrap();
+        // just make sure it parsed the whole thing
+        assert_eq!(rest.len(), 0);
     }
 }

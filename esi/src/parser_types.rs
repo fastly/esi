@@ -1,4 +1,4 @@
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Tag<'a> {
     Include(Vec<(&'a str, &'a str)>),
     Choose(Vec<Chunk<'a>>, Option<Vec<Chunk<'a>>>),
@@ -10,10 +10,23 @@ pub enum Tag<'a> {
     Assign(Vec<(&'a str, &'a str)>, Option<Vec<Chunk<'a>>>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, PartialEq, Clone)]
+pub enum Symbol<'e> {
+    Function {
+        name: &'e str,
+        args: Vec<Symbol<'e>>,
+    },
+    Variable {
+        name: &'e str,
+        key: Option<&'e str>,
+        default: Option<Box<Symbol<'e>>>,
+    },
+    String(Option<&'e str>),
+}
+#[derive(Debug, PartialEq, Clone)]
 pub enum Chunk<'a> {
     Esi(Tag<'a>),
-    Expr(&'a str),
+    Expr(Symbol<'a>),
     Html(&'a str),
     Text(&'a str),
 }
