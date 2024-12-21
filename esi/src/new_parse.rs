@@ -321,7 +321,7 @@ fn fn_name(input: &str) -> IResult<&str, &str, Error<&str>> {
     preceded(char('$'), take_while1(is_lower_alphanumeric_or_underscore))(input)
 }
 
-fn var_name(input: &str) -> IResult<&str, (&str, Option<&str>, Option<Symbol>), Error<&str>> {
+fn var_name(input: &str) -> IResult<&str, (&str, Option<&str>, Option<Expr>), Error<&str>> {
     tuple((
         take_while1(is_alphanumeric_or_underscore),
         opt(delimited(char('{'), var_key, char('}'))),
@@ -349,12 +349,17 @@ fn triple_quoted_string(input: &str) -> IResult<&str, &str, Error<&str>> {
     )(input)
 }
 
-fn string(input: &str) -> IResult<&str, &str, Error<&str>> {
-    alt((single_quoted_string, triple_quoted_string))(input)
-}
-
-fn fn_string(input: &str) -> IResult<&str, &str, Error<&str>> {
-    alt((single_quoted_string, triple_quoted_string))(input)
+fn string(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    map(
+        alt((single_quoted_string, triple_quoted_string)),
+        |string| {
+            if string.is_empty() {
+                Expr::String(None)
+            } else {
+                Expr::String(Some(string))
+            }
+        },
+    )(input)
 }
 
 fn var_key(input: &str) -> IResult<&str, &str, Error<&str>> {
@@ -365,34 +370,24 @@ fn var_key(input: &str) -> IResult<&str, &str, Error<&str>> {
     ))(input)
 }
 
-fn fn_argument(input: &str) -> IResult<&str, Vec<Symbol>, Error<&str>> {
+fn fn_argument(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
     let (input, mut parsed) = separated_list0(
         tuple((multispace0, char(','), multispace0)),
         fn_nested_argument,
     )(input)?;
 
     // If the parsed list contains a single empty string element return an empty vec
-    if parsed.len() == 1 && parsed[0] == Symbol::String(None) {
+    if parsed.len() == 1 && parsed[0] == Expr::String(None) {
         parsed = vec![];
     }
     Ok((input, parsed))
 }
 
-fn fn_nested_argument(input: &str) -> IResult<&str, Symbol, Error<&str>> {
-    alt((
-        function,
-        variable,
-        map(fn_string, |string| {
-            if string.is_empty() {
-                Symbol::String(None)
-            } else {
-                Symbol::String(Some(string))
-            }
-        }),
-    ))(input)
+fn fn_nested_argument(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    alt((call, variable, string))(input)
 }
 
-fn function(input: &str) -> IResult<&str, Symbol, Error<&str>> {
+fn call(input: &str) -> IResult<&str, Expr, Error<&str>> {
     let (input, parsed) = tuple((
         fn_name,
         delimited(
@@ -404,39 +399,53 @@ fn function(input: &str) -> IResult<&str, Symbol, Error<&str>> {
 
     let (name, args) = parsed;
 
-    Ok((input, Symbol::Function { name, args }))
+    Ok((input, Expr::Call(name, args)))
 }
 
-fn variable(input: &str) -> IResult<&str, Symbol, Error<&str>> {
+fn variable(input: &str) -> IResult<&str, Expr, Error<&str>> {
     let (input, parsed) = delimited(tag("$("), var_name, char(')'))(input)?;
 
     let (name, key, default) = parsed;
     let default = default.map(Box::new);
 
-    Ok((input, Symbol::Variable { name, key, default }))
+    Ok((input, Expr::Variable(name, key, default)))
+}
+
+fn operator(input: &str) -> IResult<&str, Operator, Error<&str>> {
+    map(
+        alt((tag("matches"), tag("matches_i"))),
+        |opstr| match opstr {
+            "matches" => Operator::Matches,
+            "matches_i" => Operator::MatchesInsensitive,
+            _ => unreachable!(),
+        },
+    )(input)
 }
 
 fn interpolated_expression(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
-    map(alt((function, variable)), |symbol| {
-        vec![Chunk::Expr(symbol)]
-    })(input)
+    map(alt((call, variable)), |expr| vec![Chunk::Expr(expr)])(input)
 }
 
+fn expr(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    let (rest, exp) = alt((call, variable, string))(input)?;
+
+    if let Ok((rest, (operator, right_exp))) =
+        tuple((delimited(multispace1, operator, multispace1), expr))(rest)
+    {
+        Ok((
+            rest,
+            Expr::Comparison {
+                left: Box::new(exp),
+                operator: operator,
+                right: Box::new(right_exp),
+            },
+        ))
+    } else {
+        Ok((rest, exp))
+    }
+}
 fn expression(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
-    map(
-        alt((
-            function,
-            variable,
-            map(string, |string| {
-                if string.is_empty() {
-                    Symbol::String(None)
-                } else {
-                    Symbol::String(Some(string))
-                }
-            }),
-        )),
-        |symbol| vec![Chunk::Expr(symbol)],
-    )(input)
+    map(expr, |x| vec![Chunk::Expr(x)])(input)
 }
 
 #[cfg(test)]
@@ -510,14 +519,7 @@ exception!
     fn test_new_parse_esi_vars_short() {
         let (rest, x) = esi_tag(r#"<esi:vars name="$(hello)">"#).unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(
-            x,
-            [Chunk::Expr(Symbol::Variable {
-                name: "hello",
-                key: None,
-                default: None
-            })]
-        );
+        assert_eq!(x, [Chunk::Expr(Expr::Variable("hello", None, None)),]);
     }
     #[test]
     fn test_new_parse_esi_vars_long() {
@@ -530,15 +532,25 @@ exception!
             [
                 Chunk::Text("hello"),
                 Chunk::Html("<br>"),
-                Chunk::Expr(Symbol::Variable {
-                    name: "bleh",
-                    key: None,
-                    default: None
-                }),
+                Chunk::Expr(Expr::Variable("bleh", None, None)),
                 Chunk::Text("there")
             ]
         );
     }
+    #[test]
+    fn test_new_parse_complex_expr() {
+        let (rest, x) = parse(r#"<esi:vars name="$call('hello') matches $(var{'key'})">"#).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [Chunk::Expr(Expr::Comparison {
+                left: Box::new(Expr::Call("call", vec![Expr::String(Some("hello"))])),
+                operator: Operator::Matches,
+                right: Box::new(Expr::Variable("var", Some("key"), None))
+            })]
+        );
+    }
+
     #[test]
     fn test_new_parse_plain_text() {
         let (rest, x) = parse("hello\nthere").unwrap();
@@ -554,11 +566,7 @@ exception!
             [
                 Chunk::Text("hello $(foo)"),
                 Chunk::Text("goodbye "),
-                Chunk::Expr(Symbol::Variable {
-                    name: "foo",
-                    key: None,
-                    default: None
-                })
+                Chunk::Expr(Expr::Variable("foo", None, None)),
             ]
         );
     }

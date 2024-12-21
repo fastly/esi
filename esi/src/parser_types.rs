@@ -26,7 +26,26 @@ pub enum Symbol<'e> {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Chunk<'a> {
     Esi(Tag<'a>),
-    Expr(Symbol<'a>),
+    Expr(Expr<'a>),
     Html(&'a str),
     Text(&'a str),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr<'a> {
+    Integer(i32),
+    String(Option<&'a str>),
+    Variable(&'a str, Option<&'a str>, Option<Box<Expr<'a>>>),
+    Comparison {
+        left: Box<Expr<'a>>,
+        operator: Operator,
+        right: Box<Expr<'a>>,
+    },
+    Call(&'a str, Vec<Expr<'a>>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Operator {
+    Matches,
+    MatchesInsensitive,
 }
