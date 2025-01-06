@@ -50,7 +50,7 @@ pub enum ExecutionError {
     #[error("failed to create a regular expression")]
     RegexError(#[from] regex::Error),
 
-    /// An error occurred while creating a regular expression in an eval context
+    /// An error occurred while executing a function in an eval context
     #[error("failed to execute a function: `{0}`")]
     FunctionError(String),
 }
