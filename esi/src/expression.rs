@@ -1,5 +1,6 @@
 use fastly::http::Method;
 use fastly::Request;
+use log::debug;
 use regex::RegexBuilder;
 use std::fmt::Write;
 use std::iter::Peekable;
@@ -15,7 +16,9 @@ pub fn try_evaluate_interpolated(
 ) -> Option<Value> {
     evaluate_interpolated(cur, ctx)
         .map_err(|e| {
-            println!("Error while evaluating interpolated expression: {e}");
+            // We eat the error here because a failed expression should result in an empty result
+            // and not prevent the rest of the file from processing.
+            debug!("Error while evaluating interpolated expression: {e}");
         })
         .ok()
 }

@@ -528,9 +528,7 @@ fn event_receiver(
                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
             }
         }
-        Event::ESI(Tag::When { .. }) => {
-            println!("Shouldn't be possible to get a When tag here");
-        }
+        Event::ESI(Tag::When { .. }) => unreachable!(),
         Event::ESI(Tag::Choose {
             when_branches,
             otherwise_events,
@@ -557,7 +555,7 @@ fn event_receiver(
                         break;
                     }
                 } else {
-                    println!("Somehow got something other than a When in a Choose: {when:?}",);
+                    unreachable!()
                 }
             }
 
