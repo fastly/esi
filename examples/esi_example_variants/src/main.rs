@@ -10,9 +10,9 @@ fn get_variant_urls(urls: Vec<String>) -> HashMap<String, String> {
     for url in urls {
         // For demonstration, add a query parameter to each request
         let variant_url = if url.contains('?') {
-            format!("{}&variant=1", url)
+            format!("{url}&variant=1")
         } else {
-            format!("{}?variant=1", url)
+            format!("{url}?variant=1")
         };
         variant_urls.insert(url, variant_url);
     }

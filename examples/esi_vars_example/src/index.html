@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>My Variable Website</title>
+  </head>
+  <body>
+    <header style="background: #f1f1f1; padding: 16px">
+      <h1>My Variable Website</h1>
+    </header>
+    <div>
+      <h3>Variable Tests</h3>
+      Assigning "YES" to variable $test...<br>
+      <esi:assign name="test" value="'YES'" />
+      Check (short form): YES=<esi:vars name="$(test)" /><br>
+      Check (long form): YES=<esi:vars>$(test)</esi:vars><br>
+      <br>
+      Updating variable $test to "PERHAPS"...<br>
+      <esi:assign name="test" value="'PERHAPS'" />
+      Check (short form): PERHAPS=<esi:vars name="$(test)" /><br>
+      Check (long form): PERHAPS=<esi:vars>$(test)</esi:vars><br>
+      <br>
+      Setting variable $test2 to $test...<br>
+      <esi:assign name="test2" value="$(test)" />
+      Check (short form): PERHAPS=<esi:vars name="$(test2)" /><br>
+      Check (long form): PERHAPS=<esi:vars>$(test2)</esi:vars><br>
+      <br>
+      Setting variable $test3 to a syntax error...<br>
+      <esi:assign name="test3" value="$(t(est_)))" />
+      Check (short form): (EMPTY)=<esi:vars name="$(test3)" />(EMPTY)<br>
+      Check (long form): (EMPTY)=<esi:vars>$(test3)</esi:vars>(EMPTY)<br>
+      <br>
+      Setting variable $test4 to the result of function $replace('H-E-L-L-O', '-', '')...<br>
+      <esi:assign name="test4" value="$replace('H-E-L-L-O', '-', '')" />
+      Check (short form): HELLO=<esi:vars name="$(test4)" /><br>
+      Check (long form): HELLO=<esi:vars>$(test4)</esi:vars><br>
+
+      <h3>Choose Tests</h3>
+      Simple one branch choose:<br>
+      HELLO=
+      <esi:choose>
+        <esi:when test="$(test)">
+          HELLO
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Choose with otherwise, positive:<br>
+      HELLO=
+      <esi:choose>
+        <esi:when test="$(test)">
+          HELLO
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
+      
+      Choose with otherwise, negative:<br>
+      GOODBYE=
+      <esi:choose>
+        <esi:when test="$(nonexistent)">
+          HELLO
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Two branch choose with otherwise, first positive:<br>
+      HELLO=
+      <esi:choose>
+        <esi:when test="$(test)">
+          HELLO
+        </esi:when>
+        <esi:when test="$(nonexistent)">
+          HELLO2
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
+      
+      Two branch choose with otherwise, second positive:<br>
+      HELLO2=
+      <esi:choose>
+        <esi:when test="$(nonexistent)">
+          HELLO
+        </esi:when>
+        <esi:when test="$(test)">
+          HELLO2
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
+      
+      Two branch choose with otherwise, negative:<br>
+      GOODBYE=
+      <esi:choose>
+        <esi:when test="$(nonexistent)">
+          HELLO
+        </esi:when>
+        <esi:when test="$(alsononexistent)">
+          HELLO2
+        </esi:when>
+        <esi:otherwise>
+          GOODBYE
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      <h3>Matches tests</h3>
+      Check if a static string "foobar" matches the regex /bar$/<br>
+      YES =<esi:choose>
+        <esi:when test="'foobar' matches 'bar$'">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Check if a static string "foobar" matches the regex /^nope/<br>
+      NO =<esi:choose>
+        <esi:when test="'foobar' matches '^nope'">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          NO
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Check if a static string 'hel\'lo' matches the regex '''l'l''' (triple tick variant)<br>
+      YES =<esi:choose>
+        <esi:when test="'hel\'lo' matches '''l'l'''">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          NO
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Assign "barbaz" to a variable and see if matches the regex /^bar/<br>
+      <esi:assign name="retest" value="'barbaz'" />
+      YES =<esi:choose>
+        <esi:when test="$(retest) matches '^bar'">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Assign "barbaz" to a variables and see if it matches the regex /nope/<br>
+      <esi:assign name="retest" value="'barbaz'" />
+      NO =<esi:choose>
+        <esi:when test="$(retest) matches 'nope'">
+          YES
+        </esi:when>
+        <esi:otherwise>
+          NO
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Match with captures against "foobar" using /(oo)(ba)/<br>
+      MATCHES{0}+MATCHES{1}+MATCHES{2} = oobaooba =<esi:choose>
+        <esi:when test="'foobar' matches '(oo)(ba)'">
+          <esi:vars name="$(MATCHES{0})" /><esi:vars name="$(MATCHES{1})" /><esi:vars name="$(MATCHES{2})" />
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Match with captures against "foobar" using /(oo)(ba)/ and matchname="mycustomname"<br>
+      mycustomname{0}+mycustomname{1}+mycustomname{2} = oobaooba =<esi:choose>
+        <esi:when test="'foobar' matches '(oo)(ba)'" matchname="mycustomname">
+          <esi:vars name="$(mycustomname{0})" /><esi:vars name="$(mycustomname{1})" /><esi:vars name="$(mycustomname{2})" />
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      Match with captures against "foobar" using /(oo)(ba)/ and matchname="mycustomname" (vars long form)<br>
+      mycustomname{0}+mycustomname{1}+mycustomname{2} = oobaooba =<esi:choose>
+        <esi:when test="'foobar' matches '(oo)(ba)'" matchname="mycustomname">
+          <esi:vars>
+            $(mycustomname{0})$(mycustomname{1})$(mycustomname{2})
+          </esi:vars>
+        </esi:when>
+        <esi:otherwise>
+          UH OH
+        </esi:when>
+      </esi:choose>
+      <br>
+
+      <h3>Interpolation Tests</h3>
+      Interpolated content in a when branch:<br>
+      HELLO=
+      <esi:assign name="interptest" value="'HELLO'" />
+      <esi:choose>
+        <esi:when test="1">
+          $(interptest)
+        </esi:when>
+      </esi:choose>
+      <br>
+
+
+      Interpolated content in an otherwise branch:<br>
+      HELLO=
+      <esi:assign name="interptest" value="'HELLO'" />
+      <esi:choose>
+        <esi:when test="0"></esi:when>
+        <esi:otherwise>
+          $(interptest)
+        </esi:otherwise>
+      </esi:choose>
+      <br>
+
+      Function call in a vars block: $replace('H-E-L-L-O','-','')<br>
+      HELLO=
+      <esi:vars>
+        $replace('H-E-L-L-O', '-', '')
+      </esi:vars>
+      <br>
+
+      Ordering remains correct:<br>
+      WELL HELLO THERE=
+      <esi:vars>
+        WELL
+        $replace('H-E-L-L-O','-','')
+        THERE
+      </esi:vars>
+      <br>
+
+    </div>
+  </body>
+</html>

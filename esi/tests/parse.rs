@@ -182,7 +182,6 @@ fn parse_try_accept_except_include() -> Result<(), ExecutionError> {
     let mut except_include_parsed = false;
 
     parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
-        println!("Event - {event:?}");
         if let Event::ESI(Tag::Include {
             ref src,
             ref alt,
@@ -269,7 +268,7 @@ fn parse_try_nested() -> Result<(), ExecutionError> {
     parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
         assert_eq!(
             format!("{event:?}"),
-            r#"ESI(Try { attempt_events: [XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/abc", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA        ") })), XML(Text(BytesText { content: Owned("0xA            ") })), XML(Text(BytesText { content: Owned("0xA                ") })), XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Try { attempt_events: [XML(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/foo", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA            ") }))], except_events: [XML(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/bar", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA                ") }))] }), XML(Text(BytesText { content: Owned("0xA    ") }))], except_events: [XML(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/xyz", alt: None, continue_on_error: false }), XML(Text(BytesText { content: Owned("0xA        ") })), XML(Empty(BytesStart { buf: Owned("a href=\"/efg\""), name_len: 1 })), XML(Text(BytesText { content: Owned("0xA        just text0xA    ") }))] })"#
+            r#"ESI(Try { attempt_events: [InterpolatedContent(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/abc", alt: None, continue_on_error: false }), InterpolatedContent(Text(BytesText { content: Owned("0xA        ") })), ESI(Try { attempt_events: [InterpolatedContent(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/foo", alt: None, continue_on_error: false }), InterpolatedContent(Text(BytesText { content: Owned("0xA            ") }))], except_events: [InterpolatedContent(Text(BytesText { content: Owned("0xA                ") })), ESI(Include { src: "/bar", alt: None, continue_on_error: false }), InterpolatedContent(Text(BytesText { content: Owned("0xA                ") }))] }), InterpolatedContent(Text(BytesText { content: Owned("0xA    ") }))], except_events: [InterpolatedContent(Text(BytesText { content: Owned("0xA        ") })), ESI(Include { src: "/xyz", alt: None, continue_on_error: false }), InterpolatedContent(Text(BytesText { content: Owned("0xA        ") })), InterpolatedContent(Empty(BytesStart { buf: Owned("a href=\"/efg\""), name_len: 1 })), InterpolatedContent(Text(BytesText { content: Owned("0xA        just text0xA    ") }))] })"#
         );
         if let Event::ESI(Tag::Try {
             attempt_events,
@@ -344,6 +343,70 @@ fn parse_try_nested() -> Result<(), ExecutionError> {
     assert!(accept_include_parsed_level2);
     assert!(except_include_parsed_level1);
     assert!(except_include_parsed_level2);
+
+    Ok(())
+}
+
+#[test]
+fn parse_assign() -> Result<(), ExecutionError> {
+    setup();
+
+    let input = "<esi:assign name=\"foo\" value=\"bar\">";
+    let mut parsed = false;
+
+    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
+        if let Event::ESI(Tag::Assign { name, value }) = event {
+            assert_eq!(name, "foo");
+            assert_eq!(value, "bar");
+            parsed = true;
+        }
+
+        Ok(())
+    })?;
+
+    assert!(parsed);
+
+    Ok(())
+}
+
+#[test]
+fn parse_vars_short() -> Result<(), ExecutionError> {
+    setup();
+
+    let input = "<esi:vars name=\"foo\">";
+    let mut parsed = false;
+
+    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
+        if let Event::ESI(Tag::Vars { name }) = event {
+            assert_eq!(name, Some("foo".to_string()));
+            parsed = true;
+        }
+
+        Ok(())
+    })?;
+
+    assert!(parsed);
+
+    Ok(())
+}
+
+#[test]
+fn parse_vars_long() -> Result<(), ExecutionError> {
+    setup();
+
+    let input = "<esi:vars>$(foo)</esi:vars>";
+    let mut parsed = false;
+
+    parse_tags("esi", &mut Reader::from_str(input), &mut |event| {
+        if let Event::ESI(Tag::Vars { name }) = event {
+            assert_eq!(name, None);
+            parsed = true;
+        }
+
+        Ok(())
+    })?;
+
+    assert!(parsed);
 
     Ok(())
 }

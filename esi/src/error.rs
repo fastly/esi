@@ -41,6 +41,18 @@ pub enum ExecutionError {
     /// Writer error
     #[error("writer error: {0}")]
     WriterError(#[from] std::io::Error),
+
+    /// Expression error
+    #[error("expression failed to evaluate: `{0}`")]
+    ExpressionError(String),
+
+    /// An error occurred while creating a regular expression in an eval context
+    #[error("failed to create a regular expression")]
+    RegexError(#[from] regex::Error),
+
+    /// An error occurred while executing a function in an eval context
+    #[error("failed to execute a function: `{0}`")]
+    FunctionError(String),
 }
 
 pub type Result<T> = std::result::Result<T, ExecutionError>;

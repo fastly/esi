@@ -3,9 +3,12 @@
 mod config;
 mod document;
 mod error;
+mod expression;
+mod functions;
 mod parse;
 
 use document::{FetchState, Task};
+use expression::{evaluate_expression, try_evaluate_interpolated, EvalContext};
 use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
@@ -132,6 +135,10 @@ impl Processor {
         // `root_task` is the root task that will be used to fetch tags in recursive manner
         let root_task = &mut Task::new();
 
+        // context for the interpreter
+        let mut ctx = EvalContext::new();
+        ctx.set_request(original_request_metadata.clone_without_body());
+
         for event in src_events {
             event_receiver(
                 event,
@@ -139,10 +146,11 @@ impl Processor {
                 self.configuration.is_escaped_content,
                 &original_request_metadata,
                 dispatch_fragment_request,
+                &mut ctx,
             )?;
         }
 
-        self.process_root_task(
+        Self::process_root_task(
             root_task,
             output_writer,
             dispatch_fragment_request,
@@ -171,6 +179,10 @@ impl Processor {
         // `root_task` is the root task that will be used to fetch tags in recursive manner
         let root_task = &mut Task::new();
 
+        // context for the interpreter
+        let mut ctx = EvalContext::new();
+        ctx.set_request(original_request_metadata.clone_without_body());
+
         // Call the library to parse fn `parse_tags` which will call the callback function
         // on each tag / event it finds in the document.
         // The callback function `handle_events` will handle the event.
@@ -184,11 +196,12 @@ impl Processor {
                     self.configuration.is_escaped_content,
                     &original_request_metadata,
                     dispatch_fragment_request,
+                    &mut ctx,
                 )
             },
         )?;
 
-        self.process_root_task(
+        Self::process_root_task(
             root_task,
             output_writer,
             dispatch_fragment_request,
@@ -197,7 +210,6 @@ impl Processor {
     }
 
     fn process_root_task(
-        self,
         root_task: &mut Task,
         output_writer: &mut Writer<impl Write>,
         dispatch_fragment_request: &FragmentRequestDispatcher,
@@ -448,9 +460,8 @@ fn event_receiver(
     is_escaped: bool,
     original_request_metadata: &Request,
     dispatch_fragment_request: &FragmentRequestDispatcher,
+    ctx: &mut EvalContext,
 ) -> Result<()> {
-    debug!("got {:?}", event);
-
     match event {
         Event::ESI(Tag::Include {
             src,
@@ -485,12 +496,14 @@ fn event_receiver(
                 is_escaped,
                 original_request_metadata,
                 dispatch_fragment_request,
+                ctx,
             )?;
             let except_task = task_handler(
                 except_events,
                 is_escaped,
                 original_request_metadata,
                 dispatch_fragment_request,
+                ctx,
             )?;
 
             trace!(
@@ -504,7 +517,95 @@ fn event_receiver(
                 except_task,
             });
         }
-        Event::XML(event) => {
+        Event::ESI(Tag::Assign { name, value }) => {
+            // TODO: the 'name' here might have a subfield, we need to parse it
+            let result = evaluate_expression(&value, ctx)?;
+            ctx.set_variable(&name, None, result);
+        }
+        Event::ESI(Tag::Vars { name }) => {
+            if let Some(name) = name {
+                let result = evaluate_expression(&name, ctx)?;
+                queue.push_back(Element::Raw(result.to_string().into_bytes()));
+            }
+        }
+        Event::ESI(Tag::When { .. }) => unreachable!(),
+        Event::ESI(Tag::Choose {
+            when_branches,
+            otherwise_events,
+        }) => {
+            let mut chose_branch = false;
+            for (when, events) in when_branches {
+                if let Tag::When { test, match_name } = when {
+                    if let Some(match_name) = match_name {
+                        ctx.set_match_name(&match_name);
+                    }
+                    let result = evaluate_expression(&test, ctx)?;
+                    if result.to_bool() {
+                        chose_branch = true;
+                        for event in events {
+                            event_receiver(
+                                event,
+                                queue,
+                                is_escaped,
+                                original_request_metadata,
+                                dispatch_fragment_request,
+                                ctx,
+                            )?;
+                        }
+                        break;
+                    }
+                } else {
+                    unreachable!()
+                }
+            }
+
+            if !chose_branch {
+                for event in otherwise_events {
+                    event_receiver(
+                        event,
+                        queue,
+                        is_escaped,
+                        original_request_metadata,
+                        dispatch_fragment_request,
+                        ctx,
+                    )?;
+                }
+            }
+        }
+
+        Event::InterpolatedContent(event) => {
+            let mut buf = vec![];
+            let event_str = String::from_utf8(event.iter().copied().collect()).unwrap_or_default();
+            let mut cur = event_str.chars().peekable();
+            while let Some(c) = cur.peek() {
+                if *c == '$' {
+                    let mut new_cur = cur.clone();
+                    let result = try_evaluate_interpolated(&mut new_cur, ctx);
+                    match result {
+                        Some(r) => {
+                            // push what we have so far
+                            queue.push_back(Element::Raw(
+                                buf.into_iter().collect::<String>().into_bytes(),
+                            ));
+                            // push the result
+                            queue.push_back(Element::Raw(r.to_string().into_bytes()));
+                            // setup a new buffer
+                            buf = vec![];
+                            cur = new_cur;
+                        }
+                        None => {
+                            buf.push(cur.next().unwrap());
+                        }
+                    }
+                } else {
+                    buf.push(cur.next().unwrap());
+                }
+            }
+            queue.push_back(Element::Raw(
+                buf.into_iter().collect::<String>().into_bytes(),
+            ));
+        }
+        Event::Content(event) => {
             debug!("pushing content to buffer, len: {}", queue.len());
             let mut buf = vec![];
             let mut writer = Writer::new(&mut buf);
@@ -522,6 +623,7 @@ fn task_handler(
     is_escaped: bool,
     original_request_metadata: &Request,
     dispatch_fragment_request: &FragmentRequestDispatcher,
+    ctx: &mut EvalContext,
 ) -> Result<Task> {
     let mut task = Task::new();
     for event in events {
@@ -531,6 +633,7 @@ fn task_handler(
             is_escaped,
             original_request_metadata,
             dispatch_fragment_request,
+            ctx,
         )?;
     }
     Ok(task)

@@ -1,0 +1,13 @@
+[package]
+name = "esi_vars_example"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+fastly = "^0.11"
+esi = { path = "../../esi" }
+log = "^0.4"
+env_logger = "^0.11"
