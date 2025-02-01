@@ -22,6 +22,7 @@ pub struct Include {
     pub continue_on_error: bool,
 }
 
+/// Represents a tag in the ESI parsing process.
 #[derive(Debug)]
 pub enum Tag<'a> {
     Include {
@@ -363,7 +364,28 @@ where
     Ok(())
 }
 
-/// Parses the ESI document from the given `reader` and calls the `callback` closure upon each successfully parsed ESI tag.
+/// Parses an XML/HTML document looking for ESI tags in the specified namespace
+///
+/// This function reads from a buffered reader source and processes XML/HTML events,
+/// calling the provided callback for each event that matches an ESI tag.
+///
+/// # Arguments
+/// * `namespace` - The XML namespace to use for ESI tags (e.g. "esi")
+/// * `reader` - Buffered reader containing the XML/HTML document to parse
+/// * `callback` - Function called for each matching ESI tag event
+///
+/// # Returns
+/// * `Result<()>` - Ok if parsing completed successfully, or Error if parsing failed
+///
+/// # Example
+/// ```
+/// use crate::{Reader, Result};
+///
+/// let xml = r#"<esi:include src="footer.html"/>"#;
+/// let mut reader = Reader::from_str(xml);
+/// let mut callback = |event| { Ok(()) };
+/// parse_tags("esi", &mut reader, &mut callback)?;
+///
 pub fn parse_tags<'a, R>(
     namespace: &str,
     reader: &mut Reader<R>,

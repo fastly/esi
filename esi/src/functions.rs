@@ -8,7 +8,7 @@ pub fn lower(args: &[Value]) -> Result<Value> {
         ));
     }
 
-    Ok(Value::String(args[0].to_string().to_lowercase()))
+    Ok(Value::Text(args[0].to_string().to_lowercase().into()))
 }
 
 pub fn html_encode(args: &[Value]) -> Result<Value> {
@@ -18,9 +18,8 @@ pub fn html_encode(args: &[Value]) -> Result<Value> {
         ));
     }
 
-    Ok(Value::String(
-        html_escape::encode_text(&args[0].to_string()).to_string(),
-    ))
+    let encoded = html_escape::encode_double_quoted_attribute(&args[0]).to_string();
+    Ok(Value::Text(encoded.into()))
 }
 
 pub fn replace(args: &[Value]) -> Result<Value> {
@@ -29,17 +28,17 @@ pub fn replace(args: &[Value]) -> Result<Value> {
             "wrong number of arguments to 'replace'".to_string(),
         ));
     }
-    let Value::String(haystack) = &args[0] else {
+    let Value::Text(haystack) = &args[0] else {
         return Err(ExecutionError::FunctionError(
             "incorrect haystack passed to 'replace'".to_string(),
         ));
     };
-    let Value::String(needle) = &args[1] else {
+    let Value::Text(needle) = &args[1] else {
         return Err(ExecutionError::FunctionError(
             "incorrect needle passed to 'replace'".to_string(),
         ));
     };
-    let Value::String(replacement) = &args[2] else {
+    let Value::Text(replacement) = &args[2] else {
         return Err(ExecutionError::FunctionError(
             "incorrect replacement passed to 'replace'".to_string(),
         ));
@@ -59,7 +58,11 @@ pub fn replace(args: &[Value]) -> Result<Value> {
         }
         None => usize::MAX,
     };
-    Ok(Value::String(haystack.replacen(needle, replacement, count)))
+    Ok(Value::Text(
+        haystack
+            .replacen(needle.as_ref(), replacement, count)
+            .into(),
+    ))
 }
 
 #[cfg(test)]
@@ -68,16 +71,16 @@ mod tests {
 
     #[test]
     fn test_lower() {
-        match lower(&[Value::String("HELLO".to_string())]) {
-            Ok(value) => assert_eq!(value, Value::String("hello".to_string())),
+        match lower(&[Value::Text("HELLO".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("hello".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
-        match lower(&[Value::String("Rust".to_string())]) {
-            Ok(value) => assert_eq!(value, Value::String("rust".to_string())),
+        match lower(&[Value::Text("Rust".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("rust".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
-        match lower(&[Value::String("".to_string())]) {
-            Ok(value) => assert_eq!(value, Value::String("".to_string())),
+        match lower(&[Value::Text("".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
         match lower(&[Value::Integer(123), Value::Integer(456)]) {
@@ -92,18 +95,18 @@ mod tests {
 
     #[test]
     fn test_html_encode() {
-        match html_encode(&[Value::String("<div>".to_string())]) {
-            Ok(value) => assert_eq!(value, Value::String("&lt;div&gt;".to_string())),
+        match html_encode(&[Value::Text("<div>".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("&lt;div&gt;".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
-        match html_encode(&[Value::String("&".to_string())]) {
-            Ok(value) => assert_eq!(value, Value::String("&amp;".to_string())),
+        match html_encode(&[Value::Text("&".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("&amp;".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
-        // assert_eq!(
-        //     html_encode(&[Value::String('"'.to_string())]),
-        //     Value::String("&quot;".to_string())
-        // );
+        match html_encode(&[Value::Text(r#""quoted""#.into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("&quot;quoted&quot;".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        };
         match html_encode(&[Value::Integer(123), Value::Integer(456)]) {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
@@ -119,49 +122,49 @@ mod tests {
     #[test]
     fn test_replace() {
         match replace(&[
-            Value::String("hello world".to_string()),
-            Value::String("world".to_string()),
-            Value::String("Rust".to_string()),
+            Value::Text("hello world".into()),
+            Value::Text("world".into()),
+            Value::Text("Rust".into()),
         ]) {
-            Ok(value) => assert_eq!(value, Value::String("hello Rust".to_string())),
+            Ok(value) => assert_eq!(value, Value::Text("hello Rust".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         };
 
         match replace(&[
-            Value::String("hello world world".to_string()),
-            Value::String("world".to_string()),
-            Value::String("Rust".to_string()),
+            Value::Text("hello world world".into()),
+            Value::Text("world".into()),
+            Value::Text("Rust".into()),
             Value::Integer(1),
         ]) {
-            Ok(value) => assert_eq!(value, Value::String("hello Rust world".to_string())),
+            Ok(value) => assert_eq!(value, Value::Text("hello Rust world".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         };
 
         match replace(&[
-            Value::String("hello world world".to_string()),
-            Value::String("world".to_string()),
-            Value::String("Rust".to_string()),
+            Value::Text("hello world world".into()),
+            Value::Text("world".into()),
+            Value::Text("Rust".into()),
             Value::Integer(2),
         ]) {
-            Ok(value) => assert_eq!(value, Value::String("hello Rust Rust".to_string())),
+            Ok(value) => assert_eq!(value, Value::Text("hello Rust Rust".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         };
 
         match replace(&[
-            Value::String("hello world".to_string()),
-            Value::String("world".to_string()),
-            Value::String("Rust".to_string()),
+            Value::Text("hello world".into()),
+            Value::Text("world".into()),
+            Value::Text("Rust".into()),
             Value::Integer(usize::MAX as i32),
         ]) {
-            Ok(value) => assert_eq!(value, Value::String("hello Rust".to_string())),
+            Ok(value) => assert_eq!(value, Value::Text("hello Rust".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         };
 
         match replace(&[
-            Value::String("hello world".to_string()),
-            Value::String("world".to_string()),
-            Value::String("Rust".to_string()),
-            Value::String("not an integer".to_string()),
+            Value::Text("hello world".into()),
+            Value::Text("world".into()),
+            Value::Text("Rust".into()),
+            Value::Text("not an integer".into()),
         ]) {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
@@ -172,8 +175,8 @@ mod tests {
         };
 
         match replace(&[
-            Value::String("hello world".to_string()),
-            Value::String("world".to_string()),
+            Value::Text("hello world".into()),
+            Value::Text("world".into()),
         ]) {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
