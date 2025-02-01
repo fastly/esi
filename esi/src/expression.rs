@@ -230,7 +230,6 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
         Expr::String(s) => Value::Text(s.into()),
         Expr::Variable(key, None) => ctx.get_variable(&key, None),
         Expr::Variable(key, Some(subkey_expr)) => {
-            // Evaluate subkey first, then get the variable
             let subkey = eval_expr(*subkey_expr, ctx)?.to_string();
             ctx.get_variable(&key, Some(&subkey))
         }
@@ -253,7 +252,6 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
                             let capval = cap.map_or(Value::Null, |s| {
                                 Value::Text(Cow::Owned(s.as_str().into()))
                             });
-                            // Use a new scope to release the mutable borrow on ctx
                             {
                                 ctx.set_variable(
                                     &ctx.match_name.clone(),
@@ -274,7 +272,6 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
             for arg in args {
                 values.push(eval_expr(arg, ctx)?);
             }
-            // Clone values if necessary, but this assumes call_dispatch doesn't retain ownership of values
             call_dispatch(&identifier, &values)?
         }
     };
