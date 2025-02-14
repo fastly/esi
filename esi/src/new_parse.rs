@@ -6,11 +6,17 @@ use nom::combinator::{complete, map, map_res, opt, peek, recognize, success, ver
 use nom::error::Error;
 use nom::multi::{fold_many0, length_data, many0, many1, many_till, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
+use nom::Finish;
 use nom::{AsChar, IResult};
 
 use crate::parser_types::*;
 
-pub fn parse(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+pub fn parse_document(input: &str) -> Result<Ast, Error<&str>> {
+    let (_, o) = parse(input).finish()?;
+    Ok(Ast(o))
+}
+
+fn parse(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     fold_many0(
         complete(chunk),
         Vec::new,
@@ -145,7 +151,20 @@ fn esi_when(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             parse_interpolated,
             tag("</esi:when>"),
         )),
-        |(attrs, v, _)| vec![Chunk::Esi(Tag::When(attrs, v))],
+        |(attrs, contents, _)| {
+            // TODO: matchname field (and any others)
+            if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "test") {
+                if let Ok((_, expr)) = expr(v) {
+                    vec![Chunk::Esi(Tag::When(expr, contents))]
+                } else {
+                    // Expression doesn't parse, will never trigger
+                    vec![]
+                }
+            } else {
+                // No test field. Will never trigger.
+                vec![]
+            }
+        },
     )(input)
 }
 

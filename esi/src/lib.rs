@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+mod bytecode_generator;
 mod config;
 mod document;
 mod error;
@@ -20,7 +21,7 @@ use std::io::{BufRead, Write};
 
 pub use crate::document::{Element, Fragment};
 pub use crate::error::Result;
-pub use crate::new_parse::parse;
+pub use crate::new_parse::parse_document;
 pub use crate::parse::{parse_tags, Event, Include, Tag, Tag::Try};
 
 pub use crate::config::Configuration;

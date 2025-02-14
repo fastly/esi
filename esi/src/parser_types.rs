@@ -2,7 +2,7 @@
 pub enum Tag<'a> {
     Include(Vec<(&'a str, &'a str)>),
     Choose(Vec<Chunk<'a>>, Option<Vec<Chunk<'a>>>),
-    When(Vec<(&'a str, &'a str)>, Vec<Chunk<'a>>),
+    When(Expr<'a>, Vec<Chunk<'a>>),
     Otherwise(Vec<Chunk<'a>>),
     Try(Vec<Vec<Chunk<'a>>>, Option<Vec<Chunk<'a>>>),
     Attempt(Vec<Chunk<'a>>),
@@ -23,6 +23,10 @@ pub enum Symbol<'e> {
     },
     String(Option<&'e str>),
 }
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Ast<'a>(pub Vec<Chunk<'a>>);
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Chunk<'a> {
     Esi(Tag<'a>),
