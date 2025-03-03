@@ -1,13 +1,13 @@
 #[derive(Debug, PartialEq, Clone)]
 pub enum Tag<'a> {
-    Include(Vec<(&'a str, &'a str)>),
+    Include(Vec<Expr<'a>>), // TODO: extract necessary fields in parser
     Choose(Vec<Chunk<'a>>, Option<Vec<Chunk<'a>>>),
     When(Expr<'a>, Vec<Chunk<'a>>),
     Otherwise(Vec<Chunk<'a>>),
     Try(Vec<Vec<Chunk<'a>>>, Option<Vec<Chunk<'a>>>),
     Attempt(Vec<Chunk<'a>>),
     Except(Vec<Chunk<'a>>),
-    Assign(Vec<(&'a str, &'a str)>, Option<Vec<Chunk<'a>>>),
+    Assign(&'a str, Option<Expr<'a>>, Expr<'a>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -39,8 +39,8 @@ pub enum Chunk<'a> {
 pub enum Expr<'a> {
     Integer(i32),
     String(Option<&'a str>),
-    Variable(&'a str, Option<&'a str>, Option<Box<Expr<'a>>>),
-    Comparison {
+    Variable(&'a str, Option<Box<Expr<'a>>>, Option<Box<Expr<'a>>>),
+    Binary {
         left: Box<Expr<'a>>,
         operator: Operator,
         right: Box<Expr<'a>>,
@@ -50,6 +50,20 @@ pub enum Expr<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
+    Has,
+    HasInsensitive,
     Matches,
     MatchesInsensitive,
+    Equals,
+    LessThan,
+    LessThanOrEquals,
+    GreaterThan,
+    GreaterThanOrEquals,
+    And,
+    Or,
+    Subtract,
+    Add,
+    Divide,
+    Multiply,
+    Modulo,
 }

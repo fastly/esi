@@ -1,13 +1,14 @@
 use nom::branch::alt;
 use nom::bytes::complete::is_not as complete_is_not;
-use nom::bytes::streaming::*;
-use nom::character::streaming::*;
+use nom::bytes::complete::*;
+use nom::character::complete::*;
 use nom::combinator::{complete, map, map_res, opt, peek, recognize, success, verify};
 use nom::error::Error;
 use nom::multi::{fold_many0, length_data, many0, many1, many_till, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::Finish;
 use nom::{AsChar, IResult};
+use std::str;
 
 use crate::parser_types::*;
 
@@ -69,12 +70,41 @@ fn esi_assign(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
 
 fn esi_assign_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     map(
-        delimited(
-            tag("<esi:assign"),
-            attributes,
-            preceded(multispace0, alt((tag(">"), tag("/>")))),
+        verify(
+            delimited(
+                tag("<esi:assign"),
+                attributes,
+                preceded(multispace0, alt((tag(">"), tag("/>")))),
+            ),
+            |attrs: &Vec<(&str, &str)>| attrs.iter().find(|(k, _v)| *k == "value").is_some(),
         ),
-        |attrs| vec![Chunk::Esi(Tag::Assign(attrs, None))],
+        |attrs| {
+            let (name, subkey) = if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "name") {
+                if let Ok((_, (name, subkey))) = assign_var_name(v) {
+                    (name, subkey)
+                } else {
+                    // Name field does not parse. Strip the tag.
+                    return vec![];
+                }
+            } else {
+                // No name field. Strip it.
+                return vec![];
+            };
+
+            let expr = if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "value") {
+                if let Ok((_, expr)) = expr(v) {
+                    expr
+                } else {
+                    // Expression doesn't parse, strip the tag
+                    return vec![];
+                }
+            } else {
+                // No value field, but self-closing tag. Strip it.
+                return vec![];
+            };
+
+            vec![Chunk::Esi(Tag::Assign(name, subkey, expr))]
+        },
     )(input)
 }
 
@@ -86,12 +116,27 @@ fn esi_assign_long(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
                 attributes,
                 preceded(multispace0, alt((tag(">"), tag("/>")))),
             ),
-            parse_interpolated,
+            expr,
             tag("</esi:assign>"),
         )),
-        |(attrs, chunks, _)| vec![Chunk::Esi(Tag::Assign(attrs, Some(chunks)))],
+        |(attrs, expr, _)| {
+            let (name, subkey) = if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "name") {
+                if let Ok((_, var)) = assign_var_name(v) {
+                    var
+                } else {
+                    // Name field does not parse. Strip the tag.
+                    return vec![];
+                }
+            } else {
+                // No name field. Strip it.
+                return vec![];
+            };
+
+            vec![Chunk::Esi(Tag::Assign(name, subkey, expr))]
+        },
     )(input)
 }
+
 fn esi_except(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     map(
         delimited(
@@ -257,7 +302,21 @@ fn esi_include(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             attributes,
             preceded(multispace0, alt((tag(">"), tag("/>")))),
         ),
-        |attrs| vec![Chunk::Esi(Tag::Include(attrs))],
+        |attrs| {
+            let exprs = if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "src") {
+                if let Ok((_, exprs)) = interpolated_attr(v) {
+                    exprs
+                } else {
+                    // Can't parse the src field, strip the include tag
+                    return vec![];
+                }
+            } else {
+                // No src field, strip the tag
+                return vec![];
+            };
+
+            vec![Chunk::Esi(Tag::Include(exprs))]
+        },
     )(input)
 }
 
@@ -267,6 +326,16 @@ fn attributes(input: &str) -> IResult<&str, Vec<(&str, &str)>, Error<&str>> {
         char('='),
         htmlstring,
     ))(input)
+}
+
+fn interpolated_attr(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
+    many0(alt((
+        map(recognize(many1(complete_is_not("$"))), |s| {
+            Expr::String(Some(s))
+        }),
+        call,
+        variable,
+    )))(input)
 }
 
 fn htmlstring(input: &str) -> IResult<&str, &str, Error<&str>> {
@@ -340,7 +409,13 @@ fn fn_name(input: &str) -> IResult<&str, &str, Error<&str>> {
     preceded(char('$'), take_while1(is_lower_alphanumeric_or_underscore))(input)
 }
 
-fn var_name(input: &str) -> IResult<&str, (&str, Option<&str>, Option<Expr>), Error<&str>> {
+fn assign_var_name(input: &str) -> IResult<&str, (&str, Option<Expr>), Error<&str>> {
+    tuple((
+        take_while1(is_alphanumeric_or_underscore),
+        opt(delimited(char('{'), var_key, char('}'))),
+    ))(input)
+}
+fn var_name(input: &str) -> IResult<&str, (&str, Option<Expr>, Option<Expr>), Error<&str>> {
     tuple((
         take_while1(is_alphanumeric_or_underscore),
         opt(delimited(char('{'), var_key, char('}'))),
@@ -381,12 +456,8 @@ fn string(input: &str) -> IResult<&str, Expr, Error<&str>> {
     )(input)
 }
 
-fn var_key(input: &str) -> IResult<&str, &str, Error<&str>> {
-    alt((
-        single_quoted_string,
-        triple_quoted_string,
-        not_dollar_or_curlies,
-    ))(input)
+fn var_key(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    alt((expr, map(not_dollar_or_curlies, |s| Expr::String(Some(s)))))(input)
 }
 
 fn fn_argument(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
@@ -425,17 +496,54 @@ fn variable(input: &str) -> IResult<&str, Expr, Error<&str>> {
     let (input, parsed) = delimited(tag("$("), var_name, char(')'))(input)?;
 
     let (name, key, default) = parsed;
+    let key = key.map(Box::new);
     let default = default.map(Box::new);
 
     Ok((input, Expr::Variable(name, key, default)))
 }
 
+fn number(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    let (input, parsed) = recognize(many1(digit1))(input)?;
+    Ok((input, Expr::Integer(str::parse::<i32>(parsed).unwrap_or(0))))
+}
+
 fn operator(input: &str) -> IResult<&str, Operator, Error<&str>> {
     map(
-        alt((tag("matches"), tag("matches_i"))),
+        alt((
+            tag("has"),
+            tag("has_i"),
+            tag("matches"),
+            tag("matches_i"),
+            tag("=="),
+            tag("<"),
+            tag("<="),
+            tag(">"),
+            tag(">="),
+            tag("&&"),
+            tag("||"),
+            tag("-"),
+            tag("+"),
+            tag("/"),
+            tag("*"),
+            tag("%"),
+        )),
         |opstr| match opstr {
+            "has" => Operator::Matches,
+            "has_i" => Operator::MatchesInsensitive,
             "matches" => Operator::Matches,
             "matches_i" => Operator::MatchesInsensitive,
+            "==" => Operator::Equals,
+            "<" => Operator::LessThan,
+            "<=" => Operator::LessThanOrEquals,
+            ">" => Operator::GreaterThan,
+            ">=" => Operator::GreaterThanOrEquals,
+            "&&" => Operator::And,
+            "||" => Operator::Or,
+            "-" => Operator::Subtract,
+            "+" => Operator::Add,
+            "/" => Operator::Divide,
+            "*" => Operator::Multiply,
+            "%" => Operator::Modulo,
             _ => unreachable!(),
         },
     )(input)
@@ -446,14 +554,15 @@ fn interpolated_expression(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>
 }
 
 fn expr(input: &str) -> IResult<&str, Expr, Error<&str>> {
-    let (rest, exp) = alt((call, variable, string))(input)?;
+    let (rest, exp) = alt((call, variable, string, number))(input)?;
 
+    // TODO: handle operator precedence
     if let Ok((rest, (operator, right_exp))) =
         tuple((delimited(multispace1, operator, multispace1), expr))(rest)
     {
         Ok((
             rest,
-            Expr::Comparison {
+            Expr::Binary {
                 left: Box::new(exp),
                 operator: operator,
                 right: Box::new(right_exp),
@@ -534,6 +643,28 @@ exception!
         assert_eq!(rest.len(), 0);
         assert_eq!(x, [Chunk::Html("<sCripT src=\"whatever\">")]);
     }
+
+    #[test]
+    fn test_new_parse_esi_include() {
+        let (rest, x) = esi_tag(r#"<esi:include src="/foo">"#).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [Chunk::Esi(Tag::Include(vec![Expr::String(Some("/foo"))]))]
+        );
+
+        let (rest, x) = esi_tag(r#"<esi:include src="/foo$(bar)baz">"#).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [Chunk::Esi(Tag::Include(vec![
+                Expr::String(Some("/foo")),
+                Expr::Variable("bar", None, None),
+                Expr::String(Some("baz"))
+            ]))]
+        );
+    }
+
     #[test]
     fn test_new_parse_esi_vars_short() {
         let (rest, x) = esi_tag(r#"<esi:vars name="$(hello)">"#).unwrap();
@@ -557,15 +688,57 @@ exception!
         );
     }
     #[test]
+    fn test_new_parse_esi_assign_short() {
+        let (rest, x) = esi_tag(r#"<esi:assign name="test" value="123">"#).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [Chunk::Esi(Tag::Assign("test", None, Expr::Integer(123))),]
+        );
+    }
+    #[test]
+    fn test_new_parse_esi_assign_short_with_key() {
+        let (rest, x) = esi_tag(r#"<esi:assign name="test{key}" value="123">"#).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [Chunk::Esi(Tag::Assign(
+                "test",
+                Some(Expr::String(Some("key"))),
+                Expr::Integer(123)
+            ))]
+        );
+    }
+
+    #[test]
+    fn test_new_parse_esi_assign_long() {
+        let (rest, x) =
+            esi_tag(r#"<esi:assign name="test">'this is a string'</esi:assign>"#).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [Chunk::Esi(Tag::Assign(
+                "test",
+                None,
+                Expr::String(Some("this is a string"))
+            ))]
+        );
+    }
+
+    #[test]
     fn test_new_parse_complex_expr() {
         let (rest, x) = parse(r#"<esi:vars name="$call('hello') matches $(var{'key'})">"#).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
-            [Chunk::Expr(Expr::Comparison {
+            [Chunk::Expr(Expr::Binary {
                 left: Box::new(Expr::Call("call", vec![Expr::String(Some("hello"))])),
                 operator: Operator::Matches,
-                right: Box::new(Expr::Variable("var", Some("key"), None))
+                right: Box::new(Expr::Variable(
+                    "var",
+                    Some(Box::new(Expr::String(Some("key")))),
+                    None
+                ))
             })]
         );
     }

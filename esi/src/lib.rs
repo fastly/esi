@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
-mod bytecode_generator;
+mod compiler;
+mod compiler_types;
 mod config;
 mod document;
 mod error;

@@ -6,7 +6,7 @@ members = [
     "examples/esi_example_advanced_error_handling",
     "examples/esi_try_example",
     "examples/esi_vars_example",
-    "examples/esi_example_variants",
+    "examples/esi_example_variants", "esi/compiler-macros",
 ]
 
 [workspace.package]
