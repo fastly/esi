@@ -8,8 +8,11 @@ mod error;
 mod expression;
 mod functions;
 mod new_parse;
+mod opcodes;
 mod parse;
 mod parser_types;
+mod vm;
+mod vm_types;
 
 use document::{FetchState, Task};
 use expression::{evaluate_expression, try_evaluate_interpolated, EvalContext};

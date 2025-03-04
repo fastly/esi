@@ -103,7 +103,7 @@ fn impl_meta(ast: &DeriveInput) -> TokenStream {
                 variant_ident.span(),
             );
             variant_consts.push(quote! {
-                const #const_variant: u8 = #variant_discriminant;
+                pub const #const_variant: u8 = #variant_discriminant;
             });
 
             let mut name_value = None;

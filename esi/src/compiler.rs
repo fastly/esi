@@ -1,10 +1,10 @@
 use crate::compiler_types::*;
+use crate::opcodes::*;
 use crate::parser_types::*;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fmt;
-use std::io::Cursor;
 
 // table of reqref - reqref can be a constant index into a table, it never ends up in a variable
 
@@ -84,15 +84,17 @@ impl Program<'_> {
         self.blocks.iter().enumerate()
     }
 
-    fn serialize(&self) -> Bytes {
+    pub fn serialize(&self) -> Bytes {
         let mut symbols = SymbolTable::new();
         let mut relocations = RelocationTable::new();
 
         let mut buf: OutputBuffer = OutputBuffer::new(BytesMut::new());
-        buf.put_u32(0xABADBABA); // Magic
-        buf.put_u32(0x00000001); // Version
-        buf.put_u64(0); // Length of signature+bytecode segment
-        buf.put_u64(0); // Length of data segment
+        buf.put_u32_le(0xABADBABA); // Magic
+        buf.put_u32_le(0x00000001); // Version
+        buf.put_u64_le(0); // Length of signature+bytecode segment
+        buf.put_u64_le(0); // Length of data segment
+        buf.put_u32_le(self.requests); // Variable count
+        buf.put_u32_le(self.variables.len() as u32); // Request count
 
         // Signature + Bytecode segment starts here
         buf.put_u8(0); // Signature Type (0=None, ...)
@@ -123,13 +125,12 @@ impl Program<'_> {
         let end_offset = buf.position();
 
         let mut buf = buf.bytes();
-        let mut buf_slice = &mut buf;
 
         // Set code segment length
-        buf[8..16].copy_from_slice(&(data_offset as u64 - code_offset as u64).to_be_bytes());
+        buf[8..16].copy_from_slice(&(data_offset as u64 - code_offset as u64).to_le_bytes());
 
         // Set data segment length
-        buf[16..24].copy_from_slice(&(end_offset as u64 - data_offset as u64).to_be_bytes());
+        buf[16..24].copy_from_slice(&(end_offset as u64 - data_offset as u64).to_le_bytes());
 
         // Do relocations
         for (symbol, loc) in relocations.iter() {
@@ -138,12 +139,12 @@ impl Program<'_> {
             match dest {
                 SymbolLocation::CodeOffset(offset) => {
                     let loc: usize = *loc as usize;
-                    buf[loc..loc + 4].copy_from_slice(&offset.to_be_bytes());
+                    buf[loc..loc + 4].copy_from_slice(&offset.to_le_bytes());
                 }
                 SymbolLocation::DataLocation(offset, length) => {
                     let loc: usize = *loc as usize;
-                    buf[loc..loc + 4].copy_from_slice(&offset.to_be_bytes());
-                    buf[loc + 4..loc + 8].copy_from_slice(&length.to_be_bytes());
+                    buf[loc..loc + 4].copy_from_slice(&offset.to_le_bytes());
+                    buf[loc + 4..loc + 8].copy_from_slice(&length.to_le_bytes());
                 }
             }
         }
@@ -420,6 +421,7 @@ fn generate_for_expr(block: Block, expr: Expr, program: &mut Program) -> Value {
 mod tests {
     use super::*;
     use crate::new_parse::parse_document;
+    use bytes::Buf;
 
     //     #[test]
     //     fn test_compile() {
