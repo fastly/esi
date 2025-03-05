@@ -91,7 +91,28 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
                 let req_handle = api.request(url.to_bytes());
                 state.requests[reqid] = req_handle;
             }
-            OP_SUCCESS => panic!("unknown opcode: {}", opcode),
+            OP_SUCCESS => {
+                if state.ip + 2 > ctx.code_length {
+                    break;
+                }
+                let reqid_count = unsafe { read_u16(ctx.code_ptr.add(state.ip)) } as usize;
+                state.ip += 2;
+
+                let mut got_failure = false;
+                for _ in 0..reqid_count {
+                    let reqid = unsafe { read_u32(ctx.code_ptr.add(state.ip)) } as usize;
+                    state.ip += 4;
+
+                    if !got_failure {
+                        let req_handle = state.requests[reqid];
+                        if api.get_response(req_handle) == Response::Failure {
+                            got_failure = true;
+                        }
+                    }
+                }
+
+                state.stack.push(Value::Bool(!got_failure));
+            }
             OP_JUMP => {
                 if state.ip + 4 > ctx.code_length {
                     break;
@@ -139,7 +160,11 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
                 let right = state.stack.pop().unwrap();
                 state.stack.push(Value::Bool(left == right));
             }
-            OP_NOTEQUALS => panic!("unknown opcode: {}", opcode),
+            OP_NOTEQUALS => {
+                let left = state.stack.pop().unwrap();
+                let right = state.stack.pop().unwrap();
+                state.stack.push(Value::Bool(left != right));
+            }
             OP_LESSTHAN => panic!("unknown opcode: {}", opcode),
             OP_LESSTHANOREQUALS => panic!("unknown opcode: {}", opcode),
             OP_GREATERTHAN => panic!("unknown opcode: {}", opcode),
@@ -151,7 +176,12 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
             OP_HASINSENSITIVE => panic!("unknown opcode: {}", opcode),
             OP_MATCHES => panic!("unknown opcode: {}", opcode),
             OP_MATCHESINSENSITIVE => panic!("unknown opcode: {}", opcode),
-            OP_ADD => panic!("unknown opcode: {}", opcode),
+            OP_ADD => {
+                let right = state.stack.pop().unwrap();
+                let left = state.stack.pop().unwrap();
+                let value = left.add(right);
+                state.stack.push(value);
+            }
             OP_SUBTRACT => panic!("unknown opcode: {}", opcode),
             OP_MULTIPLY => panic!("unknown opcode: {}", opcode),
             OP_DIVIDE => panic!("unknown opcode: {}", opcode),
@@ -190,6 +220,7 @@ mod tests {
     struct TestApi {}
     impl<'a> EnvironmentApi for &'a TestApi {
         fn request(&self, url: &[u8]) -> RequestHandle {
+            println!("request: {:?}", str::from_utf8(url).unwrap());
             1
         }
 
@@ -225,7 +256,15 @@ not me
 found me!
 </esi:otherwise>
 </esi:choose>
+<esi:include src="/a$(foo)b">
+<esi:try>
+<esi:attempt>
 <esi:include src="/a">
+</esi:attempt>
+<esi:except>
+except!
+</esi:except>
+</esi:try>
 "#;
         let ast = parse_document(input).unwrap();
         println!("{:?}", ast);

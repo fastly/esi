@@ -74,7 +74,7 @@ impl Immediate {
                 buf.put_u32_le(*req_id);
             }
             Immediate::ReqIdList(reqid_list) => {
-                buf.put_u32_le(reqid_list.len().try_into().unwrap());
+                buf.put_u16_le(reqid_list.len().try_into().unwrap());
                 for req_id in reqid_list {
                     buf.put_u32_le(*req_id);
                 }
