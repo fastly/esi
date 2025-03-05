@@ -321,9 +321,11 @@ fn generate_for_esi_tag<'a>(block: Block, tag: Tag<'a>, program: &mut Program<'a
                 for chunk in otherwise {
                     generate_for_chunk(otherwise_bb, chunk, program);
                 }
-            }
 
-            program.push_inst(block, InstBuilder::jump(next_bb));
+                program.push_inst(otherwise_bb, InstBuilder::jump(next_bb));
+            } else {
+                program.push_inst(block, InstBuilder::jump(next_bb));
+            }
 
             next_bb
         }

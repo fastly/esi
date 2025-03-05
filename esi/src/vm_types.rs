@@ -117,5 +117,34 @@ pub struct ExecutionState {
     pub ip: usize,
     pub stack: Vec<Value>,
     pub variables: Vec<Value>,
-    // requests
+    pub requests: Vec<RequestHandle>,
+}
+impl ExecutionState {
+    pub fn new(ctx: &ProgramContext) -> Self {
+        Self {
+            ip: 0,
+            stack: Vec::new(), // TODO: bleh
+            variables: vec![Value::Null; ctx.variable_count],
+            requests: vec![NO_REQUEST_HANDLE; ctx.request_count],
+        }
+    }
+}
+
+pub type RequestHandle = u64;
+const NO_REQUEST_HANDLE: RequestHandle = u64::MAX;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Response {
+    Success,
+    Failure,
+}
+
+pub trait EnvironmentApi {
+    fn request(&self, url: &[u8]) -> RequestHandle;
+
+    fn get_response(&self, handle: RequestHandle) -> Response;
+
+    fn write_bytes(&self, data: &[u8]);
+
+    fn write_response(&self, response: &Response);
 }

@@ -41,12 +41,8 @@ fn parse_header(program_data: &[u8]) -> Result<(ProgramContext, Environment)> {
     Ok((ctx, env))
 }
 
-fn run(ctx: ProgramContext, _env: Environment) -> Result<()> {
-    let mut state = ExecutionState {
-        ip: 0,
-        stack: Vec::new(), // TODO: bleh
-        variables: vec![Value::Null; ctx.variable_count],
-    };
+fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Result<()> {
+    let mut state = ExecutionState::new(&ctx);
 
     while state.ip < ctx.code_length {
         //println!("ctx: {:?}", ctx);
@@ -67,19 +63,34 @@ fn run(ctx: ProgramContext, _env: Environment) -> Result<()> {
                 let length = unsafe { read_u32(ctx.code_ptr.add(state.ip + 4)) } as usize;
                 state.ip += 8;
 
-                println!(
-                    "write bytes: {:?}",
-                    str::from_utf8(&ctx.data[offset..offset + length]).unwrap()
-                )
+                api.write_bytes(&ctx.data[offset..offset + length]);
             }
-            OP_WRITERESPONSE => panic!("unknown opcode: {}", opcode),
+            OP_WRITERESPONSE => {
+                if state.ip + 4 > ctx.code_length {
+                    break;
+                }
+                let reqid = unsafe { read_u32(ctx.code_ptr.add(state.ip)) } as usize;
+                state.ip += 4;
+
+                let req_handle = state.requests[reqid];
+                let response = api.get_response(req_handle);
+                api.write_response(&response);
+            }
             OP_WRITEVALUE => {
                 let value = state.stack.pop().unwrap();
-                println!("write value: {:?}", unsafe {
-                    str::from_utf8_unchecked(value.to_bytes())
-                });
+                api.write_bytes(value.to_bytes());
             }
-            OP_REQUEST => panic!("unknown opcode: {}", opcode),
+            OP_REQUEST => {
+                if state.ip + 4 > ctx.code_length {
+                    break;
+                }
+                let reqid = unsafe { read_u32(ctx.code_ptr.add(state.ip)) } as usize;
+                state.ip += 4;
+
+                let url = state.stack.pop().unwrap();
+                let req_handle = api.request(url.to_bytes());
+                state.requests[reqid] = req_handle;
+            }
             OP_SUCCESS => panic!("unknown opcode: {}", opcode),
             OP_JUMP => {
                 if state.ip + 4 > ctx.code_length {
@@ -176,6 +187,25 @@ mod tests {
     use crate::compiler::generate;
     use crate::new_parse::parse_document;
 
+    struct TestApi {}
+    impl<'a> EnvironmentApi for &'a TestApi {
+        fn request(&self, url: &[u8]) -> RequestHandle {
+            1
+        }
+
+        fn get_response(&self, handle: RequestHandle) -> Response {
+            Response::Success
+        }
+
+        fn write_bytes(&self, data: &[u8]) {
+            println!("write_bytes: {:?}", str::from_utf8(data).unwrap());
+        }
+
+        fn write_response(&self, response: &Response) {
+            println!("write_response: {:?}", response);
+        }
+    }
+
     #[test]
     fn test_vm_run() {
         let input = r#"
@@ -195,6 +225,7 @@ not me
 found me!
 </esi:otherwise>
 </esi:choose>
+<esi:include src="/a">
 "#;
         let ast = parse_document(input).unwrap();
         println!("{:?}", ast);
@@ -203,6 +234,8 @@ found me!
         let buf = program.serialize();
 
         let (ctx, env) = parse_header(&buf).unwrap();
-        run(ctx, env).unwrap();
+
+        let test_api = TestApi {};
+        run(ctx, env, &test_api).unwrap();
     }
 }
