@@ -4,6 +4,9 @@ pub unsafe fn read_u64(ptr: *const u8) -> u64 {
 pub unsafe fn read_u32(ptr: *const u8) -> u32 {
     ptr.cast::<u32>().read_unaligned()
 }
+pub unsafe fn read_i32(ptr: *const u8) -> i32 {
+    ptr.cast::<i32>().read_unaligned()
+}
 pub unsafe fn read_u16(ptr: *const u8) -> u16 {
     ptr.cast::<u16>().read_unaligned()
 }
@@ -20,24 +23,26 @@ pub enum Value {
     LiteralString(*const u8), // Pointer to length-prepended string in code segment
     String(Vec<u8>),
     Bool(bool),
+    Integer(i32),
 }
 
 impl Value {
-    pub fn to_bytes(&self) -> &[u8] {
+    pub fn to_bytes(&self) -> Vec<u8> {
         match self {
-            Value::Null => b"(null)",
+            Value::Null => b"".to_vec(),
             Value::LiteralString(ptr) => unsafe {
                 let len = read_u32(*ptr);
-                std::slice::from_raw_parts(ptr.add(4), len as usize)
+                std::slice::from_raw_parts(ptr.add(4), len as usize).to_owned()
             },
             Value::Bool(b) => {
                 if *b {
-                    b"true"
+                    b"true".to_vec()
                 } else {
-                    b"false"
+                    b"false".to_vec()
                 }
             }
-            Value::String(s) => &s,
+            Value::String(s) => s.clone(),
+            Value::Integer(i) => i.to_string().into_bytes(),
         }
     }
 
@@ -47,6 +52,7 @@ impl Value {
             lit_str @ Value::LiteralString(_) => lit_str.to_bytes().len() == 0,
             Value::String(s) => s.len() == 0,
             Value::Bool(b) => *b,
+            Value::Integer(i) => *i != 0,
         }
     }
 
@@ -57,6 +63,7 @@ impl Value {
                 v @ Value::LiteralString(_) => v.clone(),
                 Value::Bool(_) => todo!(),
                 Value::String(_) => todo!(),
+                Value::Integer(_) => todo!(),
             },
             self_lit_str @ Value::LiteralString(self_ptr) => match other {
                 Value::LiteralString(other_ptr) => unsafe {
@@ -76,16 +83,18 @@ impl Value {
                 Value::Bool(_) => todo!(), // TODO: might need to coerce the bool to a string here
                 Value::String(other_str) => {
                     let mut out = Vec::new();
-                    out.extend_from_slice(self_lit_str.to_bytes());
+                    out.extend_from_slice(&self_lit_str.to_bytes());
                     out.extend_from_slice(&other_str);
                     Value::String(out)
                 }
+                Value::Integer(_) => todo!(),
             },
             Value::Bool(self_b) => match other {
                 Value::Bool(other_b) => todo!(),
                 Value::Null => todo!(),
                 Value::LiteralString(_) => todo!(),
                 Value::String(_) => todo!(),
+                Value::Integer(_) => todo!(),
             },
             Value::String(self_str) => match other {
                 Value::Bool(other_b) => todo!(),
@@ -93,11 +102,56 @@ impl Value {
                 other_lit_str @ Value::LiteralString(_) => {
                     let mut out = Vec::new();
                     out.extend_from_slice(&self_str);
-                    out.extend_from_slice(other_lit_str.to_bytes());
+                    out.extend_from_slice(&other_lit_str.to_bytes());
                     Value::String(out)
                 }
                 Value::String(_) => todo!(),
+                Value::Integer(_) => todo!(),
             },
+            Value::Integer(self_i) => match other {
+                Value::Bool(other_b) => todo!(),
+                Value::Null => todo!(),
+                Value::LiteralString(_) => todo!(),
+                Value::String(_) => todo!(),
+                Value::Integer(other_i) => Value::Integer(self_i + other_i),
+            },
+        }
+    }
+
+    pub fn subtract(self, other: Value) -> Value {
+        match self {
+            Value::Integer(self_i) => match other {
+                Value::Integer(other_i) => Value::Integer(self_i - other_i),
+                _ => Value::Null,
+            },
+            _ => Value::Null,
+        }
+    }
+    pub fn divide(self, other: Value) -> Value {
+        match self {
+            Value::Integer(self_i) => match other {
+                Value::Integer(other_i) => Value::Integer(self_i / other_i),
+                _ => Value::Null,
+            },
+            _ => Value::Null,
+        }
+    }
+    pub fn multiply(self, other: Value) -> Value {
+        match self {
+            Value::Integer(self_i) => match other {
+                Value::Integer(other_i) => Value::Integer(self_i * other_i),
+                _ => Value::Null,
+            },
+            _ => Value::Null,
+        }
+    }
+    pub fn modulo(self, other: Value) -> Value {
+        match self {
+            Value::Integer(self_i) => match other {
+                Value::Integer(other_i) => Value::Integer(self_i % other_i),
+                _ => Value::Null,
+            },
+            _ => Value::Null,
         }
     }
 }
@@ -110,6 +164,7 @@ impl PartialEq for Value {
                 Value::LiteralString(_) => false, // TODO: empty string might equal null?
                 Value::String(_) => false,        // TODO: empty string might equal null?
                 Value::Bool(_) => false,          // TODO: not sure if null == false
+                Value::Integer(_) => todo!(),
             },
             Value::LiteralString(self_ptr) => match other {
                 Value::LiteralString(other_ptr) => {
@@ -124,18 +179,28 @@ impl PartialEq for Value {
                 Value::String(other_str) => self.to_bytes() == *other_str,
                 Value::Null => false,
                 Value::Bool(_) => false, // TODO: might need to coerce the bool to a string here
+                Value::Integer(_) => self.to_bytes() == other.to_bytes(),
             },
             Value::Bool(self_b) => match other {
                 Value::Bool(other_b) => self_b == other_b,
                 Value::Null => false,
                 Value::LiteralString(_) => false, // TODO: ditto above re: coercion
                 Value::String(_) => false,        // TODO: ditto above re: coercion
+                Value::Integer(_) => false,
             },
             Value::String(self_str) => match other {
                 Value::Bool(other_b) => todo!(),
                 Value::Null => false,
                 Value::LiteralString(_) => todo!(),
                 Value::String(other_str) => self_str == other_str,
+                Value::Integer(_) => self.to_bytes() == other.to_bytes(),
+            },
+            Value::Integer(self_i) => match other {
+                Value::Bool(other_b) => todo!(),
+                Value::Null => todo!(),
+                Value::LiteralString(_) => todo!(),
+                Value::String(other_str) => self_i.to_string().into_bytes() == *other_str,
+                Value::Integer(other_i) => self_i == other_i,
             },
         }
     }
@@ -210,7 +275,7 @@ pub trait EnvironmentApi {
 
     fn get_response(&self, handle: RequestHandle) -> Response;
 
-    fn write_bytes(&self, data: &[u8]);
+    fn write_bytes(&mut self, data: &[u8]);
 
-    fn write_response(&self, response: &Response);
+    fn write_response(&mut self, response: &Response);
 }

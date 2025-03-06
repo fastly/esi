@@ -41,7 +41,7 @@ fn parse_header(program_data: &[u8]) -> Result<(ProgramContext, Environment)> {
     Ok((ctx, env))
 }
 
-fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Result<()> {
+fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) -> Result<()> {
     let mut state = ExecutionState::new(&ctx);
 
     while state.ip < ctx.code_length {
@@ -78,7 +78,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
             }
             OP_WRITEVALUE => {
                 let value = state.stack.pop().unwrap();
-                api.write_bytes(value.to_bytes());
+                api.write_bytes(&value.to_bytes());
             }
             OP_REQUEST => {
                 if state.ip + 4 > ctx.code_length {
@@ -88,7 +88,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
                 state.ip += 4;
 
                 let url = state.stack.pop().unwrap();
-                let req_handle = api.request(url.to_bytes());
+                let req_handle = api.request(&url.to_bytes());
                 state.requests[reqid] = req_handle;
             }
             OP_SUCCESS => {
@@ -118,6 +118,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
                     break;
                 }
                 let destination = unsafe { read_u32(ctx.code_ptr.add(state.ip)) } as usize;
+                // NOTE: don't need to increment ip here after read, because we're jumping
 
                 state.ip = destination;
             }
@@ -133,7 +134,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
                 }
             }
             OP_SET => {
-                if state.ip + 8 > ctx.code_length {
+                if state.ip + 4 > ctx.code_length {
                     break;
                 }
                 let varid = unsafe { read_u32(ctx.code_ptr.add(state.ip)) };
@@ -142,7 +143,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
                 state.variables[varid as usize] = state.stack.pop().unwrap();
             }
             OP_GET => {
-                if state.ip + 8 > ctx.code_length {
+                if state.ip + 4 > ctx.code_length {
                     break;
                 }
                 let varid = unsafe { read_u32(ctx.code_ptr.add(state.ip)) };
@@ -182,11 +183,38 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
                 let value = left.add(right);
                 state.stack.push(value);
             }
-            OP_SUBTRACT => panic!("unknown opcode: {}", opcode),
-            OP_MULTIPLY => panic!("unknown opcode: {}", opcode),
-            OP_DIVIDE => panic!("unknown opcode: {}", opcode),
-            OP_MODULO => panic!("unknown opcode: {}", opcode),
-            OP_LITERALINT => panic!("unknown opcode: {}", opcode),
+            OP_SUBTRACT => {
+                let right = state.stack.pop().unwrap();
+                let left = state.stack.pop().unwrap();
+                let value = left.subtract(right);
+                state.stack.push(value);
+            }
+            OP_MULTIPLY => {
+                let right = state.stack.pop().unwrap();
+                let left = state.stack.pop().unwrap();
+                let value = left.multiply(right);
+                state.stack.push(value);
+            }
+            OP_DIVIDE => {
+                let right = state.stack.pop().unwrap();
+                let left = state.stack.pop().unwrap();
+                let value = left.divide(right);
+                state.stack.push(value);
+            }
+            OP_MODULO => {
+                let right = state.stack.pop().unwrap();
+                let left = state.stack.pop().unwrap();
+                let value = left.modulo(right);
+                state.stack.push(value);
+            }
+            OP_LITERALINT => {
+                if state.ip + 4 > ctx.code_length {
+                    break;
+                }
+                let num = unsafe { read_i32(ctx.code_ptr.add(state.ip)) };
+                state.ip += 4;
+                state.stack.push(Value::Integer(num));
+            }
             OP_LITERALSTRING => {
                 if state.ip + 4 > ctx.code_length {
                     break;
@@ -203,12 +231,12 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, api: T) -> Res
 
                 state.ip += length;
             }
-            OP_EXIT => break,
+            OP_EXIT => return Ok(()),
             _ => panic!("unknown opcode"),
         }
     }
 
-    Ok(())
+    Err(VMError("exited early!".to_string()))
 }
 
 #[cfg(test)]
@@ -216,65 +244,137 @@ mod tests {
     use super::*;
     use crate::compiler::generate;
     use crate::new_parse::parse_document;
+    use bytes::{BufMut, BytesMut};
 
-    struct TestApi {}
-    impl<'a> EnvironmentApi for &'a TestApi {
+    struct TestApi {
+        buf: BytesMut,
+    }
+    impl TestApi {
+        fn new() -> Self {
+            Self {
+                buf: BytesMut::new(),
+            }
+        }
+    }
+    impl<'a> EnvironmentApi for &'a mut TestApi {
         fn request(&self, url: &[u8]) -> RequestHandle {
-            println!("request: {:?}", str::from_utf8(url).unwrap());
-            1
+            match url {
+                b"/a" => 1,
+                _ => panic!("unknown url"),
+            }
         }
 
         fn get_response(&self, handle: RequestHandle) -> Response {
             Response::Success
         }
 
-        fn write_bytes(&self, data: &[u8]) {
-            println!("write_bytes: {:?}", str::from_utf8(data).unwrap());
+        fn write_bytes(&mut self, data: &[u8]) {
+            self.buf.put(data);
         }
 
-        fn write_response(&self, response: &Response) {
-            println!("write_response: {:?}", response);
+        fn write_response(&mut self, response: &Response) {
+            self.buf.put(&format!("{:?}", response).into_bytes()[..]);
         }
     }
 
     #[test]
-    fn test_vm_run() {
-        let input = r#"
-hello
-<esi:text> world</esi:text>
-<esi:assign name="foo" value="'foo'">
-<esi:assign name="bar" value="$(foo)">
-<esi:assign name="baz" value="$(bar)">
-<esi:vars>
-$(baz)
-</esi:vars>
-<esi:choose>
-<esi:when test="$(foo) == 'nope'">
-not me
-</esi:when>
-<esi:otherwise>
-found me!
-</esi:otherwise>
-</esi:choose>
-<esi:include src="/a$(foo)b">
-<esi:try>
-<esi:attempt>
-<esi:include src="/a">
-</esi:attempt>
-<esi:except>
-except!
-</esi:except>
-</esi:try>
-"#;
+    fn test_vm_static_text() {
+        let input = r#"hello<esi:text> world</esi:text>"#;
         let ast = parse_document(input).unwrap();
-        println!("{:?}", ast);
         let program = generate(ast);
-        println!("{}", program);
         let buf = program.serialize();
 
         let (ctx, env) = parse_header(&buf).unwrap();
+        let mut test_api = TestApi::new();
+        run(ctx, env, &mut test_api).unwrap();
 
-        let test_api = TestApi {};
-        run(ctx, env, &test_api).unwrap();
+        assert_eq!(b"hello world", &test_api.buf[..]);
     }
+
+    #[test]
+    fn test_vm_simple_variables() {
+        let input = concat!(
+            r#"<esi:assign name="foo" value="'foo'">"#,
+            r#"<esi:assign name="bar" value="$(foo)">"#,
+            r#"<esi:assign name="num" value="123">"#,
+            r#"<esi:vars name="$(bar)">"#,
+            r#"<esi:vars> - $(num)</esi:vars>"#,
+        );
+
+        let ast = parse_document(input).unwrap();
+        let program = generate(ast);
+        let buf = program.serialize();
+
+        let (ctx, env) = parse_header(&buf).unwrap();
+        let mut test_api = TestApi::new();
+        run(ctx, env, &mut test_api).unwrap();
+
+        assert_eq!(b"foo - 123", &test_api.buf[..]);
+    }
+    #[test]
+    fn test_vm_simple_math() {
+        let input = concat!(
+            r#"<esi:assign name="num" value="64">"#,
+            r#"<esi:assign name="add" value="$(num) + 1">"#,
+            r#"<esi:assign name="sub" value="$(num) - 1">"#,
+            r#"<esi:assign name="div" value="$(num) / 2">"#,
+            r#"<esi:assign name="mult" value="$(num) * 2">"#,
+            r#"<esi:assign name="mod" value="$(num) % 10">"#,
+            r#"<esi:vars>$(add) - $(sub) - $(div) - $(mult) - $(mod)</esi:vars>"#,
+        );
+
+        let ast = parse_document(input).unwrap();
+        let program = generate(ast);
+        let buf = program.serialize();
+
+        let (ctx, env) = parse_header(&buf).unwrap();
+        let mut test_api = TestApi::new();
+        run(ctx, env, &mut test_api).unwrap();
+
+        assert_eq!(b"65 - 63 - 32 - 128 - 4", &test_api.buf[..]);
+    }
+
+    #[test]
+    fn test_vm_choose() {
+        let input = concat!(
+            r#"<esi:assign name="foo" value="'foo'">"#,
+            r#"<esi:choose>"#,
+            r#"<esi:when test="$(foo) == 'foo'">"#,
+            r#"YES"#,
+            r#"</esi:when>"#,
+            r#"<esi:otherwise>"#,
+            r#"NO"#,
+            r#"</esi:otherwise>"#,
+            r#"</esi:choose>"#,
+            r#" - "#,
+            r#"<esi:choose>"#,
+            r#"<esi:when test="$(foo) == 'bar'">"#,
+            r#"NO"#,
+            r#"</esi:when>"#,
+            r#"<esi:otherwise>"#,
+            r#"YES"#,
+            r#"</esi:otherwise>"#,
+            r#"</esi:choose>"#,
+        );
+
+        let ast = parse_document(input).unwrap();
+        let program = generate(ast);
+        let buf = program.serialize();
+
+        let (ctx, env) = parse_header(&buf).unwrap();
+        let mut test_api = TestApi::new();
+        run(ctx, env, &mut test_api).unwrap();
+
+        assert_eq!(b"YES - YES", &test_api.buf[..]);
+    }
+    // <esi:include src="/a$(foo)b">
+    // <esi:try>
+    // <esi:attempt>
+    // <esi:include src="/a">
+    // </esi:attempt>
+    // <esi:except>
+    // except!
+    // </esi:except>
+    // </esi:try>
+    // "#;
 }
