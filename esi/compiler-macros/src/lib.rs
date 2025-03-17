@@ -14,10 +14,10 @@ pub fn instructions(input: TokenStream) -> TokenStream {
 
 // Define a helper type to parse the contents of #[meta(name = "opname", stack_args = 0, immediates = 0, returns = 0)]
 struct MetaAttr {
-    name: LitStr,
-    stack_args: LitInt,
-    immediates: LitInt,
-    returns: LitInt,
+    name: String,
+    stack_args: usize,
+    immediates: usize,
+    returns: usize,
 }
 impl Parse for MetaAttr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
@@ -27,7 +27,7 @@ impl Parse for MetaAttr {
             return Err(syn::Error::new(name_ident.span(), "expected 'name'"));
         }
         input.parse::<Token![=]>()?;
-        let name: LitStr = input.parse()?;
+        let name = input.parse::<LitStr>()?.value();
 
         input.parse::<Token![,]>()?;
 
@@ -40,7 +40,28 @@ impl Parse for MetaAttr {
             ));
         }
         input.parse::<Token![=]>()?;
-        let stack_args: LitInt = input.parse()?;
+
+        let stack_args: usize = if input.peek(LitInt) {
+            input
+                .parse::<LitInt>()?
+                .base10_parse::<usize>()
+                .expect("Failed to parse stack_args")
+        } else if input.peek(Ident) {
+            let ident: Ident = input.parse()?;
+            if ident == "N" {
+                usize::MAX
+            } else {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    "expected stack_args to be either an integer or N",
+                ));
+            }
+        } else {
+            return Err(syn::Error::new(
+                input.span(),
+                "expected stack_args to be either an integer or N",
+            ));
+        };
 
         input.parse::<Token![,]>()?;
 
@@ -53,7 +74,10 @@ impl Parse for MetaAttr {
             ));
         }
         input.parse::<Token![=]>()?;
-        let immediates: LitInt = input.parse()?;
+        let immediates: usize = input
+            .parse::<LitInt>()?
+            .base10_parse::<usize>()
+            .expect("Failed to parse immediates");
 
         input.parse::<Token![,]>()?;
 
@@ -63,7 +87,10 @@ impl Parse for MetaAttr {
             return Err(syn::Error::new(returns_ident.span(), "expected 'returns'"));
         }
         input.parse::<Token![=]>()?;
-        let returns: LitInt = input.parse()?;
+        let returns: usize = input
+            .parse::<LitInt>()?
+            .base10_parse::<usize>()
+            .expect("Failed to parse returns");
 
         Ok(MetaAttr {
             name,
@@ -106,80 +133,35 @@ fn impl_meta(ast: &DeriveInput) -> TokenStream {
                 pub const #const_variant: u8 = #variant_discriminant;
             });
 
-            let mut name_value = None;
-            let mut stack_args_value = None;
-            let mut immediates_value = None;
-            let mut returns_value = None;
+            let mut meta_attr: Option<MetaAttr> = None;
 
             // Look for the #[meta(...)] attribute.
             for attr in &variant.attrs {
                 if attr.path().is_ident("meta") {
-                    let meta_attr: MetaAttr =
-                        attr.parse_args().expect("Failed to parse meta attribute");
-                    name_value = Some(meta_attr.name.value());
-                    stack_args_value = Some(
-                        meta_attr
-                            .stack_args
-                            .base10_parse::<usize>()
-                            .expect("Failed to parse stack_args"),
-                    );
-                    immediates_value = Some(
-                        meta_attr
-                            .immediates
-                            .base10_parse::<usize>()
-                            .expect("Failed to parse immediates"),
-                    );
-                    returns_value = Some(
-                        meta_attr
-                            .returns
-                            .base10_parse::<usize>()
-                            .expect("Failed to parse returns"),
-                    );
+                    meta_attr = Some(attr.parse_args().expect("Failed to parse meta attribute"));
                 }
             }
 
-            // Ensure all values were provided.
+            let meta_attr = meta_attr.unwrap_or_else(|| panic!("Failed to find meta attributes"));
 
-            let name_value = name_value.unwrap_or_else(|| {
-                panic!(
-                    "Variant {} is missing the #[meta(name = ...)] attribute",
-                    variant_ident
-                )
-            });
+            let name_value = meta_attr.name;
             variant_names.push(quote! {
                 #name::#variant_ident => #name_value,
             });
 
-            let stack_args_value = stack_args_value.unwrap_or_else(|| {
-                panic!(
-                    "Variant {} is missing the #[meta(stack_args = ...)] attribute",
-                    variant_ident
-                )
-            });
+            let stack_args = meta_attr.stack_args;
             variant_stack_args.push(quote! {
-                #name::#variant_ident => #stack_args_value,
+                #name::#variant_ident => #stack_args,
             });
 
-            let immediates_value = immediates_value.unwrap_or_else(|| {
-                panic!(
-                    "Variant {} is missing the immediates value in the attribute",
-                    variant_ident
-                )
-            });
-
+            let immediates = meta_attr.immediates;
             variant_immediates.push(quote! {
-                #name::#variant_ident => #immediates_value,
+                #name::#variant_ident => #immediates,
             });
 
-            let returns_value = returns_value.unwrap_or_else(|| {
-                panic!(
-                    "Variant {} is missing the returns value in the attribute",
-                    variant_ident
-                )
-            });
-
+            let returns = meta_attr.returns;
             variant_returns.push(quote! {
-                #name::#variant_ident => #returns_value,
+                #name::#variant_ident => #returns,
             });
         }
     } else {

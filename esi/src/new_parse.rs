@@ -419,7 +419,7 @@ fn var_name(input: &str) -> IResult<&str, (&str, Option<Expr>, Option<Expr>), Er
     tuple((
         take_while1(is_alphanumeric_or_underscore),
         opt(delimited(char('{'), var_key, char('}'))),
-        opt(preceded(char('|'), fn_nested_argument)),
+        opt(preceded(char('|'), expr)),
     ))(input)
 }
 
@@ -460,11 +460,9 @@ fn var_key(input: &str) -> IResult<&str, Expr, Error<&str>> {
     alt((expr, map(not_dollar_or_curlies, |s| Expr::String(Some(s)))))(input)
 }
 
-fn fn_argument(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
-    let (input, mut parsed) = separated_list0(
-        tuple((multispace0, char(','), multispace0)),
-        fn_nested_argument,
-    )(input)?;
+fn expr_list(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
+    let (input, mut parsed) =
+        separated_list0(tuple((multispace0, char(','), multispace0)), expr)(input)?;
 
     // If the parsed list contains a single empty string element return an empty vec
     if parsed.len() == 1 && parsed[0] == Expr::String(None) {
@@ -473,16 +471,12 @@ fn fn_argument(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
     Ok((input, parsed))
 }
 
-fn fn_nested_argument(input: &str) -> IResult<&str, Expr, Error<&str>> {
-    alt((call, variable, string))(input)
-}
-
 fn call(input: &str) -> IResult<&str, Expr, Error<&str>> {
     let (input, parsed) = tuple((
         fn_name,
         delimited(
             terminated(char('('), multispace0),
-            fn_argument,
+            expr_list,
             preceded(multispace0, char(')')),
         ),
     ))(input)?;
@@ -505,6 +499,16 @@ fn variable(input: &str) -> IResult<&str, Expr, Error<&str>> {
 fn number(input: &str) -> IResult<&str, Expr, Error<&str>> {
     let (input, parsed) = recognize(many1(digit1))(input)?;
     Ok((input, Expr::Integer(str::parse::<i32>(parsed).unwrap_or(0))))
+}
+
+fn list(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    let (input, parsed) = delimited(
+        terminated(char('['), multispace0),
+        expr_list,
+        preceded(multispace0, char(']')),
+    )(input)?;
+
+    Ok((input, Expr::List(parsed)))
 }
 
 fn operator(input: &str) -> IResult<&str, Operator, Error<&str>> {
@@ -554,7 +558,7 @@ fn interpolated_expression(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>
 }
 
 fn expr(input: &str) -> IResult<&str, Expr, Error<&str>> {
-    let (rest, exp) = alt((call, variable, string, number))(input)?;
+    let (rest, exp) = alt((call, variable, string, number, list))(input)?;
 
     // TODO: handle operator precedence
     if let Ok((rest, (operator, right_exp))) =
@@ -762,6 +766,26 @@ exception!
             ]
         );
     }
+
+    #[test]
+    fn test_new_parse_list_expr() {
+        let (rest, x) =
+            parse(r#"<esi:assign name="colors" value="[ 'red', 'blue', 'green' ]">"#).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [Chunk::Esi(Tag::Assign(
+                "colors",
+                None,
+                Expr::List(vec![
+                    Expr::String(Some("red")),
+                    Expr::String(Some("blue")),
+                    Expr::String(Some("green"))
+                ]),
+            ))]
+        );
+    }
+
     #[test]
     fn test_new_parse_examples() {
         let (rest, _) = parse(include_str!(

@@ -105,6 +105,9 @@ pub enum Opcode {
     #[meta(name = "literal_string", stack_args = 0, immediates = 1, returns = 1)]
     LiteralString = 34,
 
+    #[meta(name = "make_list", stack_args = N, immediates = 1, returns = 1)]
+    MakeList = 35,
+
     #[meta(name = "exit", stack_args = 0, immediates = 0, returns = 0)]
     Exit = 250,
     // TODO: bitwise instructions

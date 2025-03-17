@@ -1,6 +1,5 @@
 use crate::opcodes::*;
 use crate::vm_types::*;
-use std::str;
 
 fn parse_header(program_data: &[u8]) -> Result<(ProgramContext, Environment)> {
     let input_ptr = program_data.as_ptr();
@@ -77,7 +76,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                 api.write_response(&response);
             }
             OP_WRITEVALUE => {
-                let value = state.stack.pop().unwrap();
+                let value = state.pop_value();
                 api.write_bytes(&value.to_bytes());
             }
             OP_REQUEST => {
@@ -87,7 +86,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                 let reqid = unsafe { read_u32(ctx.code_ptr.add(state.ip)) } as usize;
                 state.ip += 4;
 
-                let url = state.stack.pop().unwrap();
+                let url = state.pop_value();
                 let req_handle = api.request(&url.to_bytes());
                 state.requests[reqid] = req_handle;
             }
@@ -111,7 +110,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                     }
                 }
 
-                state.stack.push(Value::Bool(!got_failure));
+                state.push(Value::Bool(!got_failure));
             }
             OP_JUMP => {
                 if state.ip + 4 > ctx.code_length {
@@ -129,7 +128,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                 let destination = unsafe { read_u32(ctx.code_ptr.add(state.ip)) } as usize;
                 state.ip += 4;
 
-                if state.stack.pop().unwrap().to_bool() {
+                if state.pop_value().to_bool() {
                     state.ip = destination;
                 }
             }
@@ -140,7 +139,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                 let varid = unsafe { read_u32(ctx.code_ptr.add(state.ip)) };
                 state.ip += 4;
 
-                state.variables[varid as usize] = state.stack.pop().unwrap();
+                state.variables[varid as usize] = state.pop_value();
             }
             OP_GET => {
                 if state.ip + 4 > ctx.code_length {
@@ -149,22 +148,61 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                 let varid = unsafe { read_u32(ctx.code_ptr.add(state.ip)) };
                 state.ip += 4;
 
-                state.stack.push(state.variables[varid as usize].clone());
+                state.push_ref(varid as usize);
             }
             OP_GETMETA => panic!("unknown opcode: {}", opcode),
-            OP_SETKEY => panic!("unknown opcode: {}", opcode),
-            OP_GETKEY => panic!("unknown opcode: {}", opcode),
+            OP_SETKEY => {
+                let value = state.pop_value();
+                let subkey = state.pop_value();
+                let var = state.pop();
+
+                match var {
+                    StackEntry::Ref(varid) => {
+                        let var = state.variables.get_mut(varid);
+                        match var {
+                            Some(Value::List(ref mut list)) => match subkey {
+                                Value::Integer(i) => {
+                                    list[i as usize] = value;
+                                }
+                                _ => panic!("can't set subkey on list using a non-integer"),
+                            },
+                            _ => panic!("can't set subkey on non-list"),
+                        }
+                    }
+                    _ => panic!("can't set subkey on non-ref"),
+                }
+            }
+            OP_GETKEY => {
+                let subkey = state.pop_value();
+                let var = state.pop();
+
+                let value = match var {
+                    StackEntry::Ref(varid) => {
+                        let var = state.variables.get(varid);
+                        match var {
+                            Some(Value::List(ref list)) => match subkey {
+                                Value::Integer(i) => list[i as usize].clone(),
+                                _ => panic!("can't get subkey on list using a non-integer"),
+                            },
+                            _ => panic!("can't get subkey on non-list"),
+                        }
+                    }
+                    _ => panic!("can't get subkey on non-ref"),
+                };
+
+                state.push(value);
+            }
             OP_GETSLICE => panic!("unknown opcode: {}", opcode),
             OP_CALL => panic!("unknown opcode: {}", opcode),
             OP_EQUALS => {
-                let left = state.stack.pop().unwrap();
-                let right = state.stack.pop().unwrap();
-                state.stack.push(Value::Bool(left == right));
+                let left = state.pop_value();
+                let right = state.pop_value();
+                state.push(Value::Bool(left == right));
             }
             OP_NOTEQUALS => {
-                let left = state.stack.pop().unwrap();
-                let right = state.stack.pop().unwrap();
-                state.stack.push(Value::Bool(left != right));
+                let left = state.pop_value();
+                let right = state.pop_value();
+                state.push(Value::Bool(left != right));
             }
             OP_LESSTHAN => panic!("unknown opcode: {}", opcode),
             OP_LESSTHANOREQUALS => panic!("unknown opcode: {}", opcode),
@@ -178,34 +216,34 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
             OP_MATCHES => panic!("unknown opcode: {}", opcode),
             OP_MATCHESINSENSITIVE => panic!("unknown opcode: {}", opcode),
             OP_ADD => {
-                let right = state.stack.pop().unwrap();
-                let left = state.stack.pop().unwrap();
+                let right = state.pop_value();
+                let left = state.pop_value();
                 let value = left.add(right);
-                state.stack.push(value);
+                state.push(value);
             }
             OP_SUBTRACT => {
-                let right = state.stack.pop().unwrap();
-                let left = state.stack.pop().unwrap();
+                let right = state.pop_value();
+                let left = state.pop_value();
                 let value = left.subtract(right);
-                state.stack.push(value);
+                state.push(value);
             }
             OP_MULTIPLY => {
-                let right = state.stack.pop().unwrap();
-                let left = state.stack.pop().unwrap();
+                let right = state.pop_value();
+                let left = state.pop_value();
                 let value = left.multiply(right);
-                state.stack.push(value);
+                state.push(value);
             }
             OP_DIVIDE => {
-                let right = state.stack.pop().unwrap();
-                let left = state.stack.pop().unwrap();
+                let right = state.pop_value();
+                let left = state.pop_value();
                 let value = left.divide(right);
-                state.stack.push(value);
+                state.push(value);
             }
             OP_MODULO => {
-                let right = state.stack.pop().unwrap();
-                let left = state.stack.pop().unwrap();
+                let right = state.pop_value();
+                let left = state.pop_value();
                 let value = left.modulo(right);
-                state.stack.push(value);
+                state.push(value);
             }
             OP_LITERALINT => {
                 if state.ip + 4 > ctx.code_length {
@@ -213,7 +251,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                 }
                 let num = unsafe { read_i32(ctx.code_ptr.add(state.ip)) };
                 state.ip += 4;
-                state.stack.push(Value::Integer(num));
+                state.push(Value::Integer(num));
             }
             OP_LITERALSTRING => {
                 if state.ip + 4 > ctx.code_length {
@@ -221,7 +259,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                 }
                 let length = unsafe { read_u32(ctx.code_ptr.add(state.ip)) } as usize;
                 let lit_str = Value::LiteralString(unsafe { ctx.code_ptr.add(state.ip) });
-                state.stack.push(lit_str);
+                state.push(lit_str);
 
                 state.ip += 4;
 
@@ -230,6 +268,16 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                 }
 
                 state.ip += length;
+            }
+            OP_MAKELIST => {
+                if state.ip + 4 > ctx.code_length {
+                    break;
+                }
+                let length = unsafe { read_u32(ctx.code_ptr.add(state.ip)) } as usize;
+                state.ip += 4;
+
+                let list = Value::List((0..length).map(|_| state.pop_value()).collect());
+                state.push(list);
             }
             OP_EXIT => return Ok(()),
             _ => panic!("unknown opcode"),
@@ -311,6 +359,28 @@ mod tests {
 
         assert_eq!(b"foo - 123", &test_api.buf[..]);
     }
+
+    #[test]
+    fn test_vm_list_variables() {
+        let input = concat!(
+            r#"<esi:assign name="colors" value="[ 'red', 'blue', 'green' ]">"#,
+            r#"<esi:assign name="colors{0}" value="'purple'"/>"#,
+            r#"<esi:assign name="first_color" value="$(colors{0})">"#,
+            r#"<esi:vars>$(first_color) $(colors{2})</esi:vars>"#,
+        );
+
+        let ast = parse_document(input).unwrap();
+        let program = generate(ast);
+        println!("{program}");
+        let buf = program.serialize();
+
+        let (ctx, env) = parse_header(&buf).unwrap();
+        let mut test_api = TestApi::new();
+        run(ctx, env, &mut test_api).unwrap();
+
+        assert_eq!(b"purple green", &test_api.buf[..]);
+    }
+
     #[test]
     fn test_vm_simple_math() {
         let input = concat!(
@@ -339,21 +409,13 @@ mod tests {
         let input = concat!(
             r#"<esi:assign name="foo" value="'foo'">"#,
             r#"<esi:choose>"#,
-            r#"<esi:when test="$(foo) == 'foo'">"#,
-            r#"YES"#,
-            r#"</esi:when>"#,
-            r#"<esi:otherwise>"#,
-            r#"NO"#,
-            r#"</esi:otherwise>"#,
+            r#"<esi:when test="$(foo) == 'foo'">YES</esi:when>"#,
+            r#"<esi:otherwise>NO</esi:otherwise>"#,
             r#"</esi:choose>"#,
             r#" - "#,
             r#"<esi:choose>"#,
-            r#"<esi:when test="$(foo) == 'bar'">"#,
-            r#"NO"#,
-            r#"</esi:when>"#,
-            r#"<esi:otherwise>"#,
-            r#"YES"#,
-            r#"</esi:otherwise>"#,
+            r#"<esi:when test="$(foo) == 'bar'">NO</esi:when>"#,
+            r#"<esi:otherwise>YES</esi:otherwise>"#,
             r#"</esi:choose>"#,
         );
 
@@ -367,6 +429,7 @@ mod tests {
 
         assert_eq!(b"YES - YES", &test_api.buf[..]);
     }
+
     // <esi:include src="/a$(foo)b">
     // <esi:try>
     // <esi:attempt>

@@ -83,6 +83,14 @@ impl Program<'_> {
     fn block_iter(&self) -> std::iter::Enumerate<std::slice::Iter<'_, BlockData>> {
         self.blocks.iter().enumerate()
     }
+    fn block_instructions_iter(&self) -> impl Iterator<Item = Vec<&InstructionData>> {
+        self.block_iter().map(move |(_, bd)| {
+            bd.instructions
+                .iter()
+                .map(|i| self.get_instruction(*i))
+                .collect()
+        })
+    }
 
     pub fn serialize(&self) -> Bytes {
         let mut symbols = SymbolTable::new();
@@ -335,12 +343,8 @@ fn generate_for_esi_tag<'a>(block: Block, tag: Tag<'a>, program: &mut Program<'a
             if let Some(subkey) = subkey {
                 let inst = program.push_inst(block, InstBuilder::get(varid));
                 let var_value = program.value_for_inst(inst).unwrap();
-
-                let inst = generate_for_expr(block, subkey, program);
-                let subkey_value = program.value_for_inst(inst).unwrap();
-
-                let inst = generate_for_expr(block, expression, program);
-                let new_value = program.value_for_inst(inst).unwrap();
+                let subkey_value = generate_for_expr(block, subkey, program);
+                let new_value = generate_for_expr(block, expression, program);
 
                 program.push_inst(
                     block,
@@ -364,21 +368,32 @@ fn generate_for_expr(block: Block, expr: Expr, program: &mut Program) -> Value {
             block,
             InstBuilder::literal_string(s.unwrap_or("").to_string()),
         ),
+        Expr::List(exprs) => {
+            let values = exprs
+                .into_iter()
+                .rev()
+                .map(|item_expr| generate_for_expr(block, item_expr, program))
+                .collect::<Vec<Value>>();
+
+            program.push_inst(block, InstBuilder::make_list(values.len(), values))
+        }
         Expr::Variable(key, subkey, default) => {
             let varid: VarId = program.varid(key.to_string());
-            let mut value = program.push_inst(block, InstBuilder::get(varid));
+            let mut inst = program.push_inst(block, InstBuilder::get(varid));
 
             if let Some(subkey) = subkey {
+                let value = program.value_for_inst(inst).unwrap();
                 let subkey_value = generate_for_expr(block, *subkey, program);
-                value = program.push_inst(block, InstBuilder::get_key(value, subkey_value));
+                inst = program.push_inst(block, InstBuilder::get_key(value, subkey_value));
             }
 
             if let Some(default) = default {
+                let value = program.value_for_inst(inst).unwrap();
                 let default_value = generate_for_expr(block, *default, program);
-                value = program.push_inst(block, InstBuilder::or(value, default_value));
+                inst = program.push_inst(block, InstBuilder::or(value, default_value));
             }
 
-            value
+            inst
         }
         Expr::Binary {
             left,
@@ -497,10 +512,7 @@ mod tests {
     </esi:try>"#;
 
         let ast = parse_document(input).unwrap();
-        println!("{:#?}", ast);
-
         let program = generate(ast);
-        println!("{}", program);
     }
 
     //     #[test]
@@ -528,204 +540,151 @@ mod tests {
 
     #[test]
     fn test_compile_include() {
-        let mut program = Program::new();
+        let program = generate(Ast(vec![Chunk::Esi(Tag::Include(vec![
+            Expr::String(Some("/foo/")),
+            Expr::Variable("bar", None, None),
+            Expr::String(Some("?whatever")),
+        ]))]));
 
-        let simple_block = program.new_block();
-        generate_for_chunk(
-            simple_block,
-            Chunk::Esi(Tag::Include(vec![Expr::String(Some("/foo"))])),
-            &mut program,
+        let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
+        let instructions = &blocks[0];
+
+        assert_eq!(
+            &instructions[0..7],
+            &vec![
+                &InstBuilder::literal_string("/foo/".to_string()),
+                &InstBuilder::get(0),
+                &InstructionData {
+                    opcode: Opcode::Add,
+                    stack_args: vec![0, 1],
+                    immediates: vec![],
+                },
+                &InstBuilder::literal_string("?whatever".to_string()),
+                &InstructionData {
+                    opcode: Opcode::Add,
+                    stack_args: vec![2, 3],
+                    immediates: vec![],
+                },
+                &InstBuilder::request(0, 4),
+                &InstBuilder::write_response(0),
+            ]
         );
-
-        let expression_block = program.new_block();
-        generate_for_chunk(
-            expression_block,
-            Chunk::Esi(Tag::Include(vec![
-                Expr::String(Some("/foo")),
-                Expr::Variable("bar", None, None),
-                Expr::String(Some("baz")),
-            ])),
-            &mut program,
-        );
-
-        println!("{:#?}", program);
-
-        println!("Simple Include");
-        for inst in &program.get_block(simple_block).instructions {
-            println!("{:?}", program.get_instruction(*inst));
-        }
-
-        println!("Expression Include");
-        for inst in &program.get_block(expression_block).instructions {
-            println!("{:?}", program.get_instruction(*inst));
-        }
-
-        // assert_eq!(
-        //     program.last_block().instructions,
-        //     [
-        //         Instruction::Literal {
-        //             value: Value::String("/foo".to_string())
-        //         },
-        //         Instruction::Request { reqid: 0 },
-        //         Instruction::WriteResponse { reqid: 0 },
-        //         //
-        //         Instruction::Literal {
-        //             value: Value::String("/foo".to_string())
-        //         },
-        //         Instruction::Get { varid: 0 },
-        //         Instruction::Add,
-        //         Instruction::Literal {
-        //             value: Value::String("baz".to_string())
-        //         },
-        //         Instruction::Add,
-        //         Instruction::Request { reqid: 1 },
-        //         Instruction::WriteResponse { reqid: 1 },
-        //     ]
-        // );
     }
 
-    // #[test]
-    // fn test_compile_assign_short() {
-    //     let mut program = Program::new();
-    //     generate_for_chunk(
-    //         Chunk::Esi(Tag::Assign(
-    //             "test",
-    //             None,
-    //             Expr::String(Some("this is a string")),
-    //         )),
-    //         &mut program,
-    //     );
-    //     generate_for_chunk(
-    //         Chunk::Esi(Tag::Assign(
-    //             "test",
-    //             Some(Expr::String(Some("subkey"))),
-    //             Expr::String(Some("this is a string")),
-    //         )),
-    //         &mut program,
-    //     );
+    #[test]
+    fn test_compile_assign_short() {
+        let program = generate(Ast(vec![
+            Chunk::Esi(Tag::Assign(
+                "test",
+                None,
+                Expr::String(Some("this is a string")),
+            )),
+            Chunk::Esi(Tag::Assign(
+                "test",
+                Some(Expr::String(Some("subkey"))),
+                Expr::String(Some("this is a string")),
+            )),
+        ]));
 
-    //     println!("{:#?}", program);
+        let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
+        let instructions = &blocks[0];
 
-    //     assert_eq!(
-    //         program.last_block().instructions,
-    //         [
-    //             Instruction::Literal {
-    //                 value: Value::String("this is a string".to_string())
-    //             },
-    //             Instruction::Set { varid: 0 },
-    //             //
-    //             Instruction::Get { varid: 0 },
-    //             Instruction::Literal {
-    //                 value: Value::String("subkey".to_string()),
-    //             },
-    //             Instruction::Literal {
-    //                 value: Value::String("this is a string".to_string())
-    //             },
-    //             Instruction::SetKey,
-    //         ]
-    //     );
-    // }
+        assert_eq!(
+            &instructions[0..2],
+            &vec![
+                &InstBuilder::literal_string("this is a string".to_string()),
+                &InstBuilder::set(0, 0),
+            ]
+        );
+        assert_eq!(
+            &instructions[2..6],
+            &vec![
+                &InstBuilder::get(0),
+                &InstBuilder::literal_string("subkey".to_string()),
+                &InstBuilder::literal_string("this is a string".to_string()),
+                &InstBuilder::set_key(1, 2, 3),
+            ]
+        );
+    }
 
-    // #[test]
-    // fn test_compile_expr_integer() {
-    //     let mut program = Program::new();
-    //     generate_for_expr(Expr::Integer(0), &mut program);
-    //     generate_for_expr(Expr::Integer(1), &mut program);
-    //     generate_for_expr(Expr::Integer(i32::MAX), &mut program);
-    //     generate_for_expr(Expr::Integer(i32::MIN), &mut program);
-    //     println!("{:#?}", &mut program);
+    #[test]
+    fn test_compile_expr_integer() {
+        let program = generate(Ast(vec![
+            Chunk::Expr(Expr::Integer(0)),
+            Chunk::Expr(Expr::Integer(1)),
+            Chunk::Expr(Expr::Integer(i32::MAX)),
+            Chunk::Expr(Expr::Integer(i32::MIN)),
+        ]));
 
-    //     assert_eq!(
-    //         program.last_block().instructions,
-    //         [
-    //             Instruction::Literal {
-    //                 value: Value::Integer(0)
-    //             },
-    //             Instruction::Literal {
-    //                 value: Value::Integer(1)
-    //             },
-    //             Instruction::Literal {
-    //                 value: Value::Integer(i32::MAX)
-    //             },
-    //             Instruction::Literal {
-    //                 value: Value::Integer(i32::MIN)
-    //             }
-    //         ]
-    //     );
-    // }
-    // #[test]
-    // fn test_compile_expr_string() {
-    //     let mut program = Program::new();
-    //     generate_for_expr(Expr::String(None), &mut program);
-    //     generate_for_expr(Expr::String(Some("")), &mut program);
-    //     generate_for_expr(Expr::String(Some("abcdefg")), &mut program);
-    //     println!("{:#?}", &mut program);
+        let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
+        let instructions = &blocks[0];
 
-    //     assert_eq!(
-    //         program.last_block().instructions,
-    //         [
-    //             Instruction::Literal {
-    //                 value: Value::String("".to_string())
-    //             },
-    //             Instruction::Literal {
-    //                 value: Value::String("".to_string())
-    //             },
-    //             Instruction::Literal {
-    //                 value: Value::String("abcdefg".to_string())
-    //             },
-    //         ]
-    //     );
-    // }
-    // #[test]
-    // fn test_compile_expr_variable() {
-    //     let mut program = Program::new();
-    //     generate_for_expr(Expr::Variable("test", None, None), &mut program);
-    //     generate_for_expr(
-    //         Expr::Variable("test", Some(Box::new(Expr::String(Some("subkey")))), None),
-    //         &mut program,
-    //     );
-    //     generate_for_expr(
-    //         Expr::Variable("test", None, Some(Box::new(Expr::Integer(1)))),
-    //         &mut program,
-    //     );
-    //     generate_for_expr(
-    //         Expr::Variable(
-    //             "test",
-    //             Some(Box::new(Expr::String(Some("subkey")))),
-    //             Some(Box::new(Expr::Integer(1))),
-    //         ),
-    //         &mut program,
-    //     );
+        assert_eq!(
+            &instructions[0..8],
+            &vec![
+                &InstBuilder::literal_int(0),
+                &InstBuilder::write_value(0),
+                &InstBuilder::literal_int(1),
+                &InstBuilder::write_value(1),
+                &InstBuilder::literal_int(i32::MAX),
+                &InstBuilder::write_value(2),
+                &InstBuilder::literal_int(i32::MIN),
+                &InstBuilder::write_value(3),
+            ]
+        );
+    }
+    #[test]
+    fn test_compile_expr_variable() {
+        let program = generate(Ast(vec![
+            Chunk::Expr(Expr::Variable("test", None, None)),
+            Chunk::Expr(Expr::Variable(
+                "test",
+                Some(Box::new(Expr::String(Some("subkey")))),
+                None,
+            )),
+            Chunk::Expr(Expr::Variable(
+                "test",
+                None,
+                Some(Box::new(Expr::Integer(1))),
+            )),
+            Chunk::Expr(Expr::Variable(
+                "test",
+                Some(Box::new(Expr::String(Some("subkey")))),
+                Some(Box::new(Expr::Integer(1))),
+            )),
+        ]));
 
-    //     assert_eq!(
-    //         program.last_block().instructions,
-    //         [
-    //             Instruction::Get { varid: 0 },
-    //             //
-    //             Instruction::Get { varid: 0 },
-    //             Instruction::Literal {
-    //                 value: Value::String("subkey".to_string())
-    //             },
-    //             Instruction::GetKey,
-    //             //
-    //             Instruction::Get { varid: 0 },
-    //             Instruction::Literal {
-    //                 value: Value::Integer(1)
-    //             },
-    //             Instruction::Or,
-    //             //
-    //             Instruction::Get { varid: 0 },
-    //             Instruction::Literal {
-    //                 value: Value::String("subkey".to_string())
-    //             },
-    //             Instruction::GetKey,
-    //             Instruction::Literal {
-    //                 value: Value::Integer(1)
-    //             },
-    //             Instruction::Or,
-    //         ]
-    //     );
-    // }
+        let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
+        let instructions = &blocks[0];
+
+        assert_eq!(&instructions[0..1], &vec![&InstBuilder::get(0)]);
+        assert_eq!(
+            &instructions[2..5],
+            &vec![
+                &InstBuilder::get(0),
+                &InstBuilder::literal_string("subkey".to_string()),
+                &InstBuilder::get_key(1, 2),
+            ]
+        );
+        assert_eq!(
+            &instructions[6..9],
+            &vec![
+                &InstBuilder::get(0),
+                &InstBuilder::literal_int(1),
+                &InstBuilder::or(4, 5),
+            ]
+        );
+        assert_eq!(
+            &instructions[10..15],
+            &vec![
+                &InstBuilder::get(0),
+                &InstBuilder::literal_string("subkey".to_string()),
+                &InstBuilder::get_key(7, 8),
+                &InstBuilder::literal_int(1),
+                &InstBuilder::or(9, 10),
+            ]
+        );
+    }
     // // #[test]
     // // fn test_compile_expr_call() {
     // //     let mut program = Program::new();
@@ -738,76 +697,132 @@ mod tests {
     // //     );
     // // }
 
-    // #[test]
-    // fn test_compile_expr_comparison() {
-    //     let mut program = Program::new();
-    //     generate_for_expr(
-    //         Expr::Binary {
-    //             left: Box::new(Expr::Variable("test", None, None)),
-    //             operator: Operator::Matches,
-    //             right: Box::new(Expr::String(Some("my-regex"))),
-    //         },
-    //         &mut program,
-    //     );
-    //     generate_for_expr(
-    //         Expr::Binary {
-    //             left: Box::new(Expr::Variable("test2", None, None)),
-    //             operator: Operator::Subtract,
-    //             right: Box::new(Expr::Integer(1)),
-    //         },
-    //         &mut program,
-    //     );
-    //     generate_for_expr(
-    //         Expr::Binary {
-    //             left: Box::new(Expr::Integer(1)),
-    //             operator: Operator::Multiply,
-    //             right: Box::new(Expr::Integer(2)),
-    //         },
-    //         &mut program,
-    //     );
-    //     generate_for_expr(
-    //         Expr::Binary {
-    //             left: Box::new(Expr::String(Some("a"))),
-    //             operator: Operator::Add,
-    //             right: Box::new(Expr::String(Some("b"))),
-    //         },
-    //         &mut program,
-    //     );
-    //     println!("{:#?}", &mut program);
+    #[test]
+    fn test_compile_expr_string() {
+        let program = generate(Ast(vec![
+            Chunk::Expr(Expr::String(None)),
+            Chunk::Expr(Expr::String(Some(""))),
+            Chunk::Expr(Expr::String(Some("abcdefg"))),
+        ]));
 
-    //     assert_eq!(
-    //         program.last_block().instructions,
-    //         [
-    //             Instruction::Get { varid: 0 },
-    //             Instruction::Literal {
-    //                 value: Value::String("my-regex".to_string())
-    //             },
-    //             Instruction::Matches,
-    //             //--
-    //             Instruction::Get { varid: 1 },
-    //             Instruction::Literal {
-    //                 value: Value::Integer(1),
-    //             },
-    //             Instruction::Subtract,
-    //             //--
-    //             Instruction::Literal {
-    //                 value: Value::Integer(1),
-    //             },
-    //             Instruction::Literal {
-    //                 value: Value::Integer(2),
-    //             },
-    //             Instruction::Multiply,
-    //             //--
-    //             Instruction::Literal {
-    //                 value: Value::String("a".to_string())
-    //             },
-    //             Instruction::Literal {
-    //                 value: Value::String("b".to_string())
-    //             },
-    //             Instruction::Add,
-    //         ]
-    //     );
-    // }
+        let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
+        let instructions = &blocks[0];
+
+        assert_eq!(
+            &instructions[0..6],
+            &vec![
+                &InstBuilder::literal_string("".to_string()),
+                &InstBuilder::write_value(0),
+                &InstBuilder::literal_string("".to_string()),
+                &InstBuilder::write_value(1),
+                &InstBuilder::literal_string("abcdefg".to_string()),
+                &InstBuilder::write_value(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_compile_expr_list() {
+        let program = generate(Ast(vec![Chunk::Expr(Expr::List(vec![
+            Expr::String(None),
+            Expr::String(Some("")),
+            Expr::String(Some("abcdefg")),
+        ]))]));
+
+        let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
+        let instructions = &blocks[0];
+
+        assert_eq!(
+            &instructions[0..4],
+            &vec![
+                &InstBuilder::literal_string("abcdefg".to_string()),
+                &InstBuilder::literal_string("".to_string()),
+                &InstBuilder::literal_string("".to_string()),
+                &InstBuilder::make_list(3, vec![0, 1, 2]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_compile_expr_binary() {
+        let program = generate(Ast(vec![
+            Chunk::Expr(Expr::Binary {
+                left: Box::new(Expr::Variable("test", None, None)),
+                operator: Operator::Matches,
+                right: Box::new(Expr::String(Some("my-regex"))),
+            }),
+            Chunk::Expr(Expr::Binary {
+                left: Box::new(Expr::Variable("test2", None, None)),
+                operator: Operator::Subtract,
+                right: Box::new(Expr::Integer(1)),
+            }),
+            Chunk::Expr(Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::Multiply,
+                right: Box::new(Expr::Integer(2)),
+            }),
+            Chunk::Expr(Expr::Binary {
+                left: Box::new(Expr::String(Some("a"))),
+                operator: Operator::Add,
+                right: Box::new(Expr::String(Some("b"))),
+            }),
+        ]));
+
+        let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
+        let instructions = &blocks[0];
+
+        assert_eq!(
+            &instructions[0..3],
+            &vec![
+                &InstBuilder::get(0),
+                &InstBuilder::literal_string("my-regex".to_string()),
+                &InstructionData {
+                    opcode: Opcode::Matches,
+                    stack_args: vec![0, 1],
+                    immediates: vec![]
+                },
+            ]
+        );
+
+        assert_eq!(
+            &instructions[4..7],
+            &vec![
+                &InstBuilder::get(1),
+                &InstBuilder::literal_int(1),
+                &InstructionData {
+                    opcode: Opcode::Subtract,
+                    stack_args: vec![3, 4],
+                    immediates: vec![]
+                },
+            ]
+        );
+
+        assert_eq!(
+            &instructions[8..11],
+            &vec![
+                &InstBuilder::literal_int(1),
+                &InstBuilder::literal_int(2),
+                &InstructionData {
+                    opcode: Opcode::Multiply,
+                    stack_args: vec![6, 7],
+                    immediates: vec![]
+                },
+            ]
+        );
+
+        assert_eq!(
+            &instructions[12..15],
+            &vec![
+                &InstBuilder::literal_string("a".to_string()),
+                &InstBuilder::literal_string("b".to_string()),
+                &InstructionData {
+                    opcode: Opcode::Add,
+                    stack_args: vec![9, 10],
+                    immediates: vec![]
+                },
+            ]
+        );
+    }
 
     // #[test]
     // fn test_compile_expr_output() {
@@ -847,9 +862,7 @@ mod tests {
 
         let ast = parse_document(input).unwrap();
         let program = generate(ast);
-        println!("{}", program);
         let mut buf = program.serialize();
-        println!("{:?}", buf);
 
         // Header
         assert_eq!(0xABADBABA, buf.get_u32());

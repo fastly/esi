@@ -18,12 +18,28 @@ pub struct VMError(pub String);
 pub type Result<T> = std::result::Result<T, VMError>;
 
 #[derive(Debug, Clone)]
+pub enum StackEntry {
+    Value(Value),
+    Ref(usize),
+}
+
+impl StackEntry {
+    pub fn to_value(self, state: &ExecutionState) -> Value {
+        match self {
+            StackEntry::Value(v) => v,
+            StackEntry::Ref(varid) => state.variables[varid].clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Value {
     Null,
     LiteralString(*const u8), // Pointer to length-prepended string in code segment
     String(Vec<u8>),
     Bool(bool),
     Integer(i32),
+    List(Vec<Value>),
 }
 
 impl Value {
@@ -43,6 +59,7 @@ impl Value {
             }
             Value::String(s) => s.clone(),
             Value::Integer(i) => i.to_string().into_bytes(),
+            Value::List(_) => todo!(),
         }
     }
 
@@ -53,6 +70,7 @@ impl Value {
             Value::String(s) => s.len() == 0,
             Value::Bool(b) => *b,
             Value::Integer(i) => *i != 0,
+            Value::List(_) => todo!(),
         }
     }
 
@@ -64,6 +82,7 @@ impl Value {
                 Value::Bool(_) => todo!(),
                 Value::String(_) => todo!(),
                 Value::Integer(_) => todo!(),
+                Value::List(_) => todo!(),
             },
             self_lit_str @ Value::LiteralString(self_ptr) => match other {
                 Value::LiteralString(other_ptr) => unsafe {
@@ -88,6 +107,7 @@ impl Value {
                     Value::String(out)
                 }
                 Value::Integer(_) => todo!(),
+                Value::List(_) => todo!(),
             },
             Value::Bool(self_b) => match other {
                 Value::Bool(other_b) => todo!(),
@@ -95,6 +115,7 @@ impl Value {
                 Value::LiteralString(_) => todo!(),
                 Value::String(_) => todo!(),
                 Value::Integer(_) => todo!(),
+                Value::List(_) => todo!(),
             },
             Value::String(self_str) => match other {
                 Value::Bool(other_b) => todo!(),
@@ -107,6 +128,7 @@ impl Value {
                 }
                 Value::String(_) => todo!(),
                 Value::Integer(_) => todo!(),
+                Value::List(_) => todo!(),
             },
             Value::Integer(self_i) => match other {
                 Value::Bool(other_b) => todo!(),
@@ -114,7 +136,9 @@ impl Value {
                 Value::LiteralString(_) => todo!(),
                 Value::String(_) => todo!(),
                 Value::Integer(other_i) => Value::Integer(self_i + other_i),
+                Value::List(_) => todo!(),
             },
+            Value::List(_) => todo!(),
         }
     }
 
@@ -165,6 +189,7 @@ impl PartialEq for Value {
                 Value::String(_) => false,        // TODO: empty string might equal null?
                 Value::Bool(_) => false,          // TODO: not sure if null == false
                 Value::Integer(_) => todo!(),
+                Value::List(_) => todo!(),
             },
             Value::LiteralString(self_ptr) => match other {
                 Value::LiteralString(other_ptr) => {
@@ -180,6 +205,7 @@ impl PartialEq for Value {
                 Value::Null => false,
                 Value::Bool(_) => false, // TODO: might need to coerce the bool to a string here
                 Value::Integer(_) => self.to_bytes() == other.to_bytes(),
+                Value::List(_) => todo!(),
             },
             Value::Bool(self_b) => match other {
                 Value::Bool(other_b) => self_b == other_b,
@@ -187,6 +213,7 @@ impl PartialEq for Value {
                 Value::LiteralString(_) => false, // TODO: ditto above re: coercion
                 Value::String(_) => false,        // TODO: ditto above re: coercion
                 Value::Integer(_) => false,
+                Value::List(_) => todo!(),
             },
             Value::String(self_str) => match other {
                 Value::Bool(other_b) => todo!(),
@@ -194,6 +221,7 @@ impl PartialEq for Value {
                 Value::LiteralString(_) => todo!(),
                 Value::String(other_str) => self_str == other_str,
                 Value::Integer(_) => self.to_bytes() == other.to_bytes(),
+                Value::List(_) => todo!(),
             },
             Value::Integer(self_i) => match other {
                 Value::Bool(other_b) => todo!(),
@@ -201,7 +229,9 @@ impl PartialEq for Value {
                 Value::LiteralString(_) => todo!(),
                 Value::String(other_str) => self_i.to_string().into_bytes() == *other_str,
                 Value::Integer(other_i) => self_i == other_i,
+                Value::List(_) => todo!(),
             },
+            Value::List(_) => todo!(),
         }
     }
 }
@@ -246,7 +276,7 @@ pub struct ProgramContext<'a> {
 #[derive(Debug, Clone)]
 pub struct ExecutionState {
     pub ip: usize,
-    pub stack: Vec<Value>,
+    stack: Vec<StackEntry>,
     pub variables: Vec<Value>,
     pub requests: Vec<RequestHandle>,
 }
@@ -258,6 +288,22 @@ impl ExecutionState {
             variables: vec![Value::Null; ctx.variable_count],
             requests: vec![NO_REQUEST_HANDLE; ctx.request_count],
         }
+    }
+    pub fn push(&mut self, v: Value) {
+        self.stack.push(StackEntry::Value(v));
+    }
+
+    pub fn push_ref(&mut self, varid: usize) {
+        self.stack.push(StackEntry::Ref(varid));
+    }
+
+    pub fn pop(&mut self) -> StackEntry {
+        self.stack.pop().unwrap()
+    }
+
+    pub fn pop_value(&mut self) -> Value {
+        let entry = self.stack.pop().unwrap();
+        entry.to_value(self)
     }
 }
 

@@ -39,6 +39,7 @@ pub enum Chunk<'a> {
 pub enum Expr<'a> {
     Integer(i32),
     String(Option<&'a str>),
+    List(Vec<Expr<'a>>),
     Variable(&'a str, Option<Box<Expr<'a>>>, Option<Box<Expr<'a>>>),
     Binary {
         left: Box<Expr<'a>>,

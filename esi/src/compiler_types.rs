@@ -224,6 +224,13 @@ impl InstBuilder {
             immediates: vec![Immediate::String(s)],
         }
     }
+    pub fn make_list(len: usize, values: Vec<Value>) -> InstructionData {
+        InstructionData {
+            opcode: Opcode::MakeList,
+            stack_args: values,
+            immediates: vec![Immediate::Integer(len.try_into().unwrap())],
+        }
+    }
     pub fn get_key(var: Value, subkey: Value) -> InstructionData {
         InstructionData {
             opcode: Opcode::GetKey,
@@ -256,14 +263,16 @@ pub struct InstructionData {
 }
 impl InstructionData {
     pub fn validate(&self) {
-        assert_eq!(
-            self.opcode.expected_stack_args(),
-            self.stack_args.len(),
-            "Expected {} stack args for {:?} instruction, but got {}",
-            self.opcode.expected_stack_args(),
-            self.opcode,
-            self.stack_args.len()
-        );
+        if self.opcode.expected_stack_args() != usize::MAX {
+            assert_eq!(
+                self.opcode.expected_stack_args(),
+                self.stack_args.len(),
+                "Expected {} stack args for {:?} instruction, but got {}",
+                self.opcode.expected_stack_args(),
+                self.opcode,
+                self.stack_args.len()
+            );
+        }
         assert_eq!(
             self.opcode.expected_immediates(),
             self.immediates.len(),
