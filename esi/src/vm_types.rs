@@ -11,6 +11,8 @@ pub unsafe fn read_u16(ptr: *const u8) -> u16 {
     ptr.cast::<u16>().read_unaligned()
 }
 
+use crate::abi::*;
+
 pub const MAGIC: u32 = 0xABADBABA;
 
 #[derive(Debug, Clone)]
@@ -237,35 +239,9 @@ impl PartialEq for Value {
 }
 
 #[derive(Debug, Clone)]
-pub enum BuiltinFn {/* fieldless builtins go here */}
-
-#[derive(Debug, Clone)]
-pub enum MetaVar {/* fieldless metavar names go here */}
-
-#[derive(Debug, Clone)]
-pub struct Environment<'a> {
-    /* request: Request, */
-    functions: &'a [BuiltinFn],
-    meta_vars: &'a [MetaVar],
-}
-
-const ENVIRONMENT_V1: Environment<'static> = Environment {
-    functions: &[],
-    meta_vars: &[],
-};
-
-impl Environment<'_> {
-    pub fn for_version(version: u32) -> Result<Self> {
-        match version {
-            1 => Ok(ENVIRONMENT_V1),
-            _ => Err(VMError(format!("unknown version: {}", version))),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct ProgramContext<'a> {
     pub program_data: &'a [u8],
+    pub abi_version: u32,
     pub variable_count: usize,
     pub request_count: usize,
     pub code_length: usize,

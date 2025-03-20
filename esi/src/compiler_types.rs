@@ -253,6 +253,17 @@ impl InstBuilder {
             immediates: vec![],
         }
     }
+    pub fn call(func_id: FunctionId, args: Vec<Value>) -> InstructionData {
+        let args_len = args.len();
+        InstructionData {
+            opcode: Opcode::Call,
+            stack_args: args,
+            immediates: vec![
+                Immediate::FunctionId(func_id),
+                Immediate::Integer(args_len as i32),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

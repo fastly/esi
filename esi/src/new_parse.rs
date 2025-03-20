@@ -754,7 +754,7 @@ exception!
         assert_eq!(x, [Chunk::Text("hello\nthere")]);
     }
     #[test]
-    fn test_new_parse_interpolated() {
+    fn test_new_parse_interpolated_var() {
         let (rest, x) = parse("hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>").unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
@@ -763,6 +763,18 @@ exception!
                 Chunk::Text("hello $(foo)"),
                 Chunk::Text("goodbye "),
                 Chunk::Expr(Expr::Variable("foo", None, None)),
+            ]
+        );
+    }
+    #[test]
+    fn test_new_parse_interpolated_call() {
+        let (rest, x) = parse("<esi:vars>$my_func()</esi:vars>").unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [
+                Chunk::Text("goodbye "),
+                Chunk::Expr(Expr::Call("my_func", vec![])),
             ]
         );
     }

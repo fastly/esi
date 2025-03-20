@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+mod abi;
 mod compiler;
 mod compiler_types;
 mod config;

@@ -42,7 +42,7 @@ pub enum Opcode {
     #[meta(name = "get_slice", stack_args = 0, immediates = 0, returns = 0)]
     GetSlice = 13, // TODO
 
-    #[meta(name = "call", stack_args = 0, immediates = 1, returns = 1)]
+    #[meta(name = "call", stack_args = N, immediates = 2, returns = 1)]
     Call = 14,
 
     #[meta(name = "==", stack_args = 2, immediates = 0, returns = 1)]

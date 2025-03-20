@@ -1,7 +1,8 @@
+use crate::abi::*;
 use crate::opcodes::*;
 use crate::vm_types::*;
 
-fn parse_header(program_data: &[u8]) -> Result<(ProgramContext, Environment)> {
+fn parse_header(program_data: &[u8]) -> Result<ProgramContext> {
     let input_ptr = program_data.as_ptr();
 
     let magic = unsafe { read_u32(input_ptr) };
@@ -10,8 +11,7 @@ fn parse_header(program_data: &[u8]) -> Result<(ProgramContext, Environment)> {
     }
 
     // TODO: use version to modify or validate the context
-    let version = unsafe { read_u32(input_ptr.add(4)) };
-    let env = Environment::for_version(version)?;
+    let abi_version = unsafe { read_u32(input_ptr.add(4)) };
 
     let input_ptr = program_data.as_ptr();
 
@@ -30,6 +30,7 @@ fn parse_header(program_data: &[u8]) -> Result<(ProgramContext, Environment)> {
 
     let ctx = ProgramContext {
         program_data,
+        abi_version,
         variable_count,
         request_count,
         code_length,
@@ -37,10 +38,11 @@ fn parse_header(program_data: &[u8]) -> Result<(ProgramContext, Environment)> {
         data,
     };
 
-    Ok((ctx, env))
+    Ok(ctx)
 }
 
-fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) -> Result<()> {
+fn run<T: EnvironmentApi>(ctx: ProgramContext, mut api: T) -> Result<()> {
+    let abi = Abi::for_version(ctx.abi_version)?;
     let mut state = ExecutionState::new(&ctx);
 
     while state.ip < ctx.code_length {
@@ -193,7 +195,17 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, _env: Environment, mut api: T) ->
                 state.push(value);
             }
             OP_GETSLICE => panic!("unknown opcode: {}", opcode),
-            OP_CALL => panic!("unknown opcode: {}", opcode),
+            OP_CALL => {
+                if state.ip + 8 > ctx.code_length {
+                    break;
+                }
+                let func_id = unsafe { read_i32(ctx.code_ptr.add(state.ip)) };
+                state.ip += 4;
+                let args_len = unsafe { read_i32(ctx.code_ptr.add(state.ip)) };
+                state.ip += 4;
+
+                abi.call_function(func_id as usize, args_len as usize, &mut state);
+            }
             OP_EQUALS => {
                 let left = state.pop_value();
                 let right = state.pop_value();
@@ -329,12 +341,12 @@ mod tests {
     fn test_vm_static_text() {
         let input = r#"hello<esi:text> world</esi:text>"#;
         let ast = parse_document(input).unwrap();
-        let program = generate(ast);
+        let program = generate(ast, &ABI_TEST);
         let buf = program.serialize();
 
-        let (ctx, env) = parse_header(&buf).unwrap();
+        let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, env, &mut test_api).unwrap();
+        run(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"hello world", &test_api.buf[..]);
     }
@@ -350,12 +362,12 @@ mod tests {
         );
 
         let ast = parse_document(input).unwrap();
-        let program = generate(ast);
+        let program = generate(ast, &ABI_TEST);
         let buf = program.serialize();
 
-        let (ctx, env) = parse_header(&buf).unwrap();
+        let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, env, &mut test_api).unwrap();
+        run(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"foo - 123", &test_api.buf[..]);
     }
@@ -370,13 +382,13 @@ mod tests {
         );
 
         let ast = parse_document(input).unwrap();
-        let program = generate(ast);
+        let program = generate(ast, &ABI_TEST);
         println!("{program}");
         let buf = program.serialize();
 
-        let (ctx, env) = parse_header(&buf).unwrap();
+        let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, env, &mut test_api).unwrap();
+        run(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"purple green", &test_api.buf[..]);
     }
@@ -394,12 +406,12 @@ mod tests {
         );
 
         let ast = parse_document(input).unwrap();
-        let program = generate(ast);
+        let program = generate(ast, &ABI_TEST);
         let buf = program.serialize();
 
-        let (ctx, env) = parse_header(&buf).unwrap();
+        let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, env, &mut test_api).unwrap();
+        run(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"65 - 63 - 32 - 128 - 4", &test_api.buf[..]);
     }
@@ -420,14 +432,37 @@ mod tests {
         );
 
         let ast = parse_document(input).unwrap();
-        let program = generate(ast);
+        let program = generate(ast, &ABI_TEST);
         let buf = program.serialize();
 
-        let (ctx, env) = parse_header(&buf).unwrap();
+        let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, env, &mut test_api).unwrap();
+        run(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"YES - YES", &test_api.buf[..]);
+    }
+
+    #[test]
+    fn test_vm_call() {
+        let input = concat!(
+            r#"<esi:vars>"#,
+            r#"$ping()"#,
+            r#" - "#,
+            r#"$identity(123)"#,
+            r#" - "#,
+            r#"$identity('hello')"#,
+            r#"</esi:vars>"#,
+        );
+
+        let ast = parse_document(input).unwrap();
+        let program = generate(ast, &ABI_TEST);
+        let buf = program.serialize();
+
+        let ctx = parse_header(&buf).unwrap();
+        let mut test_api = TestApi::new();
+        run(ctx, &mut test_api).unwrap();
+
+        assert_eq!(b"pong - 123 - hello", &test_api.buf[..]);
     }
 
     // <esi:include src="/a$(foo)b">

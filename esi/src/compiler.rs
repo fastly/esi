@@ -1,3 +1,4 @@
+use crate::abi::*;
 use crate::compiler_types::*;
 use crate::opcodes::*;
 use crate::parser_types::*;
@@ -18,9 +19,10 @@ pub struct Program<'a> {
     requests: ReqId,
     variables: HashMap<String, VarId>,
     data: Vec<&'a str>,
+    abi: &'static Abi<'static>,
 }
 impl Program<'_> {
-    fn new() -> Self {
+    fn new(abi: &'static Abi) -> Self {
         Self {
             last_block: None,
             blocks: BlockMap::new(),
@@ -30,6 +32,7 @@ impl Program<'_> {
             requests: 0,
             variables: HashMap::new(),
             data: Vec::new(),
+            abi: abi,
         }
     }
 
@@ -98,7 +101,7 @@ impl Program<'_> {
 
         let mut buf: OutputBuffer = OutputBuffer::new(BytesMut::new());
         buf.put_u32_le(0xABADBABA); // Magic
-        buf.put_u32_le(0x00000001); // Version
+        buf.put_u32_le(self.abi.version); // Version
         buf.put_u64_le(0); // Length of signature+bytecode segment
         buf.put_u64_le(0); // Length of data segment
         buf.put_u32_le(self.requests); // Variable count
@@ -183,8 +186,8 @@ impl fmt::Display for Program<'_> {
     }
 }
 
-pub fn generate(ast: Ast) -> Program {
-    let mut program = Program::new();
+pub fn generate<'a>(ast: Ast<'a>, abi: &'static Abi<'static>) -> Program<'a> {
+    let mut program = Program::new(abi);
     let first_block = program.new_block();
     let Ast(chunks) = ast;
 
@@ -429,7 +432,23 @@ fn generate_for_expr(block: Block, expr: Expr, program: &mut Program) -> Value {
                 },
             )
         }
-        Expr::Call(_, _) => todo!(),
+        Expr::Call(fn_name, arg_exprs) => {
+            // TODO: error prop
+            let (fn_id, fn_sig) = program.abi.function_by_name(fn_name).unwrap();
+
+            match &fn_sig.args {
+                Args::Constant(arg_count) => assert!(*arg_count == arg_exprs.len()),
+                Args::Variadic(arg_range) => assert!(arg_range.contains(&arg_exprs.len())),
+            }
+
+            let arg_values = arg_exprs
+                .into_iter()
+                .rev()
+                .map(|item_expr| generate_for_expr(block, item_expr, program))
+                .collect::<Vec<Value>>();
+
+            program.push_inst(block, InstBuilder::call(fn_id, arg_values))
+        }
     };
     program.value_for_inst(last_inst).unwrap()
 }
@@ -437,6 +456,7 @@ fn generate_for_expr(block: Block, expr: Expr, program: &mut Program) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::ABI_TEST;
     use crate::new_parse::parse_document;
     use bytes::Buf;
 
@@ -512,7 +532,7 @@ mod tests {
     </esi:try>"#;
 
         let ast = parse_document(input).unwrap();
-        let program = generate(ast);
+        let program = generate(ast, &ABI_TEST);
     }
 
     //     #[test]
@@ -540,11 +560,14 @@ mod tests {
 
     #[test]
     fn test_compile_include() {
-        let program = generate(Ast(vec![Chunk::Esi(Tag::Include(vec![
-            Expr::String(Some("/foo/")),
-            Expr::Variable("bar", None, None),
-            Expr::String(Some("?whatever")),
-        ]))]));
+        let program = generate(
+            Ast(vec![Chunk::Esi(Tag::Include(vec![
+                Expr::String(Some("/foo/")),
+                Expr::Variable("bar", None, None),
+                Expr::String(Some("?whatever")),
+            ]))]),
+            &ABI_TEST,
+        );
 
         let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
         let instructions = &blocks[0];
@@ -573,18 +596,21 @@ mod tests {
 
     #[test]
     fn test_compile_assign_short() {
-        let program = generate(Ast(vec![
-            Chunk::Esi(Tag::Assign(
-                "test",
-                None,
-                Expr::String(Some("this is a string")),
-            )),
-            Chunk::Esi(Tag::Assign(
-                "test",
-                Some(Expr::String(Some("subkey"))),
-                Expr::String(Some("this is a string")),
-            )),
-        ]));
+        let program = generate(
+            Ast(vec![
+                Chunk::Esi(Tag::Assign(
+                    "test",
+                    None,
+                    Expr::String(Some("this is a string")),
+                )),
+                Chunk::Esi(Tag::Assign(
+                    "test",
+                    Some(Expr::String(Some("subkey"))),
+                    Expr::String(Some("this is a string")),
+                )),
+            ]),
+            &ABI_TEST,
+        );
 
         let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
         let instructions = &blocks[0];
@@ -609,12 +635,15 @@ mod tests {
 
     #[test]
     fn test_compile_expr_integer() {
-        let program = generate(Ast(vec![
-            Chunk::Expr(Expr::Integer(0)),
-            Chunk::Expr(Expr::Integer(1)),
-            Chunk::Expr(Expr::Integer(i32::MAX)),
-            Chunk::Expr(Expr::Integer(i32::MIN)),
-        ]));
+        let program = generate(
+            Ast(vec![
+                Chunk::Expr(Expr::Integer(0)),
+                Chunk::Expr(Expr::Integer(1)),
+                Chunk::Expr(Expr::Integer(i32::MAX)),
+                Chunk::Expr(Expr::Integer(i32::MIN)),
+            ]),
+            &ABI_TEST,
+        );
 
         let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
         let instructions = &blocks[0];
@@ -635,24 +664,27 @@ mod tests {
     }
     #[test]
     fn test_compile_expr_variable() {
-        let program = generate(Ast(vec![
-            Chunk::Expr(Expr::Variable("test", None, None)),
-            Chunk::Expr(Expr::Variable(
-                "test",
-                Some(Box::new(Expr::String(Some("subkey")))),
-                None,
-            )),
-            Chunk::Expr(Expr::Variable(
-                "test",
-                None,
-                Some(Box::new(Expr::Integer(1))),
-            )),
-            Chunk::Expr(Expr::Variable(
-                "test",
-                Some(Box::new(Expr::String(Some("subkey")))),
-                Some(Box::new(Expr::Integer(1))),
-            )),
-        ]));
+        let program = generate(
+            Ast(vec![
+                Chunk::Expr(Expr::Variable("test", None, None)),
+                Chunk::Expr(Expr::Variable(
+                    "test",
+                    Some(Box::new(Expr::String(Some("subkey")))),
+                    None,
+                )),
+                Chunk::Expr(Expr::Variable(
+                    "test",
+                    None,
+                    Some(Box::new(Expr::Integer(1))),
+                )),
+                Chunk::Expr(Expr::Variable(
+                    "test",
+                    Some(Box::new(Expr::String(Some("subkey")))),
+                    Some(Box::new(Expr::Integer(1))),
+                )),
+            ]),
+            &ABI_TEST,
+        );
 
         let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
         let instructions = &blocks[0];
@@ -685,25 +717,17 @@ mod tests {
             ]
         );
     }
-    // // #[test]
-    // // fn test_compile_expr_call() {
-    // //     let mut program = Program::new();
-    // //     generate_for_expr(&Expr::Call("function", vec![]), &mut program);
-    // //     println!("{:#?}", &mut program);
-
-    // //     assert_eq!(
-    // //         program.last_block().instructions,
-    // //         [Instruction::Call { varid: 0 },]
-    // //     );
-    // // }
 
     #[test]
     fn test_compile_expr_string() {
-        let program = generate(Ast(vec![
-            Chunk::Expr(Expr::String(None)),
-            Chunk::Expr(Expr::String(Some(""))),
-            Chunk::Expr(Expr::String(Some("abcdefg"))),
-        ]));
+        let program = generate(
+            Ast(vec![
+                Chunk::Expr(Expr::String(None)),
+                Chunk::Expr(Expr::String(Some(""))),
+                Chunk::Expr(Expr::String(Some("abcdefg"))),
+            ]),
+            &ABI_TEST,
+        );
 
         let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
         let instructions = &blocks[0];
@@ -723,11 +747,14 @@ mod tests {
 
     #[test]
     fn test_compile_expr_list() {
-        let program = generate(Ast(vec![Chunk::Expr(Expr::List(vec![
-            Expr::String(None),
-            Expr::String(Some("")),
-            Expr::String(Some("abcdefg")),
-        ]))]));
+        let program = generate(
+            Ast(vec![Chunk::Expr(Expr::List(vec![
+                Expr::String(None),
+                Expr::String(Some("")),
+                Expr::String(Some("abcdefg")),
+            ]))]),
+            &ABI_TEST,
+        );
 
         let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
         let instructions = &blocks[0];
@@ -745,28 +772,31 @@ mod tests {
 
     #[test]
     fn test_compile_expr_binary() {
-        let program = generate(Ast(vec![
-            Chunk::Expr(Expr::Binary {
-                left: Box::new(Expr::Variable("test", None, None)),
-                operator: Operator::Matches,
-                right: Box::new(Expr::String(Some("my-regex"))),
-            }),
-            Chunk::Expr(Expr::Binary {
-                left: Box::new(Expr::Variable("test2", None, None)),
-                operator: Operator::Subtract,
-                right: Box::new(Expr::Integer(1)),
-            }),
-            Chunk::Expr(Expr::Binary {
-                left: Box::new(Expr::Integer(1)),
-                operator: Operator::Multiply,
-                right: Box::new(Expr::Integer(2)),
-            }),
-            Chunk::Expr(Expr::Binary {
-                left: Box::new(Expr::String(Some("a"))),
-                operator: Operator::Add,
-                right: Box::new(Expr::String(Some("b"))),
-            }),
-        ]));
+        let program = generate(
+            Ast(vec![
+                Chunk::Expr(Expr::Binary {
+                    left: Box::new(Expr::Variable("test", None, None)),
+                    operator: Operator::Matches,
+                    right: Box::new(Expr::String(Some("my-regex"))),
+                }),
+                Chunk::Expr(Expr::Binary {
+                    left: Box::new(Expr::Variable("test2", None, None)),
+                    operator: Operator::Subtract,
+                    right: Box::new(Expr::Integer(1)),
+                }),
+                Chunk::Expr(Expr::Binary {
+                    left: Box::new(Expr::Integer(1)),
+                    operator: Operator::Multiply,
+                    right: Box::new(Expr::Integer(2)),
+                }),
+                Chunk::Expr(Expr::Binary {
+                    left: Box::new(Expr::String(Some("a"))),
+                    operator: Operator::Add,
+                    right: Box::new(Expr::String(Some("b"))),
+                }),
+            ]),
+            &ABI_TEST,
+        );
 
         let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
         let instructions = &blocks[0];
@@ -824,6 +854,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_compile_expr_call() {
+        let program = generate(
+            Ast(vec![
+                Chunk::Expr(Expr::Call("ping", vec![])),
+                Chunk::Expr(Expr::Call("identity", vec![Expr::Integer(1)])),
+            ]),
+            &ABI_TEST,
+        );
+
+        let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
+        let instructions = &blocks[0];
+
+        assert_eq!(&instructions[0..1], &vec![&InstBuilder::call(0, vec![]),]);
+        assert_eq!(
+            &instructions[2..4],
+            &vec![&InstBuilder::literal_int(1), &InstBuilder::call(1, vec![1]),]
+        );
+    }
+
     // #[test]
     // fn test_compile_expr_output() {
     //     let mut program = Program::new();
@@ -861,7 +911,7 @@ mod tests {
     </esi:try>"#;
 
         let ast = parse_document(input).unwrap();
-        let program = generate(ast);
+        let program = generate(ast, &ABI_TEST);
         let mut buf = program.serialize();
 
         // Header
