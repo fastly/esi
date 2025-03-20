@@ -367,6 +367,7 @@ fn generate_for_esi_tag<'a>(block: Block, tag: Tag<'a>, program: &mut Program<'a
 fn generate_for_expr(block: Block, expr: Expr, program: &mut Program) -> Value {
     let last_inst = match expr {
         Expr::Integer(i) => program.push_inst(block, InstBuilder::literal_int(i)),
+        Expr::Bool(b) => program.push_inst(block, InstBuilder::literal_bool(b)),
         Expr::String(s) => program.push_inst(
             block,
             InstBuilder::literal_string(s.unwrap_or("").to_string()),
@@ -398,6 +399,21 @@ fn generate_for_expr(block: Block, expr: Expr, program: &mut Program) -> Value {
 
             inst
         }
+        Expr::Unary { operator, expr } => {
+            let value = generate_for_expr(block, *expr, program);
+            let opcode = match operator {
+                Operator::Not => Opcode::Not,
+                _ => panic!("unexpected operator in unary expression: {:?}", operator),
+            };
+            program.push_inst(
+                block,
+                InstructionData {
+                    opcode: opcode,
+                    stack_args: vec![value],
+                    immediates: vec![],
+                },
+            )
+        }
         Expr::Binary {
             left,
             operator,
@@ -411,6 +427,7 @@ fn generate_for_expr(block: Block, expr: Expr, program: &mut Program) -> Value {
                 Operator::Matches => Opcode::Matches,
                 Operator::MatchesInsensitive => Opcode::MatchesInsensitive,
                 Operator::Equals => Opcode::Equals,
+                Operator::NotEquals => Opcode::NotEquals,
                 Operator::LessThan => Opcode::LessThan,
                 Operator::LessThanOrEquals => Opcode::LessThanOrEquals,
                 Operator::GreaterThan => Opcode::GreaterThan,
@@ -422,6 +439,7 @@ fn generate_for_expr(block: Block, expr: Expr, program: &mut Program) -> Value {
                 Operator::Divide => Opcode::Divide,
                 Operator::Multiply => Opcode::Multiply,
                 Operator::Modulo => Opcode::Modulo,
+                _ => panic!("unexpected operator in binary expression: {:?}", operator),
             };
             program.push_inst(
                 block,
@@ -766,6 +784,32 @@ mod tests {
                 &InstBuilder::literal_string("".to_string()),
                 &InstBuilder::literal_string("".to_string()),
                 &InstBuilder::make_list(3, vec![0, 1, 2]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_compile_expr_unary() {
+        let program = generate(
+            Ast(vec![Chunk::Expr(Expr::Unary {
+                operator: Operator::Not,
+                expr: Box::new(Expr::Integer(1)),
+            })]),
+            &ABI_TEST,
+        );
+
+        let blocks: Vec<Vec<&InstructionData>> = program.block_instructions_iter().collect();
+        let instructions = &blocks[0];
+
+        assert_eq!(
+            &instructions[0..2],
+            &vec![
+                &InstBuilder::literal_int(1),
+                &InstructionData {
+                    opcode: Opcode::Not,
+                    stack_args: vec![0],
+                    immediates: vec![]
+                },
             ]
         );
     }

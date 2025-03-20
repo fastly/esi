@@ -501,6 +501,16 @@ fn number(input: &str) -> IResult<&str, Expr, Error<&str>> {
     Ok((input, Expr::Integer(str::parse::<i32>(parsed).unwrap_or(0))))
 }
 
+fn boolean(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    map(alt((tag("true"), tag("false"))), |opstr| {
+        Expr::Bool(match opstr {
+            "true" => true,
+            "false" => false,
+            _ => unreachable!(),
+        })
+    })(input)
+}
+
 fn list(input: &str) -> IResult<&str, Expr, Error<&str>> {
     let (input, parsed) = delimited(
         terminated(char('['), multispace0),
@@ -519,17 +529,21 @@ fn operator(input: &str) -> IResult<&str, Operator, Error<&str>> {
             tag("matches"),
             tag("matches_i"),
             tag("=="),
-            tag("<"),
+            tag("!="),
             tag("<="),
-            tag(">"),
+            tag("<"),
             tag(">="),
+            tag(">"),
             tag("&&"),
+            tag("&"),
             tag("||"),
+            tag("|"),
             tag("-"),
             tag("+"),
             tag("/"),
             tag("*"),
             tag("%"),
+            tag("!"),
         )),
         |opstr| match opstr {
             "has" => Operator::Matches,
@@ -537,17 +551,21 @@ fn operator(input: &str) -> IResult<&str, Operator, Error<&str>> {
             "matches" => Operator::Matches,
             "matches_i" => Operator::MatchesInsensitive,
             "==" => Operator::Equals,
+            "!=" => Operator::NotEquals,
             "<" => Operator::LessThan,
             "<=" => Operator::LessThanOrEquals,
             ">" => Operator::GreaterThan,
             ">=" => Operator::GreaterThanOrEquals,
             "&&" => Operator::And,
+            "&" => Operator::And,
             "||" => Operator::Or,
+            "|" => Operator::Or,
             "-" => Operator::Subtract,
             "+" => Operator::Add,
             "/" => Operator::Divide,
             "*" => Operator::Multiply,
             "%" => Operator::Modulo,
+            "!" => Operator::Not,
             _ => unreachable!(),
         },
     )(input)
@@ -557,8 +575,19 @@ fn interpolated_expression(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>
     map(alt((call, variable)), |expr| vec![Chunk::Expr(expr)])(input)
 }
 
-fn expr(input: &str) -> IResult<&str, Expr, Error<&str>> {
-    let (rest, exp) = alt((call, variable, string, number, list))(input)?;
+fn expr(mut input: &str) -> IResult<&str, Expr, Error<&str>> {
+    let (rest, exp) = if let Ok((rest, operator)) = operator(input) {
+        let (rest, exp) = expr(rest)?;
+        (
+            rest,
+            Expr::Unary {
+                operator: operator,
+                expr: Box::new(exp),
+            },
+        )
+    } else {
+        alt((call, variable, string, boolean, number, list))(input)?
+    };
 
     // TODO: handle operator precedence
     if let Ok((rest, (operator, right_exp))) =
@@ -748,6 +777,217 @@ exception!
     }
 
     #[test]
+    fn test_new_parse_unary_expr() {
+        let (rest, x) = parse(concat!(
+            r#"<esi:assign name="x" value="!1">"#,
+            r#"<esi:assign name="x" value="!false">"#,
+            r#"<esi:assign name="x" value="!!1">"#,
+            r#"<esi:assign name="x" value="!!true">"#,
+        ))
+        .unwrap();
+        assert_eq!(rest.len(), 0);
+
+        let exprs: Vec<Expr> = x
+            .into_iter()
+            .map(|c| match c {
+                Chunk::Esi(Tag::Assign(_, _, expr)) => expr,
+                _ => panic!("found non-Assign tag in Ast"),
+            })
+            .collect();
+
+        assert_eq!(
+            exprs[0],
+            Expr::Unary {
+                operator: Operator::Not,
+                expr: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[1],
+            Expr::Unary {
+                operator: Operator::Not,
+                expr: Box::new(Expr::Bool(false))
+            }
+        );
+        assert_eq!(
+            exprs[2],
+            Expr::Unary {
+                operator: Operator::Not,
+                expr: Box::new(Expr::Unary {
+                    operator: Operator::Not,
+                    expr: Box::new(Expr::Integer(1))
+                })
+            }
+        );
+        assert_eq!(
+            exprs[3],
+            Expr::Unary {
+                operator: Operator::Not,
+                expr: Box::new(Expr::Unary {
+                    operator: Operator::Not,
+                    expr: Box::new(Expr::Bool(true))
+                })
+            }
+        );
+        assert_eq!(exprs.len(), 4);
+    }
+
+    #[test]
+    fn test_new_parse_binary_expr() {
+        let (rest, x) = parse(concat!(
+            r#"<esi:assign name="x" value="1 == 1">"#,
+            r#"<esi:assign name="x" value="1 != 1">"#,
+            r#"<esi:assign name="x" value="1 < 1">"#,
+            r#"<esi:assign name="x" value="1 <= 1">"#,
+            r#"<esi:assign name="x" value="1 > 1">"#,
+            r#"<esi:assign name="x" value="1 >= 1">"#,
+            r#"<esi:assign name="x" value="1 && 1">"#,
+            r#"<esi:assign name="x" value="1 || 1">"#,
+            r#"<esi:assign name="x" value="1 & 1">"#,
+            r#"<esi:assign name="x" value="1 | 1">"#,
+            r#"<esi:assign name="x" value="1 + 1">"#,
+            r#"<esi:assign name="x" value="1 - 1">"#,
+            r#"<esi:assign name="x" value="1 * 1">"#,
+            r#"<esi:assign name="x" value="1 / 1">"#,
+            r#"<esi:assign name="x" value="1 % 1">"#,
+        ))
+        .unwrap();
+
+        assert_eq!(rest.len(), 0);
+
+        let exprs: Vec<Expr> = x
+            .into_iter()
+            .map(|c| match c {
+                Chunk::Esi(Tag::Assign(_, _, expr)) => expr,
+                _ => panic!("found non-Assign tag in Ast"),
+            })
+            .collect();
+
+        assert_eq!(
+            exprs[0],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::Equals,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[1],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::NotEquals,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[2],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::LessThan,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[3],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::LessThanOrEquals,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[4],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::GreaterThan,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[5],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::GreaterThanOrEquals,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[6],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::And,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[7],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::Or,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[8],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::And,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[9],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::Or,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[10],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::Add,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[11],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::Subtract,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[12],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::Multiply,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[13],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::Divide,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+        assert_eq!(
+            exprs[14],
+            Expr::Binary {
+                left: Box::new(Expr::Integer(1)),
+                operator: Operator::Modulo,
+                right: Box::new(Expr::Integer(1))
+            }
+        );
+
+        assert_eq!(exprs.len(), 15);
+    }
+
+    #[test]
     fn test_new_parse_plain_text() {
         let (rest, x) = parse("hello\nthere").unwrap();
         assert_eq!(rest.len(), 0);
@@ -768,12 +1008,12 @@ exception!
     }
     #[test]
     fn test_new_parse_interpolated_call() {
-        let (rest, x) = parse("<esi:vars>$my_func()</esi:vars>").unwrap();
+        let (rest, x) = parse("$my_func() <esi:vars>$my_func()</esi:vars>").unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
             [
-                Chunk::Text("goodbye "),
+                Chunk::Text("$my_func() "),
                 Chunk::Expr(Expr::Call("my_func", vec![])),
             ]
         );

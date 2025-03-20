@@ -224,6 +224,13 @@ impl InstBuilder {
             immediates: vec![Immediate::String(s)],
         }
     }
+    pub fn literal_bool(b: bool) -> InstructionData {
+        InstructionData {
+            opcode: Opcode::LiteralBool,
+            stack_args: vec![],
+            immediates: vec![Immediate::Boolean(b)],
+        }
+    }
     pub fn make_list(len: usize, values: Vec<Value>) -> InstructionData {
         InstructionData {
             opcode: Opcode::MakeList,

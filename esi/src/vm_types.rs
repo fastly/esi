@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 pub unsafe fn read_u64(ptr: *const u8) -> u64 {
     ptr.cast::<u64>().read_unaligned()
 }
@@ -10,8 +12,9 @@ pub unsafe fn read_i32(ptr: *const u8) -> i32 {
 pub unsafe fn read_u16(ptr: *const u8) -> u16 {
     ptr.cast::<u16>().read_unaligned()
 }
-
-use crate::abi::*;
+pub unsafe fn read_u8(ptr: *const u8) -> u8 {
+    ptr.cast::<u8>().read_unaligned()
+}
 
 pub const MAGIC: u32 = 0xABADBABA;
 
@@ -197,6 +200,61 @@ impl Value {
                 _ => Value::Null,
             },
             _ => Value::Null,
+        }
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Value) -> Option<Ordering> {
+        match self {
+            Value::Null => match other {
+                Value::Null => None,
+                Value::LiteralString(_) => None,
+                Value::String(_) => None,
+                Value::Bool(_) => None,
+                Value::Integer(_) => None,
+                Value::List(_) => None,
+            },
+            Value::LiteralString(_) => match other {
+                Value::Null => None,
+                Value::LiteralString(_) => todo!(),
+                Value::String(_) => todo!(),
+                Value::Bool(_) => todo!(),
+                Value::Integer(_) => todo!(),
+                Value::List(_) => todo!(),
+            },
+            Value::String(_) => match other {
+                Value::Null => None,
+                Value::LiteralString(_) => todo!(),
+                Value::String(_) => todo!(),
+                Value::Bool(_) => todo!(),
+                Value::Integer(_) => todo!(),
+                Value::List(_) => todo!(),
+            },
+            Value::Bool(_) => match other {
+                Value::Null => None,
+                Value::LiteralString(_) => todo!(),
+                Value::String(_) => todo!(),
+                Value::Bool(_) => todo!(),
+                Value::Integer(_) => todo!(),
+                Value::List(_) => todo!(),
+            },
+            Value::Integer(i) => match other {
+                Value::Null => None,
+                Value::LiteralString(_) => todo!(),
+                Value::String(_) => todo!(),
+                Value::Bool(_) => todo!(),
+                Value::Integer(j) => Some(i.cmp(j)),
+                Value::List(_) => todo!(),
+            },
+            Value::List(_) => match other {
+                Value::Null => None,
+                Value::LiteralString(_) => todo!(),
+                Value::String(_) => todo!(),
+                Value::Bool(_) => todo!(),
+                Value::Integer(_) => todo!(),
+                Value::List(_) => todo!(),
+            },
         }
     }
 }

@@ -38,6 +38,7 @@ pub enum Chunk<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr<'a> {
     Integer(i32),
+    Bool(bool),
     String(Option<&'a str>),
     List(Vec<Expr<'a>>),
     Variable(&'a str, Option<Box<Expr<'a>>>, Option<Box<Expr<'a>>>),
@@ -45,6 +46,10 @@ pub enum Expr<'a> {
         left: Box<Expr<'a>>,
         operator: Operator,
         right: Box<Expr<'a>>,
+    },
+    Unary {
+        operator: Operator,
+        expr: Box<Expr<'a>>,
     },
     Call(&'a str, Vec<Expr<'a>>),
 }
@@ -56,6 +61,7 @@ pub enum Operator {
     Matches,
     MatchesInsensitive,
     Equals,
+    NotEquals,
     LessThan,
     LessThanOrEquals,
     GreaterThan,
@@ -67,4 +73,5 @@ pub enum Operator {
     Divide,
     Multiply,
     Modulo,
+    Not,
 }

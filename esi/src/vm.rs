@@ -207,22 +207,49 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, mut api: T) -> Result<()> {
                 abi.call_function(func_id as usize, args_len as usize, &mut state);
             }
             OP_EQUALS => {
-                let left = state.pop_value();
                 let right = state.pop_value();
+                let left = state.pop_value();
                 state.push(Value::Bool(left == right));
             }
             OP_NOTEQUALS => {
-                let left = state.pop_value();
                 let right = state.pop_value();
+                let left = state.pop_value();
                 state.push(Value::Bool(left != right));
             }
-            OP_LESSTHAN => panic!("unknown opcode: {}", opcode),
-            OP_LESSTHANOREQUALS => panic!("unknown opcode: {}", opcode),
-            OP_GREATERTHAN => panic!("unknown opcode: {}", opcode),
-            OP_GREATERTHANOREQUALS => panic!("unknown opcode: {}", opcode),
-            OP_NOT => panic!("unknown opcode: {}", opcode),
-            OP_AND => panic!("unknown opcode: {}", opcode),
-            OP_OR => panic!("unknown opcode: {}", opcode),
+            OP_LESSTHAN => {
+                let right = state.pop_value();
+                let left = state.pop_value();
+                state.push(Value::Bool(left < right));
+            }
+            OP_LESSTHANOREQUALS => {
+                let right = state.pop_value();
+                let left = state.pop_value();
+                state.push(Value::Bool(left <= right));
+            }
+            OP_GREATERTHAN => {
+                let right = state.pop_value();
+                let left = state.pop_value();
+                state.push(Value::Bool(left > right));
+            }
+            OP_GREATERTHANOREQUALS => {
+                let right = state.pop_value();
+                let left = state.pop_value();
+                state.push(Value::Bool(left >= right));
+            }
+            OP_NOT => {
+                let value = state.pop_value();
+                state.push(Value::Bool(!value.to_bool()));
+            }
+            OP_AND => {
+                let right = state.pop_value();
+                let left = state.pop_value();
+                state.push(Value::Bool(left.to_bool() && right.to_bool()));
+            }
+            OP_OR => {
+                let right = state.pop_value();
+                let left = state.pop_value();
+                state.push(Value::Bool(left.to_bool() || right.to_bool()));
+            }
             OP_HAS => panic!("unknown opcode: {}", opcode),
             OP_HASINSENSITIVE => panic!("unknown opcode: {}", opcode),
             OP_MATCHES => panic!("unknown opcode: {}", opcode),
@@ -280,6 +307,20 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, mut api: T) -> Result<()> {
                 }
 
                 state.ip += length;
+            }
+            OP_LITERALBOOL => {
+                if state.ip + 1 > ctx.code_length {
+                    break;
+                }
+                let num = unsafe { read_u8(ctx.code_ptr.add(state.ip)) };
+                state.ip += 1;
+
+                let b = match num {
+                    0 => false,
+                    1 => true,
+                    _ => panic!("unexpected value {} for boolean immediate", num),
+                };
+                state.push(Value::Bool(b));
             }
             OP_MAKELIST => {
                 if state.ip + 4 > ctx.code_length {
@@ -464,6 +505,47 @@ mod tests {
         run(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"pong - 123 - hello - [1,2,3]", &test_api.buf[..]);
+    }
+
+    #[test]
+    fn test_vm_logic() {
+        let input = concat!(
+            r#"<esi:assign name="eq_t" value="1 == 1">"#,
+            r#"<esi:assign name="eq_f" value="0 == 1">"#,
+            r#"<esi:assign name="neq_t" value="0 != 1">"#,
+            r#"<esi:assign name="neq_f" value="1 != 1">"#,
+            r#"<esi:assign name="lt_t" value="0 < 1">"#,
+            r#"<esi:assign name="lt_f" value="1 < 0">"#,
+            r#"<esi:assign name="lte_t" value="1 <= 1">"#,
+            r#"<esi:assign name="lte_f" value="1 <= 0">"#,
+            r#"<esi:assign name="gt_t" value="1 > 0">"#,
+            r#"<esi:assign name="gt_f" value="0 > 1">"#,
+            r#"<esi:assign name="gte_t" value="1 >= 1">"#,
+            r#"<esi:assign name="gte_f" value="0 >= 1">"#,
+            r#"<esi:assign name="and_t" value="true && true">"#,
+            r#"<esi:assign name="and_f" value="true && false">"#,
+            r#"<esi:assign name="or_t" value="false || true">"#,
+            r#"<esi:assign name="or_f" value="false || false">"#,
+            r#"<esi:assign name="not" value="!false">"#,
+            r#"<esi:assign name="notnot" value="!!false">"#,
+            r#"<esi:vars>"#,
+            r#"$(eq_t) - $(eq_f) - $(neq_t) - $(neq_f) - $(lt_t) - $(lt_f) - $(lte_t) - $(lte_f) - "#,
+            r#"$(gt_t) - $(gt_f) - $(gte_t) - $(gte_f) - $(and_t) - $(and_f) - $(or_t) - $(or_f) - "#,
+            r#"$(not) - $(notnot)"#,
+            r#"</esi:vars>"#,
+        );
+
+        let ast = parse_document(input).unwrap();
+        let program = generate(ast, &ABI_TEST);
+        let buf = program.serialize();
+
+        let ctx = parse_header(&buf).unwrap();
+        let mut test_api = TestApi::new();
+        run(ctx, &mut test_api).unwrap();
+
+        //println!("{:?}", &test_api.buf);
+
+        assert_eq!(b"true - false - true - false - true - false - true - false - true - false - true - false - true - false - true - false - true - false", &test_api.buf[..]);
     }
 
     // <esi:include src="/a$(foo)b">
