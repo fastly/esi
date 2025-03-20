@@ -383,7 +383,6 @@ mod tests {
 
         let ast = parse_document(input).unwrap();
         let program = generate(ast, &ABI_TEST);
-        println!("{program}");
         let buf = program.serialize();
 
         let ctx = parse_header(&buf).unwrap();
@@ -451,6 +450,8 @@ mod tests {
             r#"$identity(123)"#,
             r#" - "#,
             r#"$identity('hello')"#,
+            r#" - "#,
+            r#"$make_list(1,2,3)"#,
             r#"</esi:vars>"#,
         );
 
@@ -462,7 +463,7 @@ mod tests {
         let mut test_api = TestApi::new();
         run(ctx, &mut test_api).unwrap();
 
-        assert_eq!(b"pong - 123 - hello", &test_api.buf[..]);
+        assert_eq!(b"pong - 123 - hello - [1,2,3]", &test_api.buf[..]);
     }
 
     // <esi:include src="/a$(foo)b">

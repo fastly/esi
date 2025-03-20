@@ -5,7 +5,7 @@ use std::ops::Range;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Args {
     Constant(usize),
-    Variadic(Range<usize>),
+    Variadic,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,7 +34,11 @@ pub struct Abi<'a> {
 
 pub const ABI_TEST: Abi<'static> = Abi {
     version: 0,
-    functions: &[("ping", ping_builtin), ("identity", identity_builtin)],
+    functions: &[
+        ("ping", ping_builtin),
+        ("identity", identity_builtin),
+        ("make_list", make_list_builtin),
+    ],
     meta_vars: &[],
 };
 
@@ -86,4 +90,10 @@ fn identity(args: usize, state: &mut ExecutionState) {
 
     let value = state.pop_value().clone();
     state.push(value);
+}
+
+#[abi_fn(args = N, has_return = true)]
+fn make_list(args: usize, state: &mut ExecutionState) {
+    let values: Vec<Value> = (0..args).map(|_| state.pop_value().clone()).collect();
+    state.push(Value::List(values));
 }

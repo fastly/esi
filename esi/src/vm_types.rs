@@ -61,7 +61,26 @@ impl Value {
             }
             Value::String(s) => s.clone(),
             Value::Integer(i) => i.to_string().into_bytes(),
-            Value::List(_) => todo!(),
+            Value::List(values) => {
+                let mut bytestrings: Vec<Vec<u8>> =
+                    values.into_iter().map(|v| v.to_bytes()).collect();
+                // len = opening and closing brackets, N-1 commas, and the length of the strings
+                let out_len =
+                    2 + bytestrings.len() - 1 + bytestrings.iter().map(|s| s.len()).sum::<usize>();
+
+                let mut out: Vec<u8> = Vec::with_capacity(out_len);
+                out.extend_from_slice(b"[");
+                let len = bytestrings.len();
+                for (i, bs) in bytestrings.iter_mut().enumerate() {
+                    out.append(bs);
+                    if i + 1 < len {
+                        out.extend_from_slice(b",");
+                    }
+                }
+                out.extend_from_slice(b"]");
+                //assert!(out.len() == out_len);
+                out
+            }
         }
     }
 

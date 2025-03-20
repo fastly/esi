@@ -438,7 +438,7 @@ fn generate_for_expr(block: Block, expr: Expr, program: &mut Program) -> Value {
 
             match &fn_sig.args {
                 Args::Constant(arg_count) => assert!(*arg_count == arg_exprs.len()),
-                Args::Variadic(arg_range) => assert!(arg_range.contains(&arg_exprs.len())),
+                Args::Variadic => {}
             }
 
             let arg_values = arg_exprs

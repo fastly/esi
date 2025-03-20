@@ -215,12 +215,29 @@ impl Parse for AbiFnArgs {
 
             match key.to_string().as_str() {
                 "args" => {
-                    // e.g. 0
-                    let lit: LitInt = input.parse()?;
-                    args_int = Some(
-                        lit.base10_parse::<usize>()
-                            .expect("Failed to parse u8 from args"),
-                    );
+                    args_int = if input.peek(LitInt) {
+                        Some(
+                            input
+                                .parse::<LitInt>()?
+                                .base10_parse::<usize>()
+                                .expect("Failed to parse args"),
+                        )
+                    } else if input.peek(Ident) {
+                        let ident: Ident = input.parse()?;
+                        if ident == "N" {
+                            Some(usize::MAX)
+                        } else {
+                            return Err(Error::new(
+                                ident.span(),
+                                "expected args to be either an integer or N",
+                            ));
+                        }
+                    } else {
+                        return Err(Error::new(
+                            input.span(),
+                            "expected args to be either an integer or N",
+                        ));
+                    };
                 }
                 "has_return" => {
                     // e.g. true or false
@@ -267,8 +284,14 @@ pub fn abi_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as AbiFnArgs);
 
     // Must have `args`, or we emit a compile_error! block
-    let args_int = match args.args_int {
-        Some(s) => s,
+    let args_str = match args.args_int {
+        Some(s) => {
+            if s == usize::MAX {
+                "Args::Variadic".to_string()
+            } else {
+                format!("Args::Constant({args})", args = s)
+            }
+        }
         None => {
             return r#"
                 compile_error!("Missing `args` in #[abi_fn(range=N, has_return=...)]");
@@ -309,14 +332,14 @@ pub fn abi_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub const {fn_name}_builtin: BuiltinFn = BuiltinFn {{
     func: {fn_name},
     sig: FnSignature {{
-        args: Args::Constant({args_int}),
+        args: {args_str},
         has_return: {has_return_bool},
     }},
 }};
 "#,
         original = item_str,
         fn_name = func_name,
-        args_int = args_int,
+        args_str = args_str,
         has_return_bool = has_return,
     );
 
