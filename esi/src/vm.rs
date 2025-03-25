@@ -41,7 +41,7 @@ fn parse_header(program_data: &[u8]) -> Result<ProgramContext> {
     Ok(ctx)
 }
 
-fn run<T: EnvironmentApi>(ctx: ProgramContext, mut api: T) -> Result<()> {
+async fn run<T: EnvironmentApi>(ctx: ProgramContext<'_>, mut api: T) -> Result<()> {
     let abi = Abi::for_version(ctx.abi_version)?;
     let mut state = ExecutionState::new(&ctx);
 
@@ -64,7 +64,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, mut api: T) -> Result<()> {
                 let length = unsafe { read_u32(ctx.code_ptr.add(state.ip + 4)) } as usize;
                 state.ip += 8;
 
-                api.write_bytes(&ctx.data[offset..offset + length]);
+                api.write_bytes(&ctx.data[offset..offset + length]).await;
             }
             OP_WRITERESPONSE => {
                 if state.ip + 4 > ctx.code_length {
@@ -74,12 +74,12 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, mut api: T) -> Result<()> {
                 state.ip += 4;
 
                 let req_handle = state.requests[reqid];
-                let response = api.get_response(req_handle);
-                api.write_response(&response);
+                let response = api.get_response(req_handle).await;
+                api.write_response(&response).await;
             }
             OP_WRITEVALUE => {
                 let value = state.pop_value();
-                api.write_bytes(&value.to_bytes());
+                api.write_bytes(&value.to_bytes()).await;
             }
             OP_REQUEST => {
                 if state.ip + 4 > ctx.code_length {
@@ -89,7 +89,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, mut api: T) -> Result<()> {
                 state.ip += 4;
 
                 let url = state.pop_value();
-                let req_handle = api.request(&url.to_bytes());
+                let req_handle = api.request(&url.to_bytes()).await;
                 state.requests[reqid] = req_handle;
             }
             OP_SUCCESS => {
@@ -106,7 +106,7 @@ fn run<T: EnvironmentApi>(ctx: ProgramContext, mut api: T) -> Result<()> {
 
                     if !got_failure {
                         let req_handle = state.requests[reqid];
-                        if api.get_response(req_handle) == Response::Failure {
+                        if api.get_response(req_handle).await == Response::Failure {
                             got_failure = true;
                         }
                     }
@@ -346,6 +346,7 @@ mod tests {
     use crate::compiler::generate;
     use crate::new_parse::parse_document;
     use bytes::{BufMut, BytesMut};
+    use futures::executor::block_on;
 
     struct TestApi {
         buf: BytesMut,
@@ -358,24 +359,28 @@ mod tests {
         }
     }
     impl<'a> EnvironmentApi for &'a mut TestApi {
-        fn request(&self, url: &[u8]) -> RequestHandle {
+        async fn request(&self, url: &[u8]) -> RequestHandle {
             match url {
                 b"/a" => 1,
                 _ => panic!("unknown url"),
             }
         }
 
-        fn get_response(&self, handle: RequestHandle) -> Response {
+        async fn get_response(&self, handle: RequestHandle) -> Response {
             Response::Success
         }
 
-        fn write_bytes(&mut self, data: &[u8]) {
+        async fn write_bytes(&mut self, data: &[u8]) {
             self.buf.put(data);
         }
 
-        fn write_response(&mut self, response: &Response) {
+        async fn write_response(&mut self, response: &Response) {
             self.buf.put(&format!("{:?}", response).into_bytes()[..]);
         }
+    }
+
+    fn run_test<T: EnvironmentApi>(ctx: ProgramContext<'_>, mut api: T) -> Result<()> {
+        block_on(run(ctx, api))
     }
 
     #[test]
@@ -387,7 +392,7 @@ mod tests {
 
         let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, &mut test_api).unwrap();
+        run_test(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"hello world", &test_api.buf[..]);
     }
@@ -408,7 +413,7 @@ mod tests {
 
         let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, &mut test_api).unwrap();
+        run_test(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"foo - 123", &test_api.buf[..]);
     }
@@ -428,7 +433,7 @@ mod tests {
 
         let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, &mut test_api).unwrap();
+        run_test(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"purple green", &test_api.buf[..]);
     }
@@ -451,7 +456,7 @@ mod tests {
 
         let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, &mut test_api).unwrap();
+        run_test(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"65 - 63 - 32 - 128 - 4", &test_api.buf[..]);
     }
@@ -477,7 +482,7 @@ mod tests {
 
         let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, &mut test_api).unwrap();
+        run_test(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"YES - YES", &test_api.buf[..]);
     }
@@ -502,7 +507,7 @@ mod tests {
 
         let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, &mut test_api).unwrap();
+        run_test(ctx, &mut test_api).unwrap();
 
         assert_eq!(b"pong - 123 - hello - [1,2,3]", &test_api.buf[..]);
     }
@@ -541,7 +546,7 @@ mod tests {
 
         let ctx = parse_header(&buf).unwrap();
         let mut test_api = TestApi::new();
-        run(ctx, &mut test_api).unwrap();
+        run_test(ctx, &mut test_api).unwrap();
 
         //println!("{:?}", &test_api.buf);
 

@@ -7,8 +7,6 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fmt;
 
-// table of reqref - reqref can be a constant index into a table, it never ends up in a variable
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program<'a> {
     last_block: Option<Block>,
@@ -108,6 +106,7 @@ impl Program<'_> {
         buf.put_u32_le(self.variables.len() as u32); // Request count
 
         // Signature + Bytecode segment starts here
+        // TODO: implement signatures
         buf.put_u8(0); // Signature Type (0=None, ...)
 
         let code_offset = buf.position();
@@ -126,7 +125,7 @@ impl Program<'_> {
             let bytes = slice.as_bytes();
 
             symbols.add_data(
-                data_index as u32, // TODO: why is this a usize rn
+                data_index as u32,
                 buf.position() - data_offset,
                 bytes.len() as u32,
             );

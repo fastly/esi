@@ -370,11 +370,11 @@ pub enum Response {
 }
 
 pub trait EnvironmentApi {
-    fn request(&self, url: &[u8]) -> RequestHandle;
+    async fn request(&self, url: &[u8]) -> RequestHandle;
 
-    fn get_response(&self, handle: RequestHandle) -> Response;
+    async fn get_response(&self, handle: RequestHandle) -> Response;
 
-    fn write_bytes(&mut self, data: &[u8]);
+    async fn write_bytes(&mut self, data: &[u8]);
 
-    fn write_response(&mut self, response: &Response);
+    async fn write_response(&mut self, response: &Response);
 }
