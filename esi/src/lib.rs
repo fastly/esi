@@ -7,8 +7,8 @@ mod expression;
 mod functions;
 mod parse;
 
-use document::{FetchState, Task};
-use expression::{evaluate_expression, try_evaluate_interpolated, EvalContext};
+use crate::document::{FetchState, Task};
+use crate::expression::{evaluate_expression, try_evaluate_interpolated, EvalContext};
 use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
@@ -59,7 +59,24 @@ impl PendingFragmentContent {
     }
 }
 
-/// An instance of the ESI processor with a given configuration.
+/// A processor for handling ESI responses
+///
+/// The Processor maintains state and configuration for processing ESI directives
+/// in HTML/XML content. It handles fragment inclusion, variable substitution,
+/// and conditional processing according to the ESI specification.
+///
+/// # Fields
+/// * `original_request_metadata` - Optional original client request data used for fragment requests
+/// * `configuration` - Configuration settings controlling ESI processing behavior
+///
+/// # Example
+/// ```
+/// use esi::{Processor, Configuration};
+///
+/// let config = Configuration::default();
+/// let processor = Processor::new(config);
+/// let response = processor.process(request)?;
+/// ```
 pub struct Processor {
     // The original client request metadata, if any.
     original_request_metadata: Option<Request>,
@@ -79,6 +96,38 @@ impl Processor {
     }
 
     /// Process a response body as an ESI document. Consumes the response body.
+    ///
+    /// This method processes ESI directives in the response body while streaming the output to the client,
+    /// minimizing memory usage for large responses. It handles ESI includes, conditionals, and variable
+    /// substitution according to the ESI specification.
+    ///
+    /// # Arguments
+    /// * `src_document` - Source HTTP response containing ESI markup to process
+    /// * `client_response_metadata` - Optional response metadata (headers, status) to send to client
+    /// * `dispatch_fragment_request` - Optional callback for customizing fragment request handling
+    /// * `process_fragment_response` - Optional callback for processing fragment responses
+    ///
+    /// # Returns
+    /// * `Result<()>` - Ok if processing completed successfully, Error if processing failed
+    ///
+    /// # Example
+    /// ```
+    /// let mut response = Response::new();
+    /// response.set_body("<esi:include src='header.html'/>");
+    ///
+    /// processor.process_response(
+    ///     &mut response,
+    ///     None,
+    ///     Some(&default_fragment_dispatcher),
+    ///     None
+    /// )?;
+    /// ```
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// * ESI processing fails
+    /// * Stream writing fails
+    /// * Fragment requests fail
     pub fn process_response(
         self,
         src_document: &mut Response,
@@ -115,6 +164,42 @@ impl Processor {
     }
 
     /// Process an ESI document that has already been parsed into a queue of events.
+    ///
+    /// Takes a queue of already parsed ESI events and processes them, writing the output
+    /// to the provided writer. This method is used internally after parsing but can also
+    /// be called directly if you have pre-parsed events.
+    ///
+    /// # Arguments
+    /// * `src_events` - Queue of parsed ESI events to process
+    /// * `output_writer` - Writer to stream processed output to
+    /// * `dispatch_fragment_request` - Optional handler for fragment requests
+    /// * `process_fragment_response` - Optional processor for fragment responses
+    ///
+    /// # Returns
+    /// * `Result<()>` - Ok if processing completed successfully
+    ///
+    /// # Example
+    /// ```
+    /// use crate::Writer;
+    /// use std::io::Cursor;
+    ///
+    /// let events = VecDeque::from([Event::Text("Hello".into())]);
+    /// let mut writer = Writer::new(Cursor::new(Vec::new()));
+    ///
+    /// processor.process_parsed_document(
+    ///     events,
+    ///     &mut writer,
+    ///     None,
+    ///     None
+    /// )?;
+    /// ```
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// * Event processing fails
+    /// * Writing to output fails
+    /// * Fragment request/response processing fails
+    ///
     pub fn process_parsed_document(
         self,
         src_events: VecDeque<Event>,
@@ -158,7 +243,45 @@ impl Processor {
         )
     }
 
-    /// Process an ESI document from a [`quick_xml::Reader`].
+    /// Process an ESI document from a [`crate::Reader`], handling includes and directives
+    ///
+    /// Processes ESI directives while streaming content to the output writer. Handles:
+    /// - ESI includes with fragment fetching
+    /// - Variable substitution
+    /// - Conditional processing
+    /// - Try/except blocks
+    ///
+    /// # Arguments
+    /// * `src_document` - Reader containing source XML/HTML with ESI markup
+    /// * `output_writer` - Writer to stream processed output to
+    /// * `dispatch_fragment_request` - Optional handler for fragment requests
+    /// * `process_fragment_response` - Optional processor for fragment responses
+    ///
+    /// # Returns
+    /// * `Result<()>` - Ok if processing completed successfully
+    ///
+    /// # Example
+    /// ```
+    /// use crate::Reader;
+    /// use std::io::Cursor;
+    ///
+    /// let xml = r#"<esi:include src="header.html"/>"#;
+    /// let reader = Reader::from_str(xml);
+    /// let mut writer = Writer::new(Cursor::new(Vec::new()));
+    ///
+    /// processor.process_document(
+    ///     reader,
+    ///     &mut writer,
+    ///     Some(&default_fragment_dispatcher),
+    ///     None
+    /// )?;
+    /// ```
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// * ESI markup parsing fails
+    /// * Fragment requests fail
+    /// * Output writing fails
     pub fn process_document(
         self,
         mut src_document: Reader<impl BufRead>,
@@ -320,10 +443,7 @@ fn process_include(
     } = fragment;
 
     // wait for `<esi:include>` request to complete
-    let resp = match pending_content.wait_for_content() {
-        Ok(r) => r,
-        Err(err) => return Err(err),
-    };
+    let resp = pending_content.wait_for_content()?;
 
     let processed_resp = if let Some(process_response) = process_fragment_response {
         process_response(&mut request, resp)?

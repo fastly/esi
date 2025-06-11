@@ -4,6 +4,17 @@ use crate::{PendingFragmentContent, Result};
 use fastly::Request;
 use quick_xml::Writer;
 
+/// Represents a fragment of a document that can be fetched and processed.
+///
+/// A `Fragment` contains the necessary information to make a request for a part of a document,
+/// handle potential errors, and retrieve the content asynchronously.
+///
+/// # Fields
+///
+/// * `request` - Metadata of the request.
+/// * `alt` - An optional alternate request to send if the original request fails.
+/// * `continue_on_error` - Whether to continue processing on error.
+/// * `pending_content` - The pending fragment response, which can be polled to retrieve the content.
 pub struct Fragment {
     // Metadata of the request
     pub(crate) request: Request,
@@ -17,7 +28,12 @@ pub struct Fragment {
 
 /// `Task` is combining raw data and an include fragment for both `attempt` and `except` arms
 /// the result is written to `output`.
-// #[derive(Default)]
+///
+/// # Fields:
+///
+/// * `queue` - A queue of elements to process.
+/// * `output` - The writer to write the processed data to.
+/// * `status` - The status of the fetch operation.
 pub struct Task {
     pub queue: VecDeque<Element>,
     pub output: Writer<Vec<u8>>,
@@ -41,6 +57,10 @@ impl Task {
 }
 
 /// A section of the pending response, either raw XML data or a pending fragment request.
+/// * `Raw` - Raw XML data.
+/// * `Include` - A pending fragment request.
+/// * `Try` - A try block with an attempt and except task.
+///
 pub enum Element {
     Raw(Vec<u8>),
     Include(Fragment),
@@ -50,7 +70,11 @@ pub enum Element {
     },
 }
 
-// #[derive(PartialEq, Clone)]
+/// The state of a fetch operation.
+/// * `Failed` - The request failed with the given status code.
+/// * `Pending` - The request is still pending.
+/// * `Succeeded` - The request succeeded.
+///
 pub enum FetchState {
     Failed(Request, u16),
     Pending,
