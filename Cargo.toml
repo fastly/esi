@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 authors = [
     "Kailan Blanks <kblanks@fastly.com>",
     "Vadim Getmanshchuk <vadim@fastly.com>",
