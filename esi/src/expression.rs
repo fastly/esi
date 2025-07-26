@@ -343,6 +343,7 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
         match token {
             Token::Integer(i) => Expr::Integer(*i),
             Token::String(s) => Expr::String(s.clone()),
+            Token::Bareword(s) => Expr::String(s.clone()),
             Token::Dollar => parse_dollar(cur)?,
             unexpected => {
                 return Err(ExecutionError::ExpressionError(format!(
@@ -1128,6 +1129,17 @@ mod tests {
         let result = evaluate_expression("$(QUERY_STRING{'hello'})", &mut ctx)?;
         assert_eq!(result, Value::Text("goodbye".into()));
         let result = evaluate_expression("$(QUERY_STRING{'nonexistent'})", &mut ctx)?;
+        assert_eq!(result, Value::Null);
+        Ok(())
+    }
+    #[test]
+    fn test_eval_get_request_query_field_unquoted() -> Result<()> {
+        let mut ctx = EvalContext::new();
+        ctx.set_request(Request::new(Method::GET, "http://localhost?hello=goodbye"));
+
+        let result = evaluate_expression("$(QUERY_STRING{hello})", &mut ctx)?;
+        assert_eq!(result, Value::Text("goodbye".into()));
+        let result = evaluate_expression("$(QUERY_STRING{nonexistent})", &mut ctx)?;
         assert_eq!(result, Value::Null);
         Ok(())
     }
