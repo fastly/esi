@@ -343,7 +343,6 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
         match token {
             Token::Integer(i) => Expr::Integer(*i),
             Token::String(s) => Expr::String(s.clone()),
-            Token::Bareword(s) => Expr::String(s.clone()),
             Token::Dollar => parse_dollar(cur)?,
             unexpected => {
                 return Err(ExecutionError::ExpressionError(format!(
@@ -408,11 +407,15 @@ fn parse_variable(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
 
     match cur.next() {
         Some(Token::OpenBracket) => {
-            // TODO: I think there might be cases of $var{key} where key is a
-            //       bareword. If that's the case, then handle here by checking
-            //       if the next token is a bareword instead of trying to parse
-            //       an expression.
-            let subfield = parse_expr(cur)?;
+            // Allow bareword as string in subfield position
+            let subfield = if let Some(Token::Bareword(s)) = cur.peek() {
+                cur.next();
+                Expr::String(s.clone())
+            } else {
+                // Parse the subfield expression
+                parse_expr(cur)?
+            };
+
             let Some(Token::CloseBracket) = cur.next() else {
                 return Err(ExecutionError::ExpressionError(format!(
                     "unexpected token: {:?}",
