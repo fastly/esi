@@ -72,10 +72,16 @@ impl PendingFragmentContent {
 /// # Example
 /// ```
 /// use esi::{Processor, Configuration};
+/// use fastly::Request;
 ///
+/// // Create a configuration (assuming Configuration implements Default)
 /// let config = Configuration::default();
-/// let processor = Processor::new(config);
-/// let response = processor.process(request)?;
+///
+/// // Optionally, create a Request (assuming Request can be constructed or mocked)
+/// let request = Some(Request::get("http://example.com/"));
+///
+/// // Initialize the Processor with optional request metadata
+/// let processor = Processor::new(request, config);
 /// ```
 pub struct Processor {
     // The original client request metadata, if any.
@@ -112,15 +118,30 @@ impl Processor {
     ///
     /// # Example
     /// ```
-    /// let mut response = Response::new();
-    /// response.set_body("<esi:include src='header.html'/>");
+    /// use fastly::Response;
+    /// use esi::{Processor, Configuration};
     ///
+    /// // Create a processor
+    /// let processor = Processor::new(None, Configuration::default());
+    ///
+    /// // Create a response with ESI markup
+    /// let mut response = Response::new();
+    /// response.set_body("<esi:include src='http://example.com/header.html'/>");
+    ///
+    /// // Define a simple fragment dispatcher
+    /// fn default_fragment_dispatcher(req: fastly::Request) -> esi::Result<esi::PendingFragmentContent> {
+    ///     Ok(esi::PendingFragmentContent::CompletedRequest(
+    ///         fastly::Response::from_body("Fragment content")
+    ///     ))
+    /// }
+    /// // Process the response
     /// processor.process_response(
     ///     &mut response,
     ///     None,
     ///     Some(&default_fragment_dispatcher),
     ///     None
     /// )?;
+    /// # Ok::<(), esi::ExecutionError>(())
     /// ```
     ///
     /// # Errors
@@ -180,11 +201,18 @@ impl Processor {
     ///
     /// # Example
     /// ```
-    /// use crate::Writer;
     /// use std::io::Cursor;
+    /// use std::collections::VecDeque;
+    /// use esi::{Event, Reader, Writer, Processor, Configuration};
+    /// use quick_xml::events::Event as XmlEvent;
     ///
-    /// let events = VecDeque::from([Event::Text("Hello".into())]);
+    /// let events = VecDeque::from([Event::Content(XmlEvent::Empty(
+    ///     quick_xml::events::BytesStart::new("div")
+    /// ))]);
+    ///
     /// let mut writer = Writer::new(Cursor::new(Vec::new()));
+    ///
+    /// let processor = Processor::new(None, esi::Configuration::default());
     ///
     /// processor.process_parsed_document(
     ///     events,
@@ -192,6 +220,7 @@ impl Processor {
     ///     None,
     ///     None
     /// )?;
+    /// # Ok::<(), esi::ExecutionError>(())
     /// ```
     ///
     /// # Errors
@@ -243,7 +272,7 @@ impl Processor {
         )
     }
 
-    /// Process an ESI document from a [`crate::Reader`], handling includes and directives
+    /// Process an ESI document from a [`esi::Reader`], handling includes and directives
     ///
     /// Processes ESI directives while streaming content to the output writer. Handles:
     /// - ESI includes with fragment fetching
@@ -262,19 +291,28 @@ impl Processor {
     ///
     /// # Example
     /// ```
-    /// use crate::Reader;
+    /// use esi::{Reader, Writer, Processor, Configuration};
     /// use std::io::Cursor;
     ///
-    /// let xml = r#"<esi:include src="header.html"/>"#;
+    /// let xml = r#"<esi:include src="http://example.com/header.html"/>"#;
     /// let reader = Reader::from_str(xml);
     /// let mut writer = Writer::new(Cursor::new(Vec::new()));
     ///
+    /// let processor = Processor::new(None, Configuration::default());
+    ///
+    ///  // Define a simple fragment dispatcher
+    /// fn default_fragment_dispatcher(req: fastly::Request) -> esi::Result<esi::PendingFragmentContent> {
+    ///     Ok(esi::PendingFragmentContent::CompletedRequest(
+    ///         fastly::Response::from_body("Fragment content")
+    ///     ))
+    /// }
     /// processor.process_document(
     ///     reader,
     ///     &mut writer,
     ///     Some(&default_fragment_dispatcher),
     ///     None
     /// )?;
+    /// # Ok::<(), esi::ExecutionError>(())
     /// ```
     ///
     /// # Errors
@@ -504,6 +542,7 @@ fn process_raw(
             .get_mut()
             .write_all(raw)
             .map_err(ExecutionError::WriterError)?;
+        output_writer.get_mut().flush()?;
     } else {
         trace!("-- Depth: {}", depth);
         debug!(
@@ -588,6 +627,7 @@ fn event_receiver(
             alt,
             continue_on_error,
         }) => {
+            debug!("Handling <esi:include> tag with src: {}", src);
             let req = build_fragment_request(
                 original_request_metadata.clone_without_body(),
                 &src,
@@ -643,8 +683,10 @@ fn event_receiver(
             ctx.set_variable(&name, None, result);
         }
         Event::ESI(Tag::Vars { name }) => {
+            debug!("Handling <esi:vars> tag with name: {:?}", name);
             if let Some(name) = name {
                 let result = evaluate_expression(&name, ctx)?;
+                debug!("Evaluated <esi:vars> result: {:?}", result);
                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
             }
         }
@@ -694,6 +736,7 @@ fn event_receiver(
         }
 
         Event::InterpolatedContent(event) => {
+            debug!("Handling interpolated content: {:?}", event);
             let mut buf = vec![];
             let event_str = String::from_utf8(event.iter().copied().collect()).unwrap_or_default();
             let mut cur = event_str.chars().peekable();

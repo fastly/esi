@@ -93,6 +93,7 @@ impl EvalContext {
                     .into(),
             ),
             "QUERY_STRING" => self.request.get_query_str().map_or(Value::Null, |query| {
+                debug!("Query string: {query}");
                 subkey.map_or_else(
                     || Value::Text(Cow::Owned(query.to_string())),
                     |field| {
@@ -275,6 +276,7 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
             call_dispatch(&identifier, &values)?
         }
     };
+    debug!("Expression result: {:?}", result);
     Ok(result)
 }
 
@@ -409,9 +411,11 @@ fn parse_variable(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
         Some(Token::OpenBracket) => {
             // Allow bareword as string in subfield position
             let subfield = if let Some(Token::Bareword(s)) = cur.peek() {
+                debug!("Parsing bareword subfield: {s}");
                 cur.next();
                 Expr::String(s.clone())
             } else {
+                debug!("Parsing non-bareword subfield, {:?}", cur.peek());
                 // Parse the subfield expression
                 parse_expr(cur)?
             };
@@ -551,7 +555,8 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
             }
             _ => {
                 return Err(ExecutionError::ExpressionError(
-                    "error in lexing interpolated".to_string(),
+                    // "error in lexing interpolated".to_string(),
+                    format!("error in lexing interpolated `{c}`"),
                 ));
             }
         }
@@ -1181,10 +1186,10 @@ mod tests {
 
         let result = evaluate_expression("$(HTTP_COOKIE{'foo'})", &mut ctx)?;
         assert_eq!(result, Value::Text("bar".into()));
-        // let result = evaluate_expression("$(HTTP_COOKIE{'bar'})", &mut ctx)?;
-        // assert_eq!(result, Value::Text("baz".into()));
-        // let result = evaluate_expression("$(HTTP_COOKIE{'baz'})", &mut ctx)?;
-        // assert_eq!(result, Value::Null);
+        let result = evaluate_expression("$(HTTP_COOKIE{'bar'})", &mut ctx)?;
+        assert_eq!(result, Value::Text("baz".into()));
+        let result = evaluate_expression("$(HTTP_COOKIE{'baz'})", &mut ctx)?;
+        assert_eq!(result, Value::Null);
         Ok(())
     }
 
@@ -1264,5 +1269,68 @@ mod tests {
     fn test_lex_interpolated_incomplete() {
         let mut chars = "$(foo".chars().peekable();
         assert!(lex_interpolated_expr(&mut chars).is_err());
+    }
+
+    #[test]
+    fn test_var_subfield_missing_closing_bracket() {
+        let input = r#"
+        <esi:vars>
+            $(QUERY_STRING{param)
+        </esi:vars>
+        "#;
+        let mut chars = input.chars().peekable();
+        assert!(lex_interpolated_expr(&mut chars).is_err());
+    }
+
+    #[test]
+    fn test_invalid_standalone_bareword() {
+        let input = r#"
+        <esi:vars>
+            bareword
+        </esi:vars>
+        "#;
+        let mut chars = input.chars().peekable();
+        assert!(lex_interpolated_expr(&mut chars).is_err());
+    }
+
+    #[test]
+    fn test_mixed_subfield_types() {
+        let input = r#"$(QUERY_STRING{param})"#;
+        let mut chars = input.chars().peekable();
+        // let result =
+        // evaluate_interpolated(&mut chars, &mut ctx).expect("Processing should succeed");
+        let result = lex_interpolated_expr(&mut chars).expect("Processing should succeed");
+        println!("Tokens: {:?}", result);
+        assert_eq!(
+            result,
+            vec![
+                Token::Dollar,
+                Token::OpenParen,
+                Token::Bareword("QUERY_STRING".into()),
+                Token::OpenBracket,
+                Token::Bareword("param".into()),
+                Token::CloseBracket,
+                Token::CloseParen
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_variable_query_string() {
+        let mut ctx = EvalContext::new();
+        let req = Request::new(Method::GET, "http://localhost?param=value");
+        ctx.set_request(req);
+
+        // Test without subkey
+        let result = ctx.get_variable("QUERY_STRING", None);
+        assert_eq!(result, Value::Text("param=value".into()));
+
+        // Test with subkey
+        let result = ctx.get_variable("QUERY_STRING", Some("param"));
+        assert_eq!(result, Value::Text("value".into()));
+
+        // Test with non-existent subkey
+        let result = ctx.get_variable("QUERY_STRING", Some("nonexistent"));
+        assert_eq!(result, Value::Null);
     }
 }

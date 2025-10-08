@@ -379,13 +379,16 @@ where
 ///
 /// # Example
 /// ```
-/// use crate::{Reader, Result};
+/// use quick_xml::Reader;
+/// use esi::parse_tags;
 ///
-/// let xml = r#"<esi:include src="footer.html"/>"#;
+/// let xml = r#"<esi:include src="http://example.com/footer.html"/>"#;
 /// let mut reader = Reader::from_str(xml);
 /// let mut callback = |event| { Ok(()) };
 /// parse_tags("esi", &mut reader, &mut callback)?;
 ///
+/// # Ok::<(), esi::ExecutionError>(())
+/// ```
 pub fn parse_tags<'a, R>(
     namespace: &str,
     reader: &mut Reader<R>,
@@ -591,6 +594,9 @@ fn vars_tag_handler<'e>(
     task: &mut Vec<Event<'e>>,
     use_queue: bool,
 ) -> Result<()> {
+    debug!("Handling <esi:vars> tag");
+    let tag = parse_vars(elem)?;
+    debug!("Parsed <esi:vars> tag: {:?}", tag);
     if use_queue {
         task.push(Event::ESI(parse_vars(elem)?));
     } else {
