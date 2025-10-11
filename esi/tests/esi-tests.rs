@@ -205,3 +205,56 @@ fn test_nested_subfields() {
         "Nested variable resolution should not work"
     );
 }
+
+#[test]
+fn process_include_with_query_string_interpolation() -> Result<(), Error> {
+    use esi::{Configuration, Processor};
+    use fastly::{Request, Response};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // Create the ESI document with the include tag
+    let esi_document = r#"<esi:include 
+      src="/v1/product?apiKey=$(QUERY_STRING{apiKey})" />"#;
+
+    // Create a request with the apiKey query parameter
+    let req = Some(Request::get("http://example.com?apiKey=value"));
+
+    // Create a response with the ESI document
+    let mut resp = Response::from_body(esi_document);
+
+    // Create a processor with default config
+    let processor = Processor::new(req, Configuration::default());
+
+    // Track if the fragment request was made with the correct URL
+    let correct_fragment_request_made = Arc::new(AtomicBool::new(false));
+    let correct_fragment_request_made_clone = Arc::clone(&correct_fragment_request_made);
+
+    // Process the response
+    processor
+        .process_response(
+            &mut resp,
+            None,
+            Some(&move |fragment_req: Request| {
+                // Check that the fragment request URL contains the interpolated apiKey
+                let url = fragment_req.get_url();
+                let contains_api_key = url.to_string().contains("apiKey=value");
+
+                // Store the result in our atomic boolean
+                correct_fragment_request_made_clone.store(contains_api_key, Ordering::SeqCst);
+
+                // Return a mock response for the fragment request
+                Ok(esi::PendingFragmentContent::CompletedRequest(
+                    Response::from_body("fragment content"),
+                ))
+            }),
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        correct_fragment_request_made.load(Ordering::SeqCst),
+        "Fragment request should contain the interpolated apiKey value"
+    );
+    Ok(())
+}

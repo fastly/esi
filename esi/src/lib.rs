@@ -628,12 +628,19 @@ fn event_receiver(
             continue_on_error,
         }) => {
             debug!("Handling <esi:include> tag with src: {}", src);
+            // Always interpolate src
+            let interpolated_src = try_evaluate_interpolated_string(&src, ctx)?;
+
+            // Always interpolate alt if present
+            let interpolated_alt = alt
+                .map(|a| try_evaluate_interpolated_string(&a, ctx))
+                .transpose()?;
             let req = build_fragment_request(
                 original_request_metadata.clone_without_body(),
-                &src,
+                &interpolated_src,
                 is_escaped,
             );
-            let alt_req = alt.map(|alt| {
+            let alt_req = interpolated_alt.map(|alt| {
                 build_fragment_request(
                     original_request_metadata.clone_without_body(),
                     &alt,
@@ -737,36 +744,12 @@ fn event_receiver(
 
         Event::InterpolatedContent(event) => {
             debug!("Handling interpolated content: {:?}", event);
-            let mut buf = vec![];
             let event_str = String::from_utf8(event.iter().copied().collect()).unwrap_or_default();
-            let mut cur = event_str.chars().peekable();
-            while let Some(c) = cur.peek() {
-                if *c == '$' {
-                    let mut new_cur = cur.clone();
-                    let result = try_evaluate_interpolated(&mut new_cur, ctx);
-                    match result {
-                        Some(r) => {
-                            // push what we have so far
-                            queue.push_back(Element::Raw(
-                                buf.into_iter().collect::<String>().into_bytes(),
-                            ));
-                            // push the result
-                            queue.push_back(Element::Raw(r.to_string().into_bytes()));
-                            // setup a new buffer
-                            buf = vec![];
-                            cur = new_cur;
-                        }
-                        None => {
-                            buf.push(cur.next().unwrap());
-                        }
-                    }
-                } else {
-                    buf.push(cur.next().unwrap());
-                }
-            }
-            queue.push_back(Element::Raw(
-                buf.into_iter().collect::<String>().into_bytes(),
-            ));
+
+            process_interpolated_chars(&event_str, ctx, |segment| {
+                queue.push_back(Element::Raw(segment.into_bytes()));
+                Ok(())
+            })?;
         }
         Event::Content(event) => {
             debug!("pushing content to buffer, len: {}", queue.len());
@@ -881,4 +864,86 @@ fn output_handler(output_writer: &mut Writer<impl Write>, buffer: &[u8]) -> Resu
     output_writer.get_mut().write_all(buffer)?;
     output_writer.get_mut().flush()?;
     Ok(())
+}
+
+/// Processes a string containing interpolated expressions using a character-based approach
+///
+/// This function evaluates expressions like $(HTTP_HOST) in text content and
+/// provides the processed segments to the caller through a callback function.
+///
+/// # Arguments
+/// * `input` - The input string containing potential interpolated expressions
+/// * `ctx` - Evaluation context containing variables and state
+/// * `segment_handler` - A function that handles each segment (raw text or evaluated expression)
+///
+/// # Returns
+/// * `Result<()>` - Success or error during processing
+///
+pub fn process_interpolated_chars<F>(
+    input: &str,
+    ctx: &mut EvalContext,
+    mut segment_handler: F,
+) -> Result<()>
+where
+    F: FnMut(String) -> Result<()>,
+{
+    let mut buf = vec![];
+    let mut cur = input.chars().peekable();
+
+    while let Some(c) = cur.peek() {
+        if *c == '$' {
+            let mut new_cur = cur.clone();
+            let result = try_evaluate_interpolated(&mut new_cur, ctx);
+            match result {
+                Some(r) => {
+                    // If we have accumulated text, output it first
+                    if !buf.is_empty() {
+                        segment_handler(buf.into_iter().collect())?;
+                        buf = vec![];
+                    }
+
+                    // Output the evaluated expression result
+                    segment_handler(r.to_string())?;
+
+                    // Update our position
+                    cur = new_cur;
+                }
+                None => {
+                    buf.push(cur.next().unwrap());
+                }
+            }
+        } else {
+            buf.push(cur.next().unwrap());
+        }
+    }
+
+    // Output any remaining text
+    if !buf.is_empty() {
+        segment_handler(buf.into_iter().collect())?;
+    }
+
+    Ok(())
+}
+
+/// Evaluates all interpolated expressions in a string and returns the complete result
+///
+/// This is a convenience wrapper around process_interpolated_chars that collects
+/// all output into a single string.
+///
+/// # Arguments
+/// * `input` - The input string containing potential interpolated expressions
+/// * `ctx` - Evaluation context containing variables and state
+///
+/// # Returns
+/// * `Result<String>` - The fully processed string with all expressions evaluated
+///
+pub fn try_evaluate_interpolated_string(input: &str, ctx: &mut EvalContext) -> Result<String> {
+    let mut result = String::new();
+
+    process_interpolated_chars(input, ctx, |segment| {
+        result.push_str(&segment);
+        Ok(())
+    })?;
+
+    Ok(result)
 }
