@@ -266,6 +266,8 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
                         Value::Boolean(false)
                     }
                 }
+                Operator::Equals => Value::Boolean(left.to_string() == right.to_string()),
+                Operator::NotEquals => Value::Boolean(left.to_string() != right.to_string()),
             }
         }
         Expr::Call(identifier, args) => {
@@ -305,6 +307,8 @@ enum Expr {
 enum Operator {
     Matches,
     MatchesInsensitive,
+    Equals,
+    NotEquals,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -341,6 +345,7 @@ fn parse(tokens: &[Token]) -> Result<Expr> {
 }
 
 fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
+    println!("Parsing expression, current token: {:?}", cur);
     let node = if let Some(token) = cur.next() {
         match token {
             Token::Integer(i) => Expr::Integer(*i),
@@ -381,6 +386,28 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
             let expr = Expr::Comparison(Box::new(Comparison {
                 left,
                 operator,
+                right,
+            }));
+            Ok(expr)
+        }
+        Some(Token::Equals) => {
+            cur.next(); // consume the Equals token
+            let left = node;
+            let right = parse_expr(cur)?;
+            let expr = Expr::Comparison(Box::new(Comparison {
+                left,
+                operator: Operator::Equals,
+                right,
+            }));
+            Ok(expr)
+        }
+        Some(Token::NotEquals) => {
+            cur.next(); // consume the NotEquals token
+            let left = node;
+            let right = parse_expr(cur)?;
+            let expr = Expr::Comparison(Box::new(Comparison {
+                left,
+                operator: Operator::NotEquals,
                 right,
             }));
             Ok(expr)
@@ -490,6 +517,9 @@ enum Token {
     CloseBracket,
     Comma,
     Dollar,
+    Equals,
+    NotEquals,
+    Negation,
     Bareword(String),
 }
 
@@ -548,6 +578,26 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
                     '}' => result.push(Token::CloseBracket),
                     ',' => result.push(Token::Comma),
                     _ => unreachable!(),
+                }
+            }
+            '=' => {
+                cur.next(); // consume the first '='
+                if cur.peek() == Some(&'=') {
+                    cur.next(); // consume the second '='
+                    result.push(Token::Equals);
+                } else {
+                    return Err(ExecutionError::ExpressionError(
+                        "single '=' not supported, use '==' for equality".to_string(),
+                    ));
+                }
+            }
+            '!' => {
+                cur.next(); // consume first '!'
+                if cur.peek() == Some(&'=') {
+                    cur.next(); // consume the '='
+                    result.push(Token::NotEquals);
+                } else if cur.peek() == Some(&'$') || cur.peek() == Some(&'(') {
+                    result.push(Token::Negation);
                 }
             }
             ' ' => {

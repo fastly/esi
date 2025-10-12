@@ -102,27 +102,48 @@ fn test_mixed_subfield_types() {
 }
 
 // Compatibility with ESI choose/when
-// #[test]
-// fn test_esi_choose_compatibility() {
-//     let input = r#"
-//         <esi:choose>
-//             <esi:when test="$(QUERY_STRING{param}) == 'value'">
-//                 Match
-//             </esi:when>
-//             <esi:otherwise>
-//                 Fallback
-//             </esi:otherwise>
-//         </esi:choose>
-//     "#;
-//     let req = Request::get("http://example.com?param=value");
-//     let result = process_esi_document(input, req).expect("Processing should succeed");
-//     assert_eq!(
-//         result.trim(),
-//         "Match",
-//         "ESI choose/when should work with bareword subfield"
-//     );
-// }
+#[test]
+fn test_esi_choose_compatibility_equal() {
+    let input = r#"
+        <esi:choose>
+            <esi:when test="$(QUERY_STRING{param}) == 'value'">
+                Match
+            </esi:when>
+            <esi:otherwise>
+                Fallback
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com?param=value");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "Match",
+        "ESI choose/when should work with bareword subfield"
+    );
+}
 
+// Compatibility with ESI choose/when with not equal
+#[test]
+fn test_esi_choose_compatibility_not_equal() {
+    let input = r#"
+        <esi:choose>
+            <esi:when test="$(QUERY_STRING{param}) != 'wrongvalue'">
+                Match
+            </esi:when>
+            <esi:otherwise>
+                Fallback
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com?param=value");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "Match",
+        "ESI choose/when should work with bareword subfield"
+    );
+}
 // Test for nested subfields
 #[test]
 fn test_nested_subfields() {
