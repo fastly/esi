@@ -214,3 +214,125 @@ fn process_include_with_query_string_interpolation() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn test_simple_negation() {
+    let input = r#"
+        <esi:choose>
+            <esi:when test="!$(QUERY_STRING{empty})">
+                Empty parameter was negated
+            </esi:when>
+            <esi:otherwise>
+                Fallback
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com?nonempty=value");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "Empty parameter was negated",
+        "Negation of null/empty value should evaluate to true"
+    );
+}
+
+#[test]
+fn test_negation_with_value() {
+    let input = r#"
+        <esi:choose>
+            <esi:when test="!$(QUERY_STRING{param})">
+                Parameter was negated
+            </esi:when>
+            <esi:otherwise>
+                Parameter exists
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com?param=value");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "Parameter exists",
+        "Negation of non-empty value should evaluate to false"
+    );
+}
+
+#[test]
+fn test_negation_of_comparison() {
+    let input = r#"
+        <esi:choose>
+            <esi:when test="!($(QUERY_STRING{param}) == 'wrong')">
+                Comparison was negated
+            </esi:when>
+            <esi:otherwise>
+                Fallback
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com?param=value");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "Comparison was negated",
+        "Negation of false comparison should evaluate to true"
+    );
+}
+
+#[test]
+fn test_double_negation() {
+    let input = r#"
+        <esi:choose>
+            <esi:when test="!!$(QUERY_STRING{param})">
+                Double negation works
+            </esi:when>
+            <esi:otherwise>
+                Fallback
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com?param=value");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "Double negation works",
+        "Double negation should restore original boolean value"
+    );
+}
+
+#[test]
+fn test_negation_with_not_equals() {
+    let input = r#"
+        <esi:choose>
+            <esi:when test="!($(QUERY_STRING{param}) != 'value')">
+                Negation of not-equals works
+            </esi:when>
+            <esi:otherwise>
+                Fallback
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com?param=value");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "Negation of not-equals works",
+        "Negation of not-equals should work correctly"
+    );
+}
+
+#[test]
+fn test_negation_in_vars() {
+    let input = r#"
+        <esi:vars>
+            <esi:assign name="result" value="!$(QUERY_STRING{empty})" />
+            $(result)
+        </esi:vars>
+    "#;
+    let req = Request::get("http://example.com?nonempty=value");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "true",
+        "Negation in variable assignment should work"
+    );
+}

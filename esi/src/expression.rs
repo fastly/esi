@@ -277,6 +277,11 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
             }
             call_dispatch(&identifier, &values)?
         }
+        Expr::Not(expr) => {
+            // Evaluate the inner expression and negate its boolean value
+            let inner_value = eval_expr(*expr, ctx)?;
+            Value::Boolean(!inner_value.to_bool())
+        }
     };
     debug!("Expression result: {:?}", result);
     Ok(result)
@@ -301,6 +306,7 @@ enum Expr {
     Variable(String, Option<Box<Expr>>),
     Comparison(Box<Comparison>),
     Call(String, Vec<Expr>),
+    Not(Box<Expr>), // Unary negation
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -351,6 +357,25 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
             Token::Integer(i) => Expr::Integer(*i),
             Token::String(s) => Expr::String(s.clone()),
             Token::Dollar => parse_dollar(cur)?,
+            Token::Negation => {
+                // Handle unary negation by parsing the expression that follows
+                // and wrapping it in a Not expression
+                let expr = parse_expr(cur)?;
+                Expr::Not(Box::new(expr))
+            }
+            Token::OpenParen => {
+                // Handle parenthesized expressions
+                let inner_expr = parse_expr(cur)?;
+
+                // Expect a closing parenthesis
+                if let Some(Token::CloseParen) = cur.next() {
+                    inner_expr
+                } else {
+                    return Err(ExecutionError::ExpressionError(
+                        "missing closing parenthesis".to_string(),
+                    ));
+                }
+            }
             unexpected => {
                 return Err(ExecutionError::ExpressionError(format!(
                     "unexpected token starting expression: {unexpected:?}",
@@ -571,7 +596,7 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
                 if cur.peek() == Some(&'=') {
                     cur.next(); // consume the '='
                     result.push(Token::Operation(Operator::NotEquals));
-                } else if cur.peek() == Some(&'$') || cur.peek() == Some(&'(') {
+                } else {
                     result.push(Token::Negation);
                 }
             }
