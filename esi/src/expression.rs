@@ -365,49 +365,14 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
 
     // Check if there's a binary operation, or if we've reached the end of the expression
     match cur.peek() {
-        Some(Token::Bareword(s)) => {
+        Some(Token::Operation(op)) => {
+            let operator = op.clone();
+            cur.next(); // consume the operator token
             let left = node;
-            let operator = match s.as_str() {
-                "matches" => {
-                    cur.next();
-                    Operator::Matches
-                }
-                "matches_i" => {
-                    cur.next();
-                    Operator::MatchesInsensitive
-                }
-                unexpected => {
-                    return Err(ExecutionError::ExpressionError(format!(
-                        "unexpected operator: {unexpected}"
-                    )))
-                }
-            };
             let right = parse_expr(cur)?;
             let expr = Expr::Comparison(Box::new(Comparison {
                 left,
                 operator,
-                right,
-            }));
-            Ok(expr)
-        }
-        Some(Token::Equals) => {
-            cur.next(); // consume the Equals token
-            let left = node;
-            let right = parse_expr(cur)?;
-            let expr = Expr::Comparison(Box::new(Comparison {
-                left,
-                operator: Operator::Equals,
-                right,
-            }));
-            Ok(expr)
-        }
-        Some(Token::NotEquals) => {
-            cur.next(); // consume the NotEquals token
-            let left = node;
-            let right = parse_expr(cur)?;
-            let expr = Expr::Comparison(Box::new(Comparison {
-                left,
-                operator: Operator::NotEquals,
                 right,
             }));
             Ok(expr)
@@ -517,8 +482,7 @@ enum Token {
     CloseBracket,
     Comma,
     Dollar,
-    Equals,
-    NotEquals,
+    Operation(Operator),
     Negation,
     Bareword(String),
 }
@@ -558,7 +522,18 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
                 result.push(get_integer(cur)?);
             }
             'a'..='z' | 'A'..='Z' => {
-                result.push(get_bareword(cur));
+                let bareword = get_bareword(cur);
+
+                // Check if it's an operator
+                if let Token::Bareword(ref word) = bareword {
+                    match word.as_str() {
+                        "matches" => result.push(Token::Operation(Operator::Matches)),
+                        "matches_i" => result.push(Token::Operation(Operator::MatchesInsensitive)),
+                        _ => result.push(bareword),
+                    }
+                } else {
+                    result.push(get_bareword(cur));
+                }
             }
             '(' | ')' | '{' | '}' | ',' => {
                 cur.next();
@@ -584,7 +559,7 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
                 cur.next(); // consume the first '='
                 if cur.peek() == Some(&'=') {
                     cur.next(); // consume the second '='
-                    result.push(Token::Equals);
+                    result.push(Token::Operation(Operator::Equals));
                 } else {
                     return Err(ExecutionError::ExpressionError(
                         "single '=' not supported, use '==' for equality".to_string(),
@@ -595,7 +570,7 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
                 cur.next(); // consume first '!'
                 if cur.peek() == Some(&'=') {
                     cur.next(); // consume the '='
-                    result.push(Token::NotEquals);
+                    result.push(Token::Operation(Operator::NotEquals));
                 } else if cur.peek() == Some(&'$') || cur.peek() == Some(&'(') {
                     result.push(Token::Negation);
                 }
@@ -859,13 +834,13 @@ mod tests {
     #[test]
     fn test_lex_matches_operator() -> Result<()> {
         let tokens = lex_expr("matches")?;
-        assert_eq!(tokens, vec![Token::Bareword("matches".to_string())]);
+        assert_eq!(tokens, vec![Token::Operation(Operator::Matches)]);
         Ok(())
     }
     #[test]
     fn test_lex_matches_i_operator() -> Result<()> {
         let tokens = lex_expr("matches_i")?;
-        assert_eq!(tokens, vec![Token::Bareword("matches_i".to_string())]);
+        assert_eq!(tokens, vec![Token::Operation(Operator::MatchesInsensitive)]);
         Ok(())
     }
     #[test]
@@ -951,7 +926,7 @@ mod tests {
                 Token::OpenParen,
                 Token::Bareword("foo".to_string()),
                 Token::CloseParen,
-                Token::Bareword("matches".to_string()),
+                Token::Operation(Operator::Matches),
                 Token::String("bar".to_string())
             ]
         );
