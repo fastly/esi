@@ -266,8 +266,51 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
                         Value::Boolean(false)
                     }
                 }
-                Operator::Equals => Value::Boolean(left.to_string() == right.to_string()),
-                Operator::NotEquals => Value::Boolean(left.to_string() != right.to_string()),
+                Operator::Equals => {
+                    // Try numeric comparison first, then string comparison
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l == r)
+                    } else {
+                        Value::Boolean(left.to_string() == right.to_string())
+                    }
+                }
+                Operator::NotEquals => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l != r)
+                    } else {
+                        Value::Boolean(left.to_string() != right.to_string())
+                    }
+                }
+                Operator::LessThan => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l < r)
+                    } else {
+                        Value::Boolean(left.to_string() < right.to_string())
+                    }
+                }
+                Operator::LessThanOrEqual => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l <= r)
+                    } else {
+                        Value::Boolean(left.to_string() <= right.to_string())
+                    }
+                }
+                Operator::GreaterThan => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l > r)
+                    } else {
+                        Value::Boolean(left.to_string() > right.to_string())
+                    }
+                }
+                Operator::GreaterThanOrEqual => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l >= r)
+                    } else {
+                        Value::Boolean(left.to_string() >= right.to_string())
+                    }
+                }
+                Operator::And => Value::Boolean(left.to_bool() && right.to_bool()),
+                Operator::Or => Value::Boolean(left.to_bool() || right.to_bool()),
             }
         }
         Expr::Call(identifier, args) => {
@@ -315,6 +358,12 @@ enum Operator {
     MatchesInsensitive,
     Equals,
     NotEquals,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -598,6 +647,46 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
                     result.push(Token::Operation(Operator::NotEquals));
                 } else {
                     result.push(Token::Negation);
+                }
+            }
+            '&' => {
+                cur.next(); // consume first '&'
+                if cur.peek() == Some(&'&') {
+                    cur.next(); // consume the second '&'
+                    result.push(Token::Operation(Operator::And));
+                } else {
+                    return Err(ExecutionError::ExpressionError(
+                        "single '&' not supported, use '&&' for logical AND".to_string(),
+                    ));
+                }
+            }
+            '|' => {
+                cur.next(); // consume first '|'
+                if cur.peek() == Some(&'|') {
+                    cur.next(); // consume the second '|'
+                    result.push(Token::Operation(Operator::Or));
+                } else {
+                    return Err(ExecutionError::ExpressionError(
+                        "single '|' not supported, use '||' for logical OR".to_string(),
+                    ));
+                }
+            }
+            '<' => {
+                cur.next();
+                if cur.peek() == Some(&'=') {
+                    cur.next();
+                    result.push(Token::Operation(Operator::LessThanOrEqual));
+                } else {
+                    result.push(Token::Operation(Operator::LessThan));
+                }
+            }
+            '>' => {
+                cur.next();
+                if cur.peek() == Some(&'=') {
+                    cur.next();
+                    result.push(Token::Operation(Operator::GreaterThanOrEqual));
+                } else {
+                    result.push(Token::Operation(Operator::GreaterThan));
                 }
             }
             ' ' => {
@@ -1242,7 +1331,54 @@ mod tests {
         assert_eq!(result, Value::Null);
         Ok(())
     }
+    #[test]
+    fn test_logical_operators_with_parentheses() {
+        let mut ctx = EvalContext::new();
 
+        // Test (1==1)||('abc'=='def')
+        let result = evaluate_expression("(1==1)||('abc'=='def')", &mut ctx).unwrap();
+        assert_eq!(result.to_string(), "true");
+
+        // Test (4!=5)&&(4==5)
+        let result = evaluate_expression("(4!=5)&&(4==5)", &mut ctx).unwrap();
+        assert_eq!(result.to_string(), "false");
+    }
+    #[test]
+    fn test_negation_operations() -> Result<()> {
+        let mut ctx = EvalContext::new();
+
+        // Test simple negation
+        assert_eq!(
+            evaluate_expression("!(1 == 2)", &mut ctx)?,
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            evaluate_expression("!(1 == 1)", &mut ctx)?,
+            Value::Boolean(false)
+        );
+
+        // Test negation with other operators
+        assert_eq!(
+            evaluate_expression("!('a' <= 'c')", &mut ctx)?,
+            Value::Boolean(false)
+        );
+        // Test double negation
+        assert_eq!(
+            evaluate_expression("!!(1 == 1)", &mut ctx)?,
+            Value::Boolean(true)
+        );
+        // Test complex logical expressions with parentheses
+        assert_eq!(
+            evaluate_expression("!((1==1)&&(2==2))", &mut ctx)?,
+            Value::Boolean(false)
+        );
+        assert_eq!(
+            evaluate_expression("(!(1==1))||(!(2!=2))", &mut ctx)?,
+            Value::Boolean(true)
+        );
+
+        Ok(())
+    }
     #[test]
     fn test_bool_coercion() -> Result<()> {
         assert!(Value::Boolean(true).to_bool());
@@ -1255,7 +1391,6 @@ mod tests {
 
         Ok(())
     }
-
     #[test]
     fn test_string_coercion() -> Result<()> {
         assert_eq!(Value::Boolean(true).to_string(), "true");
