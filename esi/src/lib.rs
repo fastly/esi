@@ -893,25 +893,19 @@ where
     while let Some(c) = cur.peek() {
         if *c == '$' {
             let mut new_cur = cur.clone();
-            let result = try_evaluate_interpolated(&mut new_cur, ctx);
-            match result {
-                Some(r) => {
-                    // If we have accumulated text, output it first
-                    if !buf.is_empty() {
-                        segment_handler(buf.into_iter().collect())?;
-                        buf = vec![];
-                    }
 
-                    // Output the evaluated expression result
-                    segment_handler(r.to_string())?;
+            if let Some(value) = try_evaluate_interpolated(&mut new_cur, ctx) {
+                // If we have accumulated text, output it first
+                if !buf.is_empty() {
+                    segment_handler(buf.into_iter().collect())?;
+                    buf = vec![];
+                }
 
-                    // Update our position
-                    cur = new_cur;
-                }
-                None => {
-                    buf.push(cur.next().unwrap());
-                }
+                // Output the evaluated expression result
+                segment_handler(value.to_string())?;
             }
+            // Update our position
+            cur = new_cur;
         } else {
             buf.push(cur.next().unwrap());
         }
