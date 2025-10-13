@@ -106,7 +106,7 @@ fn main() {
                 xml_writer.into_inner().finish().unwrap();
             }
             Err(err) => {
-                error!("error processing ESI document: {}", err);
+                error!("error processing ESI document: {err}");
                 let _ = xml_writer.get_mut().write(b"Internal server error");
                 xml_writer.into_inner().finish().unwrap_or_else(|_| {
                     error!("error flushing error response to client");

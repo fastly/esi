@@ -200,9 +200,9 @@ fn process_include_with_query_string_interpolation() -> Result<(), Error> {
                 correct_fragment_request_made_clone.store(contains_api_key, Ordering::SeqCst);
 
                 // Return a mock response for the fragment request
-                Ok(esi::PendingFragmentContent::CompletedRequest(
+                Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
                     Response::from_body("fragment content"),
-                ))
+                )))
             }),
             None,
         )

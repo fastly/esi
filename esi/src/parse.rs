@@ -389,6 +389,8 @@ where
 ///
 /// # Ok::<(), esi::ExecutionError>(())
 /// ```
+/// # Errors
+/// Returns an `ExecutionError` if there is an error reading or parsing the document.
 pub fn parse_tags<'a, R>(
     namespace: &str,
     reader: &mut Reader<R>,
@@ -419,7 +421,7 @@ where
         &tags,
         &ContentType::Normal,
     )?;
-    debug!("Root: {:?}", root);
+    debug!("Root: {root:?}");
 
     Ok(())
 }
@@ -596,7 +598,7 @@ fn vars_tag_handler<'e>(
 ) -> Result<()> {
     debug!("Handling <esi:vars> tag");
     let tag = parse_vars(elem)?;
-    debug!("Parsed <esi:vars> tag: {:?}", tag);
+    debug!("Parsed <esi:vars> tag: {tag:?}");
     if use_queue {
         task.push(Event::ESI(parse_vars(elem)?));
     } else {

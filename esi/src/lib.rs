@@ -178,7 +178,7 @@ impl Processor {
                 Ok(())
             }
             Err(err) => {
-                error!("error processing ESI document: {}", err);
+                error!("error processing ESI document: {err}");
                 Err(err)
             }
         }
@@ -425,7 +425,7 @@ fn fetch_elements(
             Element::Include(fragment) => {
                 let result = process_include(
                     task,
-                    fragment,
+                    *fragment,
                     output_writer,
                     *depth,
                     dispatch_fragment_request,
@@ -509,7 +509,7 @@ fn process_include(
             if let Some(fragment) =
                 send_fragment_request(request?, None, continue_on_error, dispatch_fragment_request)?
             {
-                task.queue.push_front(Element::Include(fragment));
+                task.queue.push_front(Element::Include(Box::new(fragment)));
                 return Ok(FetchState::Pending);
             }
             debug!("guest returned None, continuing");
@@ -544,7 +544,7 @@ fn process_raw(
             .map_err(ExecutionError::WriterError)?;
         output_writer.get_mut().flush()?;
     } else {
-        trace!("-- Depth: {}", depth);
+        trace!("-- Depth: {depth}");
         debug!(
             "writing blocked content to a queue {:?} ",
             String::from_utf8(raw.to_owned())
@@ -580,7 +580,7 @@ fn process_try(
         process_fragment_response,
     )?;
 
-    trace!("*** Depth: {}", depth);
+    trace!("*** Depth: {depth}");
 
     match (attempt_state, except_state) {
         (FetchState::Succeeded, _) => {
@@ -603,8 +603,8 @@ fn process_try(
         (FetchState::Pending, _) | (FetchState::Failed(_, _), FetchState::Pending) => {
             // Request are still pending, re-add it to the front of the queue and wait for the next poll.
             task.queue.push_front(Element::Try {
-                attempt_task: std::mem::take(attempt_task),
-                except_task: std::mem::take(except_task),
+                attempt_task: Box::new(std::mem::take(attempt_task)),
+                except_task: Box::new(std::mem::take(except_task)),
             });
         }
     }
@@ -627,7 +627,7 @@ fn event_receiver(
             alt,
             continue_on_error,
         }) => {
-            debug!("Handling <esi:include> tag with src: {}", src);
+            debug!("Handling <esi:include> tag with src: {src}");
             // Always interpolate src
             let interpolated_src = try_evaluate_interpolated_string(&src, ctx)?;
 
@@ -651,7 +651,7 @@ fn event_receiver(
                 send_fragment_request(req?, alt_req, continue_on_error, dispatch_fragment_request)?
             {
                 // add the pending request to the queue
-                queue.push_back(Element::Include(fragment));
+                queue.push_back(Element::Include(Box::new(fragment)));
             }
         }
         Event::ESI(Tag::Try {
@@ -680,8 +680,8 @@ fn event_receiver(
             );
             // push the elements
             queue.push_back(Element::Try {
-                attempt_task,
-                except_task,
+                attempt_task: Box::new(attempt_task),
+                except_task: Box::new(except_task),
             });
         }
         Event::ESI(Tag::Assign { name, value }) => {
@@ -690,10 +690,10 @@ fn event_receiver(
             ctx.set_variable(&name, None, result);
         }
         Event::ESI(Tag::Vars { name }) => {
-            debug!("Handling <esi:vars> tag with name: {:?}", name);
+            debug!("Handling <esi:vars> tag with name: {name:?}");
             if let Some(name) = name {
                 let result = evaluate_expression(&name, ctx)?;
-                debug!("Evaluated <esi:vars> result: {:?}", result);
+                debug!("Evaluated <esi:vars> result: {result:?}");
                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
             }
         }
@@ -743,7 +743,7 @@ fn event_receiver(
         }
 
         Event::InterpolatedContent(event) => {
-            debug!("Handling interpolated content: {:?}", event);
+            debug!("Handling interpolated content: {event:?}");
             let event_str = String::from_utf8(event.iter().copied().collect()).unwrap_or_default();
 
             process_interpolated_chars(&event_str, ctx, |segment| {
@@ -811,7 +811,7 @@ fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> 
             Err(_err) => {
                 return Err(ExecutionError::InvalidRequestUrl(escaped_url));
             }
-        };
+        }
     } else {
         request.set_url(match Url::parse(&escaped_url) {
             Ok(url) => url,
@@ -868,7 +868,7 @@ fn output_handler(output_writer: &mut Writer<impl Write>, buffer: &[u8]) -> Resu
 
 /// Processes a string containing interpolated expressions using a character-based approach
 ///
-/// This function evaluates expressions like $(HTTP_HOST) in text content and
+/// This function evaluates expressions like $(`HTTP_HOST``) in text content and
 /// provides the processed segments to the caller through a callback function.
 ///
 /// # Arguments
@@ -921,7 +921,7 @@ where
 
 /// Evaluates all interpolated expressions in a string and returns the complete result
 ///
-/// This is a convenience wrapper around process_interpolated_chars that collects
+/// This is a convenience wrapper around `process_interpolated_chars` that collects
 /// all output into a single string.
 ///
 /// # Arguments
@@ -930,6 +930,9 @@ where
 ///
 /// # Returns
 /// * `Result<String>` - The fully processed string with all expressions evaluated
+///
+/// # Errors
+/// Returns error if expression evaluation fails
 ///
 pub fn try_evaluate_interpolated_string(input: &str, ctx: &mut EvalContext) -> Result<String> {
     let mut result = String::new();

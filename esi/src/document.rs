@@ -63,10 +63,10 @@ impl Task {
 ///
 pub enum Element {
     Raw(Vec<u8>),
-    Include(Fragment),
+    Include(Box<Fragment>),
     Try {
-        except_task: Task,
-        attempt_task: Task,
+        except_task: Box<Task>,
+        attempt_task: Box<Task>,
     },
 }
 
@@ -99,10 +99,10 @@ impl std::fmt::Debug for Element {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Raw(_) => write!(f, "Raw"),
-            Self::Include(Fragment { alt: Some(_), .. }) => {
+            Self::Include(fragment) if fragment.alt.is_some() => {
                 write!(f, "Include Fragment(with alt)")
             }
-            Self::Include(Fragment { .. }) => write!(f, "Include Fragment"),
+            Self::Include(_) => write!(f, "Include Fragment"),
             Self::Try {
                 attempt_task,
                 except_task,

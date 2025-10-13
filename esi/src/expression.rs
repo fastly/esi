@@ -67,13 +67,18 @@ pub struct EvalContext {
     match_name: String,
     request: Request,
 }
-impl EvalContext {
-    pub fn new() -> Self {
+impl Default for EvalContext {
+    fn default() -> Self {
         Self {
             vars: HashMap::new(),
             match_name: "MATCHES".to_string(),
             request: Request::new(Method::GET, "http://localhost"),
         }
+    }
+}
+impl EvalContext {
+    pub fn new() -> Self {
+        Self::default()
     }
     pub fn new_with_vars(vars: HashMap<String, Value>) -> Self {
         Self {
@@ -139,7 +144,7 @@ impl EvalContext {
             _ => {
                 self.vars.insert(key, value);
             }
-        };
+        }
     }
 
     pub fn set_match_name(&mut self, match_name: &str) {
@@ -326,7 +331,7 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
             Value::Boolean(!inner_value.to_bool())
         }
     };
-    debug!("Expression result: {:?}", result);
+    debug!("Expression result: {result:?}");
     Ok(result)
 }
 
@@ -400,7 +405,7 @@ fn parse(tokens: &[Token]) -> Result<Expr> {
 }
 
 fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
-    println!("Parsing expression, current token: {:?}", cur);
+    println!("Parsing expression, current token: {cur:?}");
     let node = if let Some(token) = cur.next() {
         match token {
             Token::Integer(i) => Expr::Integer(*i),
@@ -417,7 +422,7 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
                 let inner_expr = parse_expr(cur)?;
 
                 // Expect a closing parenthesis
-                if let Some(Token::CloseParen) = cur.next() {
+                if matches!(cur.next(), Some(Token::CloseParen)) {
                     inner_expr
                 } else {
                     return Err(ExecutionError::ExpressionError(
@@ -810,7 +815,7 @@ fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
                     return Err(ExecutionError::ExpressionError(
                         "unexpected eof while parsing string".to_string(),
                     ));
-                };
+                }
             }
             '\\' => {
                 if triple_tick {
