@@ -38,7 +38,7 @@ fn process_esi_document(input: &str, req: Request) -> Result<String, Error> {
     let result = String::from_utf8(output_buffer)
         .map_err(|e| Error::msg(format!("Invalid UTF-8 in processed output: {}", e)))?;
 
-    debug!("Processed result: {:?}", result);
+    debug!("Processed result: {result:?}");
     Ok(result)
 }
 
