@@ -134,7 +134,7 @@ impl Processor {
     ///         fastly::Response::from_body("Fragment content")
     ///     ))
     /// }
-    /// // Process the response
+    /// // Process the response, streaming the resulting document directly to the client
     /// processor.process_response(
     ///     &mut response,
     ///     None,
