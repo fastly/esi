@@ -78,10 +78,10 @@ impl PendingFragmentContent {
 /// let config = Configuration::default();
 ///
 /// // Optionally, create a Request (assuming Request can be constructed or mocked)
-/// let request = Some(Request::get("http://example.com/"));
+/// let request = Request::get("http://example.com/");
 ///
 /// // Initialize the Processor with optional request metadata
-/// let processor = Processor::new(request, config);
+/// let processor = Processor::new(Some(request), config);
 /// ```
 pub struct Processor {
     // The original client request metadata, if any.
