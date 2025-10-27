@@ -36,7 +36,7 @@ fn process_esi_document(input: &str, req: Request) -> Result<String, Error> {
     // Extract the processed content from the writer
     let output_buffer = writer.into_inner().into_inner();
     let result = String::from_utf8(output_buffer)
-        .map_err(|e| Error::msg(format!("Invalid UTF-8 in processed output: {}", e)))?;
+        .map_err(|e| Error::msg(format!("Invalid UTF-8 in processed output: {e}")))?;
 
     debug!("Processed result: {result:?}");
     Ok(result)
