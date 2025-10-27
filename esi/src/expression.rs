@@ -67,13 +67,18 @@ pub struct EvalContext {
     match_name: String,
     request: Request,
 }
-impl EvalContext {
-    pub fn new() -> Self {
+impl Default for EvalContext {
+    fn default() -> Self {
         Self {
             vars: HashMap::new(),
             match_name: "MATCHES".to_string(),
             request: Request::new(Method::GET, "http://localhost"),
         }
+    }
+}
+impl EvalContext {
+    pub fn new() -> Self {
+        Self::default()
     }
     pub fn new_with_vars(vars: HashMap<String, Value>) -> Self {
         Self {
@@ -93,6 +98,7 @@ impl EvalContext {
                     .into(),
             ),
             "QUERY_STRING" => self.request.get_query_str().map_or(Value::Null, |query| {
+                debug!("Query string: {query}");
                 subkey.map_or_else(
                     || Value::Text(Cow::Owned(query.to_string())),
                     |field| {
@@ -138,7 +144,7 @@ impl EvalContext {
             _ => {
                 self.vars.insert(key, value);
             }
-        };
+        }
     }
 
     pub fn set_match_name(&mut self, match_name: &str) {
@@ -265,6 +271,51 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
                         Value::Boolean(false)
                     }
                 }
+                Operator::Equals => {
+                    // Try numeric comparison first, then string comparison
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l == r)
+                    } else {
+                        Value::Boolean(left.to_string() == right.to_string())
+                    }
+                }
+                Operator::NotEquals => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l != r)
+                    } else {
+                        Value::Boolean(left.to_string() != right.to_string())
+                    }
+                }
+                Operator::LessThan => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l < r)
+                    } else {
+                        Value::Boolean(left.to_string() < right.to_string())
+                    }
+                }
+                Operator::LessThanOrEqual => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l <= r)
+                    } else {
+                        Value::Boolean(left.to_string() <= right.to_string())
+                    }
+                }
+                Operator::GreaterThan => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l > r)
+                    } else {
+                        Value::Boolean(left.to_string() > right.to_string())
+                    }
+                }
+                Operator::GreaterThanOrEqual => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
+                        Value::Boolean(l >= r)
+                    } else {
+                        Value::Boolean(left.to_string() >= right.to_string())
+                    }
+                }
+                Operator::And => Value::Boolean(left.to_bool() && right.to_bool()),
+                Operator::Or => Value::Boolean(left.to_bool() || right.to_bool()),
             }
         }
         Expr::Call(identifier, args) => {
@@ -274,7 +325,13 @@ fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
             }
             call_dispatch(&identifier, &values)?
         }
+        Expr::Not(expr) => {
+            // Evaluate the inner expression and negate its boolean value
+            let inner_value = eval_expr(*expr, ctx)?;
+            Value::Boolean(!inner_value.to_bool())
+        }
     };
+    debug!("Expression result: {result:?}");
     Ok(result)
 }
 
@@ -297,12 +354,21 @@ enum Expr {
     Variable(String, Option<Box<Expr>>),
     Comparison(Box<Comparison>),
     Call(String, Vec<Expr>),
+    Not(Box<Expr>), // Unary negation
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum Operator {
     Matches,
     MatchesInsensitive,
+    Equals,
+    NotEquals,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -339,11 +405,31 @@ fn parse(tokens: &[Token]) -> Result<Expr> {
 }
 
 fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
+    println!("Parsing expression, current token: {cur:?}");
     let node = if let Some(token) = cur.next() {
         match token {
             Token::Integer(i) => Expr::Integer(*i),
             Token::String(s) => Expr::String(s.clone()),
             Token::Dollar => parse_dollar(cur)?,
+            Token::Negation => {
+                // Handle unary negation by parsing the expression that follows
+                // and wrapping it in a Not expression
+                let expr = parse_expr(cur)?;
+                Expr::Not(Box::new(expr))
+            }
+            Token::OpenParen => {
+                // Handle parenthesized expressions
+                let inner_expr = parse_expr(cur)?;
+
+                // Expect a closing parenthesis
+                if matches!(cur.next(), Some(Token::CloseParen)) {
+                    inner_expr
+                } else {
+                    return Err(ExecutionError::ExpressionError(
+                        "missing closing parenthesis".to_string(),
+                    ));
+                }
+            }
             unexpected => {
                 return Err(ExecutionError::ExpressionError(format!(
                     "unexpected token starting expression: {unexpected:?}",
@@ -358,23 +444,10 @@ fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
 
     // Check if there's a binary operation, or if we've reached the end of the expression
     match cur.peek() {
-        Some(Token::Bareword(s)) => {
+        Some(Token::Operation(op)) => {
+            let operator = op.clone();
+            cur.next(); // consume the operator token
             let left = node;
-            let operator = match s.as_str() {
-                "matches" => {
-                    cur.next();
-                    Operator::Matches
-                }
-                "matches_i" => {
-                    cur.next();
-                    Operator::MatchesInsensitive
-                }
-                unexpected => {
-                    return Err(ExecutionError::ExpressionError(format!(
-                        "unexpected operator: {unexpected}"
-                    )))
-                }
-            };
             let right = parse_expr(cur)?;
             let expr = Expr::Comparison(Box::new(Comparison {
                 left,
@@ -407,11 +480,17 @@ fn parse_variable(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
 
     match cur.next() {
         Some(Token::OpenBracket) => {
-            // TODO: I think there might be cases of $var{key} where key is a
-            //       bareword. If that's the case, then handle here by checking
-            //       if the next token is a bareword instead of trying to parse
-            //       an expression.
-            let subfield = parse_expr(cur)?;
+            // Allow bareword as string in subfield position
+            let subfield = if let Some(Token::Bareword(s)) = cur.peek() {
+                debug!("Parsing bareword subfield: {s}");
+                cur.next();
+                Expr::String(s.clone())
+            } else {
+                debug!("Parsing non-bareword subfield, {:?}", cur.peek());
+                // Parse the subfield expression
+                parse_expr(cur)?
+            };
+
             let Some(Token::CloseBracket) = cur.next() else {
                 return Err(ExecutionError::ExpressionError(format!(
                     "unexpected token: {:?}",
@@ -482,6 +561,8 @@ enum Token {
     CloseBracket,
     Comma,
     Dollar,
+    Operation(Operator),
+    Negation,
     Bareword(String),
 }
 
@@ -520,7 +601,18 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
                 result.push(get_integer(cur)?);
             }
             'a'..='z' | 'A'..='Z' => {
-                result.push(get_bareword(cur));
+                let bareword = get_bareword(cur);
+
+                // Check if it's an operator
+                if let Token::Bareword(ref word) = bareword {
+                    match word.as_str() {
+                        "matches" => result.push(Token::Operation(Operator::Matches)),
+                        "matches_i" => result.push(Token::Operation(Operator::MatchesInsensitive)),
+                        _ => result.push(bareword),
+                    }
+                } else {
+                    result.push(get_bareword(cur));
+                }
             }
             '(' | ')' | '{' | '}' | ',' => {
                 cur.next();
@@ -542,12 +634,73 @@ fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
                     _ => unreachable!(),
                 }
             }
+            '=' => {
+                cur.next(); // consume the first '='
+                if cur.peek() == Some(&'=') {
+                    cur.next(); // consume the second '='
+                    result.push(Token::Operation(Operator::Equals));
+                } else {
+                    return Err(ExecutionError::ExpressionError(
+                        "single '=' not supported, use '==' for equality".to_string(),
+                    ));
+                }
+            }
+            '!' => {
+                cur.next(); // consume first '!'
+                if cur.peek() == Some(&'=') {
+                    cur.next(); // consume the '='
+                    result.push(Token::Operation(Operator::NotEquals));
+                } else {
+                    result.push(Token::Negation);
+                }
+            }
+            '&' => {
+                cur.next(); // consume first '&'
+                if cur.peek() == Some(&'&') {
+                    cur.next(); // consume the second '&'
+                    result.push(Token::Operation(Operator::And));
+                } else {
+                    return Err(ExecutionError::ExpressionError(
+                        "single '&' not supported, use '&&' for logical AND".to_string(),
+                    ));
+                }
+            }
+            '|' => {
+                cur.next(); // consume first '|'
+                if cur.peek() == Some(&'|') {
+                    cur.next(); // consume the second '|'
+                    result.push(Token::Operation(Operator::Or));
+                } else {
+                    return Err(ExecutionError::ExpressionError(
+                        "single '|' not supported, use '||' for logical OR".to_string(),
+                    ));
+                }
+            }
+            '<' => {
+                cur.next();
+                if cur.peek() == Some(&'=') {
+                    cur.next();
+                    result.push(Token::Operation(Operator::LessThanOrEqual));
+                } else {
+                    result.push(Token::Operation(Operator::LessThan));
+                }
+            }
+            '>' => {
+                cur.next();
+                if cur.peek() == Some(&'=') {
+                    cur.next();
+                    result.push(Token::Operation(Operator::GreaterThanOrEqual));
+                } else {
+                    result.push(Token::Operation(Operator::GreaterThan));
+                }
+            }
             ' ' => {
                 cur.next(); // Ignore spaces
             }
             _ => {
                 return Err(ExecutionError::ExpressionError(
-                    "error in lexing interpolated".to_string(),
+                    // "error in lexing interpolated".to_string(),
+                    format!("error in lexing interpolated `{c}`"),
                 ));
             }
         }
@@ -662,7 +815,7 @@ fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
                     return Err(ExecutionError::ExpressionError(
                         "unexpected eof while parsing string".to_string(),
                     ));
-                };
+                }
             }
             '\\' => {
                 if triple_tick {
@@ -800,13 +953,13 @@ mod tests {
     #[test]
     fn test_lex_matches_operator() -> Result<()> {
         let tokens = lex_expr("matches")?;
-        assert_eq!(tokens, vec![Token::Bareword("matches".to_string())]);
+        assert_eq!(tokens, vec![Token::Operation(Operator::Matches)]);
         Ok(())
     }
     #[test]
     fn test_lex_matches_i_operator() -> Result<()> {
         let tokens = lex_expr("matches_i")?;
-        assert_eq!(tokens, vec![Token::Bareword("matches_i".to_string())]);
+        assert_eq!(tokens, vec![Token::Operation(Operator::MatchesInsensitive)]);
         Ok(())
     }
     #[test]
@@ -892,7 +1045,7 @@ mod tests {
                 Token::OpenParen,
                 Token::Bareword("foo".to_string()),
                 Token::CloseParen,
-                Token::Bareword("matches".to_string()),
+                Token::Operation(Operator::Matches),
                 Token::String("bar".to_string())
             ]
         );
@@ -1132,6 +1285,17 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn test_eval_get_request_query_field_unquoted() -> Result<()> {
+        let mut ctx = EvalContext::new();
+        ctx.set_request(Request::new(Method::GET, "http://localhost?hello=goodbye"));
+
+        let result = evaluate_expression("$(QUERY_STRING{hello})", &mut ctx)?;
+        assert_eq!(result, Value::Text("goodbye".into()));
+        let result = evaluate_expression("$(QUERY_STRING{nonexistent})", &mut ctx)?;
+        assert_eq!(result, Value::Null);
+        Ok(())
+    }
+    #[test]
     fn test_eval_get_remote_addr() -> Result<()> {
         // This is kind of a useless test as this will always return an empty string.
         let mut ctx = EvalContext::new();
@@ -1166,13 +1330,60 @@ mod tests {
 
         let result = evaluate_expression("$(HTTP_COOKIE{'foo'})", &mut ctx)?;
         assert_eq!(result, Value::Text("bar".into()));
-        // let result = evaluate_expression("$(HTTP_COOKIE{'bar'})", &mut ctx)?;
-        // assert_eq!(result, Value::Text("baz".into()));
-        // let result = evaluate_expression("$(HTTP_COOKIE{'baz'})", &mut ctx)?;
-        // assert_eq!(result, Value::Null);
+        let result = evaluate_expression("$(HTTP_COOKIE{'bar'})", &mut ctx)?;
+        assert_eq!(result, Value::Text("baz".into()));
+        let result = evaluate_expression("$(HTTP_COOKIE{'baz'})", &mut ctx)?;
+        assert_eq!(result, Value::Null);
         Ok(())
     }
+    #[test]
+    fn test_logical_operators_with_parentheses() {
+        let mut ctx = EvalContext::new();
 
+        // Test (1==1)||('abc'=='def')
+        let result = evaluate_expression("(1==1)||('abc'=='def')", &mut ctx).unwrap();
+        assert_eq!(result.to_string(), "true");
+
+        // Test (4!=5)&&(4==5)
+        let result = evaluate_expression("(4!=5)&&(4==5)", &mut ctx).unwrap();
+        assert_eq!(result.to_string(), "false");
+    }
+    #[test]
+    fn test_negation_operations() -> Result<()> {
+        let mut ctx = EvalContext::new();
+
+        // Test simple negation
+        assert_eq!(
+            evaluate_expression("!(1 == 2)", &mut ctx)?,
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            evaluate_expression("!(1 == 1)", &mut ctx)?,
+            Value::Boolean(false)
+        );
+
+        // Test negation with other operators
+        assert_eq!(
+            evaluate_expression("!('a' <= 'c')", &mut ctx)?,
+            Value::Boolean(false)
+        );
+        // Test double negation
+        assert_eq!(
+            evaluate_expression("!!(1 == 1)", &mut ctx)?,
+            Value::Boolean(true)
+        );
+        // Test complex logical expressions with parentheses
+        assert_eq!(
+            evaluate_expression("!((1==1)&&(2==2))", &mut ctx)?,
+            Value::Boolean(false)
+        );
+        assert_eq!(
+            evaluate_expression("(!(1==1))||(!(2!=2))", &mut ctx)?,
+            Value::Boolean(true)
+        );
+
+        Ok(())
+    }
     #[test]
     fn test_bool_coercion() -> Result<()> {
         assert!(Value::Boolean(true).to_bool());
@@ -1185,7 +1396,6 @@ mod tests {
 
         Ok(())
     }
-
     #[test]
     fn test_string_coercion() -> Result<()> {
         assert_eq!(Value::Boolean(true).to_string(), "true");
@@ -1249,5 +1459,68 @@ mod tests {
     fn test_lex_interpolated_incomplete() {
         let mut chars = "$(foo".chars().peekable();
         assert!(lex_interpolated_expr(&mut chars).is_err());
+    }
+
+    #[test]
+    fn test_var_subfield_missing_closing_bracket() {
+        let input = r#"
+        <esi:vars>
+            $(QUERY_STRING{param)
+        </esi:vars>
+        "#;
+        let mut chars = input.chars().peekable();
+        assert!(lex_interpolated_expr(&mut chars).is_err());
+    }
+
+    #[test]
+    fn test_invalid_standalone_bareword() {
+        let input = r#"
+        <esi:vars>
+            bareword
+        </esi:vars>
+        "#;
+        let mut chars = input.chars().peekable();
+        assert!(lex_interpolated_expr(&mut chars).is_err());
+    }
+
+    #[test]
+    fn test_mixed_subfield_types() {
+        let input = r#"$(QUERY_STRING{param})"#;
+        let mut chars = input.chars().peekable();
+        // let result =
+        // evaluate_interpolated(&mut chars, &mut ctx).expect("Processing should succeed");
+        let result = lex_interpolated_expr(&mut chars).expect("Processing should succeed");
+        println!("Tokens: {result:?}");
+        assert_eq!(
+            result,
+            vec![
+                Token::Dollar,
+                Token::OpenParen,
+                Token::Bareword("QUERY_STRING".into()),
+                Token::OpenBracket,
+                Token::Bareword("param".into()),
+                Token::CloseBracket,
+                Token::CloseParen
+            ]
+        );
+    }
+
+    #[test]
+    fn test_get_variable_query_string() {
+        let mut ctx = EvalContext::new();
+        let req = Request::new(Method::GET, "http://localhost?param=value");
+        ctx.set_request(req);
+
+        // Test without subkey
+        let result = ctx.get_variable("QUERY_STRING", None);
+        assert_eq!(result, Value::Text("param=value".into()));
+
+        // Test with subkey
+        let result = ctx.get_variable("QUERY_STRING", Some("param"));
+        assert_eq!(result, Value::Text("value".into()));
+
+        // Test with non-existent subkey
+        let result = ctx.get_variable("QUERY_STRING", Some("nonexistent"));
+        assert_eq!(result, Value::Null);
     }
 }

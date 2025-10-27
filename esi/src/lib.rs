@@ -72,10 +72,16 @@ impl PendingFragmentContent {
 /// # Example
 /// ```
 /// use esi::{Processor, Configuration};
+/// use fastly::Request;
 ///
+/// // Create a configuration (assuming Configuration implements Default)
 /// let config = Configuration::default();
-/// let processor = Processor::new(config);
-/// let response = processor.process(request)?;
+///
+/// // Optionally, create a Request (assuming Request can be constructed or mocked)
+/// let request = Request::get("http://example.com/");
+///
+/// // Initialize the Processor with optional request metadata
+/// let processor = Processor::new(Some(request), config);
 /// ```
 pub struct Processor {
     // The original client request metadata, if any.
@@ -112,15 +118,30 @@ impl Processor {
     ///
     /// # Example
     /// ```
-    /// let mut response = Response::new();
-    /// response.set_body("<esi:include src='header.html'/>");
+    /// use fastly::Response;
+    /// use esi::{Processor, Configuration};
     ///
+    /// // Create a processor
+    /// let processor = Processor::new(None, Configuration::default());
+    ///
+    /// // Create a response with ESI markup
+    /// let mut response = Response::new();
+    /// response.set_body("<esi:include src='http://example.com/header.html'/>");
+    ///
+    /// // Define a simple fragment dispatcher
+    /// fn default_fragment_dispatcher(req: fastly::Request) -> esi::Result<esi::PendingFragmentContent> {
+    ///     Ok(esi::PendingFragmentContent::CompletedRequest(
+    ///         fastly::Response::from_body("Fragment content")
+    ///     ))
+    /// }
+    /// // Process the response, streaming the resulting document directly to the client
     /// processor.process_response(
     ///     &mut response,
     ///     None,
     ///     Some(&default_fragment_dispatcher),
     ///     None
     /// )?;
+    /// # Ok::<(), esi::ExecutionError>(())
     /// ```
     ///
     /// # Errors
@@ -157,7 +178,7 @@ impl Processor {
                 Ok(())
             }
             Err(err) => {
-                error!("error processing ESI document: {}", err);
+                error!("error processing ESI document: {err}");
                 Err(err)
             }
         }
@@ -180,11 +201,18 @@ impl Processor {
     ///
     /// # Example
     /// ```
-    /// use crate::Writer;
     /// use std::io::Cursor;
+    /// use std::collections::VecDeque;
+    /// use esi::{Event, Reader, Writer, Processor, Configuration};
+    /// use quick_xml::events::Event as XmlEvent;
     ///
-    /// let events = VecDeque::from([Event::Text("Hello".into())]);
+    /// let events = VecDeque::from([Event::Content(XmlEvent::Empty(
+    ///     quick_xml::events::BytesStart::new("div")
+    /// ))]);
+    ///
     /// let mut writer = Writer::new(Cursor::new(Vec::new()));
+    ///
+    /// let processor = Processor::new(None, esi::Configuration::default());
     ///
     /// processor.process_parsed_document(
     ///     events,
@@ -192,6 +220,7 @@ impl Processor {
     ///     None,
     ///     None
     /// )?;
+    /// # Ok::<(), esi::ExecutionError>(())
     /// ```
     ///
     /// # Errors
@@ -243,7 +272,7 @@ impl Processor {
         )
     }
 
-    /// Process an ESI document from a [`crate::Reader`], handling includes and directives
+    /// Process an ESI document from a [`Reader`], handling includes and directives
     ///
     /// Processes ESI directives while streaming content to the output writer. Handles:
     /// - ESI includes with fragment fetching
@@ -262,19 +291,28 @@ impl Processor {
     ///
     /// # Example
     /// ```
-    /// use crate::Reader;
+    /// use esi::{Reader, Writer, Processor, Configuration};
     /// use std::io::Cursor;
     ///
-    /// let xml = r#"<esi:include src="header.html"/>"#;
+    /// let xml = r#"<esi:include src="http://example.com/header.html"/>"#;
     /// let reader = Reader::from_str(xml);
     /// let mut writer = Writer::new(Cursor::new(Vec::new()));
     ///
+    /// let processor = Processor::new(None, Configuration::default());
+    ///
+    ///  // Define a simple fragment dispatcher
+    /// fn default_fragment_dispatcher(req: fastly::Request) -> esi::Result<esi::PendingFragmentContent> {
+    ///     Ok(esi::PendingFragmentContent::CompletedRequest(
+    ///         fastly::Response::from_body("Fragment content")
+    ///     ))
+    /// }
     /// processor.process_document(
     ///     reader,
     ///     &mut writer,
     ///     Some(&default_fragment_dispatcher),
     ///     None
     /// )?;
+    /// # Ok::<(), esi::ExecutionError>(())
     /// ```
     ///
     /// # Errors
@@ -387,7 +425,7 @@ fn fetch_elements(
             Element::Include(fragment) => {
                 let result = process_include(
                     task,
-                    fragment,
+                    *fragment,
                     output_writer,
                     *depth,
                     dispatch_fragment_request,
@@ -471,7 +509,7 @@ fn process_include(
             if let Some(fragment) =
                 send_fragment_request(request?, None, continue_on_error, dispatch_fragment_request)?
             {
-                task.queue.push_front(Element::Include(fragment));
+                task.queue.push_front(Element::Include(Box::new(fragment)));
                 return Ok(FetchState::Pending);
             }
             debug!("guest returned None, continuing");
@@ -504,8 +542,9 @@ fn process_raw(
             .get_mut()
             .write_all(raw)
             .map_err(ExecutionError::WriterError)?;
+        output_writer.get_mut().flush()?;
     } else {
-        trace!("-- Depth: {}", depth);
+        trace!("-- Depth: {depth}");
         debug!(
             "writing blocked content to a queue {:?} ",
             String::from_utf8(raw.to_owned())
@@ -541,7 +580,7 @@ fn process_try(
         process_fragment_response,
     )?;
 
-    trace!("*** Depth: {}", depth);
+    trace!("*** Depth: {depth}");
 
     match (attempt_state, except_state) {
         (FetchState::Succeeded, _) => {
@@ -564,8 +603,8 @@ fn process_try(
         (FetchState::Pending, _) | (FetchState::Failed(_, _), FetchState::Pending) => {
             // Request are still pending, re-add it to the front of the queue and wait for the next poll.
             task.queue.push_front(Element::Try {
-                attempt_task: std::mem::take(attempt_task),
-                except_task: std::mem::take(except_task),
+                attempt_task: Box::new(std::mem::take(attempt_task)),
+                except_task: Box::new(std::mem::take(except_task)),
             });
         }
     }
@@ -588,12 +627,20 @@ fn event_receiver(
             alt,
             continue_on_error,
         }) => {
+            debug!("Handling <esi:include> tag with src: {src}");
+            // Always interpolate src
+            let interpolated_src = try_evaluate_interpolated_string(&src, ctx)?;
+
+            // Always interpolate alt if present
+            let interpolated_alt = alt
+                .map(|a| try_evaluate_interpolated_string(&a, ctx))
+                .transpose()?;
             let req = build_fragment_request(
                 original_request_metadata.clone_without_body(),
-                &src,
+                &interpolated_src,
                 is_escaped,
             );
-            let alt_req = alt.map(|alt| {
+            let alt_req = interpolated_alt.map(|alt| {
                 build_fragment_request(
                     original_request_metadata.clone_without_body(),
                     &alt,
@@ -604,7 +651,7 @@ fn event_receiver(
                 send_fragment_request(req?, alt_req, continue_on_error, dispatch_fragment_request)?
             {
                 // add the pending request to the queue
-                queue.push_back(Element::Include(fragment));
+                queue.push_back(Element::Include(Box::new(fragment)));
             }
         }
         Event::ESI(Tag::Try {
@@ -633,8 +680,8 @@ fn event_receiver(
             );
             // push the elements
             queue.push_back(Element::Try {
-                attempt_task,
-                except_task,
+                attempt_task: Box::new(attempt_task),
+                except_task: Box::new(except_task),
             });
         }
         Event::ESI(Tag::Assign { name, value }) => {
@@ -643,8 +690,10 @@ fn event_receiver(
             ctx.set_variable(&name, None, result);
         }
         Event::ESI(Tag::Vars { name }) => {
+            debug!("Handling <esi:vars> tag with name: {name:?}");
             if let Some(name) = name {
                 let result = evaluate_expression(&name, ctx)?;
+                debug!("Evaluated <esi:vars> result: {result:?}");
                 queue.push_back(Element::Raw(result.to_string().into_bytes()));
             }
         }
@@ -694,36 +743,13 @@ fn event_receiver(
         }
 
         Event::InterpolatedContent(event) => {
-            let mut buf = vec![];
+            debug!("Handling interpolated content: {event:?}");
             let event_str = String::from_utf8(event.iter().copied().collect()).unwrap_or_default();
-            let mut cur = event_str.chars().peekable();
-            while let Some(c) = cur.peek() {
-                if *c == '$' {
-                    let mut new_cur = cur.clone();
-                    let result = try_evaluate_interpolated(&mut new_cur, ctx);
-                    match result {
-                        Some(r) => {
-                            // push what we have so far
-                            queue.push_back(Element::Raw(
-                                buf.into_iter().collect::<String>().into_bytes(),
-                            ));
-                            // push the result
-                            queue.push_back(Element::Raw(r.to_string().into_bytes()));
-                            // setup a new buffer
-                            buf = vec![];
-                            cur = new_cur;
-                        }
-                        None => {
-                            buf.push(cur.next().unwrap());
-                        }
-                    }
-                } else {
-                    buf.push(cur.next().unwrap());
-                }
-            }
-            queue.push_back(Element::Raw(
-                buf.into_iter().collect::<String>().into_bytes(),
-            ));
+
+            process_interpolated_chars(&event_str, ctx, |segment| {
+                queue.push_back(Element::Raw(segment.into_bytes()));
+                Ok(())
+            })?;
         }
         Event::Content(event) => {
             debug!("pushing content to buffer, len: {}", queue.len());
@@ -785,7 +811,7 @@ fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> 
             Err(_err) => {
                 return Err(ExecutionError::InvalidRequestUrl(escaped_url));
             }
-        };
+        }
     } else {
         request.set_url(match Url::parse(&escaped_url) {
             Ok(url) => url,
@@ -838,4 +864,83 @@ fn output_handler(output_writer: &mut Writer<impl Write>, buffer: &[u8]) -> Resu
     output_writer.get_mut().write_all(buffer)?;
     output_writer.get_mut().flush()?;
     Ok(())
+}
+
+/// Processes a string containing interpolated expressions using a character-based approach
+///
+/// This function evaluates expressions like $(`HTTP_HOST``) in text content and
+/// provides the processed segments to the caller through a callback function.
+///
+/// # Arguments
+/// * `input` - The input string containing potential interpolated expressions
+/// * `ctx` - Evaluation context containing variables and state
+/// * `segment_handler` - A function that handles each segment (raw text or evaluated expression)
+///
+/// # Returns
+/// * `Result<()>` - Success or error during processing
+///
+pub fn process_interpolated_chars<F>(
+    input: &str,
+    ctx: &mut EvalContext,
+    mut segment_handler: F,
+) -> Result<()>
+where
+    F: FnMut(String) -> Result<()>,
+{
+    let mut buf = vec![];
+    let mut cur = input.chars().peekable();
+
+    while let Some(c) = cur.peek() {
+        if *c == '$' {
+            let mut new_cur = cur.clone();
+
+            if let Some(value) = try_evaluate_interpolated(&mut new_cur, ctx) {
+                // If we have accumulated text, output it first
+                if !buf.is_empty() {
+                    segment_handler(buf.into_iter().collect())?;
+                    buf = vec![];
+                }
+
+                // Output the evaluated expression result
+                segment_handler(value.to_string())?;
+            }
+            // Update our position
+            cur = new_cur;
+        } else {
+            buf.push(cur.next().unwrap());
+        }
+    }
+
+    // Output any remaining text
+    if !buf.is_empty() {
+        segment_handler(buf.into_iter().collect())?;
+    }
+
+    Ok(())
+}
+
+/// Evaluates all interpolated expressions in a string and returns the complete result
+///
+/// This is a convenience wrapper around `process_interpolated_chars` that collects
+/// all output into a single string.
+///
+/// # Arguments
+/// * `input` - The input string containing potential interpolated expressions
+/// * `ctx` - Evaluation context containing variables and state
+///
+/// # Returns
+/// * `Result<String>` - The fully processed string with all expressions evaluated
+///
+/// # Errors
+/// Returns error if expression evaluation fails
+///
+pub fn try_evaluate_interpolated_string(input: &str, ctx: &mut EvalContext) -> Result<String> {
+    let mut result = String::new();
+
+    process_interpolated_chars(input, ctx, |segment| {
+        result.push_str(&segment);
+        Ok(())
+    })?;
+
+    Ok(result)
 }

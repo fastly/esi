@@ -60,7 +60,7 @@ fn main() {
                 xml_writer.into_inner().finish().unwrap();
             }
             Err(err) => {
-                error!("error processing ESI document: {}", err);
+                error!("error processing ESI document: {err}");
                 let _ = xml_writer
                     .get_mut()
                     .write(include_bytes!("error.html.fragment"));
