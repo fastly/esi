@@ -19,7 +19,7 @@ pub fn init_logs() {
 
 // Helper function to create a processor and process an ESI document
 fn process_esi_document(input: &str, req: Request) -> Result<String, Error> {
-    debug!("Processing ESI document: {:?}", input);
+    debug!("Processing ESI document: {input:?}");
 
     // Create a reader from the input string
     let reader = esi::Reader::from_str(input);
