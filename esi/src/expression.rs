@@ -1490,7 +1490,7 @@ mod tests {
         // let result =
         // evaluate_interpolated(&mut chars, &mut ctx).expect("Processing should succeed");
         let result = lex_interpolated_expr(&mut chars).expect("Processing should succeed");
-        println!("Tokens: {:?}", result);
+        println!("Tokens: {result:?}");
         assert_eq!(
             result,
             vec![
