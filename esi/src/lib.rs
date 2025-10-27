@@ -272,7 +272,7 @@ impl Processor {
         )
     }
 
-    /// Process an ESI document from a [`esi::Reader`], handling includes and directives
+    /// Process an ESI document from a [`Reader`], handling includes and directives
     ///
     /// Processes ESI directives while streaming content to the output writer. Handles:
     /// - ESI includes with fragment fetching
