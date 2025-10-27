@@ -379,8 +379,7 @@ where
 ///
 /// # Example
 /// ```
-/// use quick_xml::Reader;
-/// use esi::parse_tags;
+/// use esi::{Reader, parse_tags};
 ///
 /// let xml = r#"<esi:include src="http://example.com/footer.html"/>"#;
 /// let mut reader = Reader::from_str(xml);
