@@ -5,7 +5,9 @@ mod document;
 mod error;
 mod expression;
 mod functions;
+mod new_parse;
 mod parse;
+mod parser_types;
 
 use crate::document::{FetchState, Task};
 use crate::expression::{evaluate_expression, try_evaluate_interpolated, EvalContext};
@@ -18,6 +20,7 @@ use std::io::{BufRead, Write};
 
 pub use crate::document::{Element, Fragment};
 pub use crate::error::Result;
+pub use crate::new_parse::parse;
 pub use crate::parse::{parse_tags, Event, Include, Tag, Tag::Try};
 
 pub use crate::config::Configuration;
