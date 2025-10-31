@@ -1,6 +1,5 @@
 use std::io::Write;
 
-use esi::{Reader, Writer};
 use fastly::{http::StatusCode, mime, Request, Response};
 use log::{error, info};
 
@@ -32,15 +31,13 @@ fn main() {
         let resp = Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML);
 
         // Send the response headers to the client and open an output stream
-        let output_writer = resp.stream_to_client();
-
-        // Set up an XML writer to write directly to the client output stream.
-        let mut xml_writer = Writer::new(output_writer);
+        let mut output_writer = resp.stream_to_client();
 
         // Process the ESI document
+        let reader = std::io::BufReader::new(beresp.take_body());
         let result = processor.process_document(
-            Reader::from_reader(beresp.take_body()),
-            &mut xml_writer,
+            reader,
+            &mut output_writer,
             Some(&|req| {
                 info!("Sending request {} {}", req.get_method(), req.get_path());
                 Ok(req.with_ttl(120).send_async("mock-s3")?.into())
@@ -57,14 +54,12 @@ fn main() {
 
         match result {
             Ok(()) => {
-                xml_writer.into_inner().finish().unwrap();
+                output_writer.finish().unwrap();
             }
             Err(err) => {
                 error!("error processing ESI document: {err}");
-                let _ = xml_writer
-                    .get_mut()
-                    .write(include_bytes!("error.html.fragment"));
-                xml_writer.into_inner().finish().unwrap_or_else(|_| {
+                let _ = output_writer.write(include_bytes!("error.html.fragment"));
+                output_writer.finish().unwrap_or_else(|_| {
                     error!("error flushing error response to client");
                 });
             }

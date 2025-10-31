@@ -41,7 +41,7 @@ pub enum Chunk<'a> {
 pub enum Expr<'a> {
     Integer(i32),
     String(Option<&'a str>),
-    Variable(&'a str, Option<&'a str>, Option<Box<Expr<'a>>>),
+    Variable(&'a str, Option<Box<Expr<'a>>>, Option<Box<Expr<'a>>>),
     Comparison {
         left: Box<Expr<'a>>,
         operator: Operator,

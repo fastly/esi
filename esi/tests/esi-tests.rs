@@ -21,21 +21,18 @@ pub fn init_logs() {
 fn process_esi_document(input: &str, req: Request) -> Result<String, Error> {
     debug!("Processing ESI document: {input:?}");
 
-    // Create a reader from the input string
-    let reader = esi::Reader::from_str(input);
+    // Create a BufRead from the input string
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
 
     // Create a writer with a Vec buffer to capture the output
-    let buffer = Vec::new();
-    let cursor = std::io::Cursor::new(buffer);
-    let mut writer = esi::Writer::new(cursor);
+    let mut output = Vec::new();
 
     // Create the processor and process the document
     let processor = Processor::new(Some(req), Configuration::default());
-    processor.process_document(reader, &mut writer, None, None)?;
+    processor.process_document(reader, &mut output, None, None)?;
 
-    // Extract the processed content from the writer
-    let output_buffer = writer.into_inner().into_inner();
-    let result = String::from_utf8(output_buffer)
+    // Convert the output to a string
+    let result = String::from_utf8(output)
         .map_err(|e| Error::msg(format!("Invalid UTF-8 in processed output: {e}")))?;
 
     debug!("Processed result: {result:?}");
@@ -85,6 +82,7 @@ fn test_bareword_function_argument_is_swallowed() {
 // Mixed subfield types (bareword and expression) with QUERY_STRING
 #[test]
 fn test_mixed_subfield_types() {
+    init_logs();
     let input = r#"
         <esi:assign name="keyVar" value="'param'" />
         <esi:vars>

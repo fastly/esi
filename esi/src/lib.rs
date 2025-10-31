@@ -234,17 +234,11 @@ fn evaluate_simple_nom_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> 
     
     match expr {
         Expr::Variable(name, key, _default) => {
-            // Evaluate the key if it contains expressions
-            let evaluated_key = if let Some(key_str) = key {
-                // If the key contains $(, it's an expression that needs to be evaluated
-                if key_str.contains("$(") {
-                    match try_evaluate_interpolated_string(key_str, ctx) {
-                        Ok(evaluated) => Some(evaluated),
-                        Err(_) => Some(key_str.to_string()), // Fall back to literal key if evaluation fails
-                    }
-                } else {
-                    Some(key_str.to_string())
-                }
+            // Evaluate the key expression if present
+            let evaluated_key = if let Some(key_expr) = key {
+                // Recursively evaluate the key expression
+                let key_result = evaluate_simple_nom_expr(*key_expr, ctx)?;
+                Some(key_result)
             } else {
                 None
             };
@@ -450,11 +444,20 @@ impl Processor {
             .map_err(|e| ESIError::WriterError(e))?;
 
         // Parse the document using nom parser
-        eprintln!("DEBUG: Document content to parse: '{}'", doc_content);
-        let chunks = new_parse::parse(&doc_content)
-            .map_err(|e| ESIError::ExpressionError(format!("Nom parser error: {:?}", e)))?
-            .1;
-        eprintln!("DEBUG: Parsed chunks: {:?}", chunks);
+        let (remaining, chunks) = new_parse::parse(&doc_content)
+            .map_err(|e| ESIError::ExpressionError(format!("Nom parser error: {:?}", e)))?;
+        
+        eprintln!("DEBUG: Parser returned {} chunks", chunks.len());
+        for (i, chunk) in chunks.iter().enumerate() {
+            eprintln!("DEBUG: Chunk[{}]: {:?}", i, chunk);
+        }
+        
+        // Log warning if parser didn't consume everything (may indicate unsupported features)
+        if !remaining.is_empty() {
+            debug!("Parser did not consume all input. Remaining: '{}'", 
+                   remaining.chars().take(100).collect::<String>());
+            eprintln!("DEBUG: Parser remaining: {:?}", remaining);
+        }
 
         // context for the interpreter
         let mut ctx = EvalContext::new();
