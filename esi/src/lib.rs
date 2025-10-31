@@ -315,13 +315,28 @@ fn evaluate_simple_nom_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> 
 }
 
 impl PendingFragmentContent {
-    fn wait_for_content(self) -> Result<Response> {
-        Ok(match self {
-            Self::PendingRequest(pending_request) => pending_request.wait()?,
-            Self::CompletedRequest(response) => response,
-            Self::NoContent => Response::from_status(StatusCode::NO_CONTENT),
-        })
+    /// Wait for and retrieve the response from a pending fragment request
+    pub fn wait(self) -> Result<Response> {
+        match self {
+            Self::PendingRequest(pending_request) => pending_request.wait().map_err(|e| {
+                ESIError::ExpressionError(format!("Fragment request wait failed: {}", e))
+            }),
+            Self::CompletedRequest(response) => Ok(response),
+            Self::NoContent => Ok(Response::from_status(StatusCode::NO_CONTENT)),
+        }
     }
+}
+
+/// Represents a fragment that needs to be fetched
+struct Fragment {
+    /// Index in the chunks array where this fragment should be inserted
+    chunk_index: usize,
+    /// The pending fragment content (request or already completed)
+    pending_content: PendingFragmentContent,
+    /// Alternative source URL if main request fails (built lazily only if needed)
+    alt: Option<String>,
+    /// Whether to continue processing if this fragment fails
+    continue_on_error: bool,
 }
 
 /// A processor for handling ESI responses
@@ -448,10 +463,22 @@ impl Processor {
 
     /// Process an ESI document using the nom parser, handling includes and directives
     ///
+    /// This method uses a three-phase approach to enable **concurrent fragment fetching**:
+    ///
+    /// **Phase 1**: Parse the document and collect all fragment requests. This allows
+    /// us to identify all `<esi:include>` tags upfront.
+    ///
+    /// **Phase 2**: Dispatch all fragment requests concurrently using Fastly's async
+    /// request capabilities. This minimizes latency by fetching fragments in parallel
+    /// rather than sequentially.
+    ///
+    /// **Phase 3**: Process chunks and stream output, inserting the resolved fragment
+    /// responses in their correct positions.
+    ///
     /// Processes ESI directives while streaming content to the output writer. Handles:
-    /// - ESI includes with fragment fetching
+    /// - ESI includes with concurrent fragment fetching
     /// - Variable substitution
-    /// - Conditional processing
+    /// - Conditional processing (choose/when/otherwise)
     /// - Try/except blocks
     ///
     /// # Arguments
@@ -466,7 +493,7 @@ impl Processor {
     /// # Errors
     /// Returns error if:
     /// * ESI markup parsing fails
-    /// * Fragment requests fail
+    /// * Fragment requests fail (unless `continue_on_error` is set)
     /// * Output writing fails
     pub fn process_document(
         self,
@@ -509,15 +536,137 @@ impl Processor {
         let mut ctx = EvalContext::new();
         ctx.set_request(original_request_metadata.clone_without_body());
 
-        // Process chunks directly to output
-        for chunk in chunks {
-            process_nom_chunk_to_output(
-                chunk,
-                &mut ctx,
-                output_writer,
-                &original_request_metadata,
-                _dispatch_fragment_request,
-            )?;
+        // PHASE 1: Collect all fragment requests while doing a first pass
+        // This allows us to dispatch all requests concurrently
+        let mut fragments = Vec::new();
+
+        if let Some(dispatcher) = _dispatch_fragment_request {
+            for (idx, chunk) in chunks.iter().enumerate() {
+                if let parser_types::Chunk::Esi(parser_types::Tag::Include {
+                    src,
+                    alt,
+                    continue_on_error,
+                }) = chunk
+                {
+                    // Interpolate the src URL
+                    let interpolated_src = try_evaluate_interpolated_string(src, &mut ctx)?;
+
+                    // Build and dispatch the fragment request
+                    let req = build_fragment_request(
+                        original_request_metadata.clone_without_body(),
+                        &interpolated_src,
+                        false,
+                    )?;
+
+                    match dispatcher(req) {
+                        Ok(pending_content) => {
+                            fragments.push(Fragment {
+                                chunk_index: idx,
+                                pending_content,
+                                alt: alt.clone(),
+                                continue_on_error: *continue_on_error,
+                            });
+                        }
+                        Err(err) => {
+                            if !continue_on_error {
+                                return Err(ESIError::ExpressionError(format!(
+                                    "Fragment dispatch failed: {}",
+                                    err
+                                )));
+                            }
+                            // If continue_on_error, we'll handle this during output phase
+                            fragments.push(Fragment {
+                                chunk_index: idx,
+                                pending_content: PendingFragmentContent::NoContent,
+                                alt: alt.clone(),
+                                continue_on_error: *continue_on_error,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // PHASE 2: Wait for all pending fragment requests to complete
+        // This allows concurrent fetching instead of sequential
+        let mut fragment_responses: std::collections::HashMap<usize, Result<Vec<u8>>> =
+            std::collections::HashMap::new();
+
+        for fragment_info in fragments {
+            let response_result = fragment_info.pending_content.wait();
+
+            // If main request failed and we have an alt, try the alt
+            let final_response = if response_result.is_err() && fragment_info.alt.is_some() {
+                if let Some(dispatcher) = _dispatch_fragment_request {
+                    let alt = fragment_info.alt.unwrap();
+                    let interpolated_alt = try_evaluate_interpolated_string(&alt, &mut ctx)?;
+                    let alt_req = build_fragment_request(
+                        original_request_metadata.clone_without_body(),
+                        &interpolated_alt,
+                        false,
+                    )?;
+
+                    match dispatcher(alt_req) {
+                        Ok(alt_pending) => alt_pending.wait(),
+                        Err(e) => {
+                            if fragment_info.continue_on_error {
+                                Ok(Response::from_status(StatusCode::NO_CONTENT))
+                            } else {
+                                Err(ESIError::ExpressionError(format!(
+                                    "Alt fragment failed: {}",
+                                    e
+                                )))
+                            }
+                        }
+                    }
+                } else {
+                    response_result
+                }
+            } else {
+                response_result
+            };
+
+            // Convert response to bytes immediately
+            let body_bytes = match final_response {
+                Ok(response) => Ok(response.into_body_bytes()),
+                Err(e) => {
+                    if fragment_info.continue_on_error {
+                        Ok(Vec::new()) // Empty body for failed fragments with continue_on_error
+                    } else {
+                        Err(e)
+                    }
+                }
+            };
+
+            fragment_responses.insert(fragment_info.chunk_index, body_bytes);
+        }
+
+        // PHASE 3: Process chunks and output, using the resolved fragment responses
+        for (idx, chunk) in chunks.into_iter().enumerate() {
+            // Check if this chunk is a fragment that we fetched
+            if let Some(body_result) = fragment_responses.remove(&idx) {
+                match body_result {
+                    Ok(body_bytes) => {
+                        // Write the fragment response body to output
+                        let body_str =
+                            std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
+                        output_writer.write_all(body_str.as_bytes())?;
+                    }
+                    Err(err) => {
+                        // Fragment failed and continue_on_error was false
+                        return Err(err);
+                    }
+                }
+            } else {
+                // Not a fragment - process normally
+                process_nom_chunk_to_output(
+                    chunk,
+                    &mut ctx,
+                    output_writer,
+                    &original_request_metadata,
+                    None, // Don't dispatch fragments here - already done in phase 1
+                )?;
+            }
         }
 
         Ok(())
