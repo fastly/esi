@@ -79,7 +79,7 @@ fn esi_assign_short(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
         delimited(
             tag("<esi:assign"),
             attributes,
-            preceded(multispace0, alt((tag(">"), tag("/>")))),
+            preceded(multispace0, tag("/>")),
         ),
         parse_assign_attributes,
     )(input)
@@ -91,7 +91,7 @@ fn esi_assign_long(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
             delimited(
                 tag("<esi:assign"),
                 attributes,
-                preceded(multispace0, alt((tag(">"), tag("/>")))),
+                preceded(multispace0, tag(">")),
             ),
             parse_interpolated,
             tag("</esi:assign>"),
