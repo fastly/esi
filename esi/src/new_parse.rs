@@ -141,12 +141,17 @@ fn esi_try(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
 
 fn esi_otherwise(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
-        delimited(
+        tuple((
             tag("<esi:otherwise>"),
             parse_interpolated,
             tag("</esi:otherwise>"),
-        ),
-        |v| vec![Chunk::Esi(Tag::Otherwise(v))],
+        )),
+        |(_, content, _)| {
+            // Return the Otherwise tag followed by its content chunks (same as esi_when)
+            let mut result = vec![Chunk::Esi(Tag::Otherwise)];
+            result.extend(content);
+            result
+        },
     )(input)
 }
 
@@ -184,18 +189,20 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
         delimited(tag("<esi:choose>"), parse, tag("</esi:choose>")),
         |v| {
             let mut when_branches = vec![];
-            let mut otherwise_events = None;
+            let mut otherwise_events = Vec::new();
             let mut current_when_tag: Option<Tag> = None;
             let mut current_when_content: Vec<Chunk> = vec![];
+            let mut in_otherwise = false;
             
             for chunk in v {
                 match chunk {
                     Chunk::Esi(Tag::When { .. }) => {
-                        // If we have a previous when, save it
+                        // Save any previous when
                         if let Some(when_tag) = current_when_tag.take() {
                             when_branches.push((when_tag, current_when_content.clone()));
                             current_when_content.clear();
                         }
+                        in_otherwise = false;
                         // Start collecting for this new when
                         current_when_tag = Some(if let Chunk::Esi(tag) = chunk {
                             tag
@@ -203,17 +210,19 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
                             unreachable!()
                         });
                     }
-                    Chunk::Esi(Tag::Otherwise(cs)) => {
+                    Chunk::Esi(Tag::Otherwise) => {
                         // Save any pending when
                         if let Some(when_tag) = current_when_tag.take() {
                             when_branches.push((when_tag, current_when_content.clone()));
                             current_when_content.clear();
                         }
-                        otherwise_events = Some(cs);
+                        in_otherwise = true;
                     }
                     _ => {
-                        // Accumulate content for the current when
-                        if current_when_tag.is_some() {
+                        // Accumulate content for the current when or otherwise
+                        if in_otherwise {
+                            otherwise_events.push(chunk);
+                        } else if current_when_tag.is_some() {
                             current_when_content.push(chunk);
                         }
                     }
@@ -227,7 +236,7 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
             
             vec![Chunk::Esi(Tag::Choose { 
                 when_branches,
-                otherwise_events: otherwise_events.unwrap_or_default()
+                otherwise_events
             })]
         },
     )(input)

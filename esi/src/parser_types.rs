@@ -26,7 +26,7 @@ pub enum Tag<'a> {
     },
     Attempt(Vec<Chunk<'a>>),
     Except(Vec<Chunk<'a>>),
-    Otherwise(Vec<Chunk<'a>>),
+    Otherwise,  // Changed to unit variant like When - content follows as separate chunks
 }
 
 #[derive(Debug, PartialEq, Clone)]

@@ -334,3 +334,26 @@ fn test_negation_in_vars() {
         "Negation in variable assignment should work"
     );
 }
+
+#[test]
+fn test_choose_with_esi_tags_in_otherwise() {
+    init_logs();
+    let input = r#"
+        <esi:choose>
+            <esi:when test="$(QUERY_STRING{group}) == 'member'">
+                Member content
+            </esi:when>
+            <esi:otherwise>
+                <esi:assign name="redirect" value="'welcome.html'" />
+                Redirecting to $(redirect)
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com?group=guest");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert!(
+        result.contains("Redirecting to welcome.html"),
+        "Otherwise should support ESI tags like assign. Got: {}",
+        result
+    );
+}
