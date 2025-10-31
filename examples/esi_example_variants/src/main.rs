@@ -53,10 +53,10 @@ fn main() {
                 let variant_url = get_variant_url(&original_url);
                 info!(
                     "Sending request - original URL: ({}) variant URL: ({})",
-                    original_url,
-                    variant_url
+                    original_url, variant_url
                 );
-                Ok(req.with_url(&variant_url)
+                Ok(req
+                    .with_url(&variant_url)
                     .with_ttl(120)
                     .send_async("mock-s3")?
                     .into())

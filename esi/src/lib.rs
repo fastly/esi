@@ -47,7 +47,7 @@ impl From<Response> for PendingFragmentContent {
 
 // Process nom parser chunks directly to output - with fragment request support
 fn process_nom_chunk_to_output(
-    chunk: parser_types::Chunk, 
+    chunk: parser_types::Chunk,
     ctx: &mut EvalContext,
     output_writer: &mut impl Write,
     original_request_metadata: &Request,
@@ -88,29 +88,44 @@ fn process_nom_chunk_to_output(
                     // Handle esi:assign tags - evaluate the value expression and set variable
                     //First, check if the value is a quoted string literal and strip quotes
                     let trimmed = value.trim();
-                    let unquoted_value = if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
+                    let unquoted_value = if trimmed.starts_with('\'')
+                        && trimmed.ends_with('\'')
+                        && trimmed.len() >= 2
+                    {
                         // Single-quoted string: strip quotes
-                        trimmed[1..trimmed.len()-1].to_string()
-                    } else if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+                        trimmed[1..trimmed.len() - 1].to_string()
+                    } else if trimmed.starts_with('"')
+                        && trimmed.ends_with('"')
+                        && trimmed.len() >= 2
+                    {
                         // Double-quoted string: strip quotes
-                        trimmed[1..trimmed.len()-1].to_string()
+                        trimmed[1..trimmed.len() - 1].to_string()
                     } else {
                         value.clone()
                     };
-                    
+
                     // Evaluate the value as an ESI expression
-                    let evaluated_value = crate::expression::evaluate_expression(&unquoted_value, ctx)
-                        .map(|v| v.to_string())
-                        .unwrap_or(unquoted_value);
-                    
-                    ctx.set_variable(&name, None, crate::expression::Value::Text(evaluated_value.into()));
+                    let evaluated_value =
+                        crate::expression::evaluate_expression(&unquoted_value, ctx)
+                            .map(|v| v.to_string())
+                            .unwrap_or(unquoted_value);
+
+                    ctx.set_variable(
+                        &name,
+                        None,
+                        crate::expression::Value::Text(evaluated_value.into()),
+                    );
                     Ok(())
                 }
-                NomTag::Include { src, alt, continue_on_error } => {
+                NomTag::Include {
+                    src,
+                    alt,
+                    continue_on_error,
+                } => {
                     if let Some(dispatcher) = dispatch_fragment_request {
                         // Handle esi:include tags - evaluate expressions and build fragment request
                         debug!("Handling <esi:include> tag with src: {}", src);
-                        
+
                         // Always interpolate src
                         let interpolated_src = try_evaluate_interpolated_string(&src, ctx)?;
 
@@ -118,9 +133,9 @@ fn process_nom_chunk_to_output(
                         let req = build_fragment_request(
                             original_request_metadata.clone_without_body(),
                             &interpolated_src,
-                            false // assume not escaped for now
+                            false, // assume not escaped for now
                         )?;
-                        
+
                         match dispatcher(req) {
                             Ok(pending_content) => {
                                 // Process the fragment content directly
@@ -128,7 +143,8 @@ fn process_nom_chunk_to_output(
                                     crate::PendingFragmentContent::CompletedRequest(response) => {
                                         // Write the response body directly to output
                                         let body_bytes = response.into_body_bytes();
-                                        let body_str = std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
+                                        let body_str = std::str::from_utf8(&body_bytes)
+                                            .unwrap_or("<!-- invalid utf8 -->");
                                         output_writer.write_all(body_str.as_bytes())?;
                                     }
                                     crate::PendingFragmentContent::PendingRequest(_) => {
@@ -144,11 +160,12 @@ fn process_nom_chunk_to_output(
                                 if continue_on_error {
                                     // Try alt if available
                                     if let Some(alt_src) = &alt {
-                                        let interpolated_alt = try_evaluate_interpolated_string(alt_src, ctx)?;
+                                        let interpolated_alt =
+                                            try_evaluate_interpolated_string(alt_src, ctx)?;
                                         let alt_req = build_fragment_request(
                                             original_request_metadata.clone_without_body(),
                                             &interpolated_alt,
-                                            false
+                                            false,
                                         )?;
                                         match dispatcher(alt_req) {
                                             Ok(pending_content) => {
@@ -168,15 +185,21 @@ fn process_nom_chunk_to_output(
                                             }
                                             Err(_) => {
                                                 // Both main and alt failed, but continue-on-error is set
-                                                output_writer.write_all(b"<!-- fragment request failed -->")?;
+                                                output_writer.write_all(
+                                                    b"<!-- fragment request failed -->",
+                                                )?;
                                             }
                                         }
                                     } else {
                                         // No alt, but continue on error
-                                        output_writer.write_all(b"<!-- fragment request failed -->")?;
+                                        output_writer
+                                            .write_all(b"<!-- fragment request failed -->")?;
                                     }
                                 } else {
-                                    return Err(ESIError::ExpressionError(format!("Fragment request failed: {}", err)));
+                                    return Err(ESIError::ExpressionError(format!(
+                                        "Fragment request failed: {}",
+                                        err
+                                    )));
                                 }
                             }
                         }
@@ -186,7 +209,10 @@ fn process_nom_chunk_to_output(
                     }
                     Ok(())
                 }
-                NomTag::Choose { when_branches, otherwise_events } => {
+                NomTag::Choose {
+                    when_branches,
+                    otherwise_events,
+                } => {
                     // Handle esi:choose/when/otherwise logic - ported from main branch
                     let mut chose_branch = false;
                     for (when_tag, events) in when_branches {
@@ -198,7 +224,13 @@ fn process_nom_chunk_to_output(
                             if result.to_bool() {
                                 chose_branch = true;
                                 for chunk in events {
-                                    process_nom_chunk_to_output(chunk, ctx, output_writer, original_request_metadata, dispatch_fragment_request)?;
+                                    process_nom_chunk_to_output(
+                                        chunk,
+                                        ctx,
+                                        output_writer,
+                                        original_request_metadata,
+                                        dispatch_fragment_request,
+                                    )?;
                                 }
                                 break;
                             }
@@ -207,7 +239,13 @@ fn process_nom_chunk_to_output(
 
                     if !chose_branch {
                         for chunk in otherwise_events {
-                            process_nom_chunk_to_output(chunk, ctx, output_writer, original_request_metadata, dispatch_fragment_request)?;
+                            process_nom_chunk_to_output(
+                                chunk,
+                                ctx,
+                                output_writer,
+                                original_request_metadata,
+                                dispatch_fragment_request,
+                            )?;
                         }
                     }
                     Ok(())
@@ -227,11 +265,11 @@ fn process_nom_chunk_to_output(
     }
 }
 
-// Simple nom expression evaluator 
+// Simple nom expression evaluator
 fn evaluate_simple_nom_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<String> {
-    use parser_types::Expr;
     use crate::expression::Value;
-    
+    use parser_types::Expr;
+
     match expr {
         Expr::Variable(name, key, _default) => {
             // Evaluate the key expression if present
@@ -242,9 +280,12 @@ fn evaluate_simple_nom_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> 
             } else {
                 None
             };
-            
+
             let value = ctx.get_variable(name, evaluated_key.as_deref());
-            eprintln!("DEBUG: Variable lookup: {}[{:?}] = {:?}", name, evaluated_key, value);
+            eprintln!(
+                "DEBUG: Variable lookup: {}[{:?}] = {:?}",
+                name, evaluated_key, value
+            );
             match value {
                 Value::Text(s) => Ok(s.to_string()),
                 _ => Ok(String::new()),
@@ -258,10 +299,15 @@ fn evaluate_simple_nom_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> 
                         let arg_str = evaluate_simple_nom_expr(arg.clone(), ctx)?;
                         Ok(arg_str.to_lowercase())
                     } else {
-                        Err(ESIError::FunctionError("lower function requires 1 argument".to_string()))
+                        Err(ESIError::FunctionError(
+                            "lower function requires 1 argument".to_string(),
+                        ))
                     }
                 }
-                _ => Err(ESIError::FunctionError(format!("Unknown function: {}", func_name)))
+                _ => Err(ESIError::FunctionError(format!(
+                    "Unknown function: {}",
+                    func_name
+                ))),
             }
         }
         Expr::String(Some(s)) => Ok(s.to_string()),
@@ -431,7 +477,6 @@ impl Processor {
         _dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
         _process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
-
         // If there is a source request to mimic, copy its metadata, otherwise use a default request.
         let original_request_metadata = self.original_request_metadata.as_ref().map_or_else(
             || Request::new(Method::GET, "http://localhost"),
@@ -440,22 +485,25 @@ impl Processor {
 
         // Read the entire document into a string for nom parser
         let mut doc_content = String::new();
-        src_document.read_to_string(&mut doc_content)
+        src_document
+            .read_to_string(&mut doc_content)
             .map_err(|e| ESIError::WriterError(e))?;
 
         // Parse the document using nom parser
         let (remaining, chunks) = new_parse::parse(&doc_content)
             .map_err(|e| ESIError::ExpressionError(format!("Nom parser error: {:?}", e)))?;
-        
+
         eprintln!("DEBUG: Parser returned {} chunks", chunks.len());
         for (i, chunk) in chunks.iter().enumerate() {
             eprintln!("DEBUG: Chunk[{}]: {:?}", i, chunk);
         }
-        
+
         // Log warning if parser didn't consume everything (may indicate unsupported features)
         if !remaining.is_empty() {
-            debug!("Parser did not consume all input. Remaining: '{}'", 
-                   remaining.chars().take(100).collect::<String>());
+            debug!(
+                "Parser did not consume all input. Remaining: '{}'",
+                remaining.chars().take(100).collect::<String>()
+            );
             eprintln!("DEBUG: Parser remaining: {:?}", remaining);
         }
 
@@ -465,7 +513,13 @@ impl Processor {
 
         // Process chunks directly to output
         for chunk in chunks {
-            process_nom_chunk_to_output(chunk, &mut ctx, output_writer, &original_request_metadata, _dispatch_fragment_request)?;
+            process_nom_chunk_to_output(
+                chunk,
+                &mut ctx,
+                output_writer,
+                &original_request_metadata,
+                _dispatch_fragment_request,
+            )?;
         }
 
         Ok(())
@@ -473,7 +527,7 @@ impl Processor {
 }
 
 // ============================================================================
-// Helper Functions  
+// Helper Functions
 // ============================================================================
 
 fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {

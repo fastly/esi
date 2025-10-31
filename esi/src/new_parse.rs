@@ -10,14 +10,10 @@ use nom::{AsChar, IResult};
 use crate::parser_types::*;
 
 pub fn parse(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
-    fold_many0(
-        chunk,
-        Vec::new,
-        |mut acc: Vec<Chunk>, mut item| {
-            acc.append(&mut item);
-            acc
-        },
-    )(input)
+    fold_many0(chunk, Vec::new, |mut acc: Vec<Chunk>, mut item| {
+        acc.append(&mut item);
+        acc
+    })(input)
 }
 
 fn chunk(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
@@ -128,12 +124,12 @@ fn esi_try(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
                 Chunk::Esi(Tag::Except(cs)) => {
                     except = Some(cs);
                 }
-                _ => {}  // Ignore content outside attempt/except blocks
+                _ => {} // Ignore content outside attempt/except blocks
             }
         }
-        vec![Chunk::Esi(Tag::Try { 
+        vec![Chunk::Esi(Tag::Try {
             attempt_events: attempts,
-            except_events: except.unwrap_or_default()
+            except_events: except.unwrap_or_default(),
         })]
     })(input)
 }
@@ -166,15 +162,17 @@ fn esi_when(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
             tag("</esi:when>"),
         )),
         |(attrs, content, _)| {
-            let test = attrs.iter()
+            let test = attrs
+                .iter()
                 .find(|(key, _)| *key == "test")
                 .map(|(_, val)| val.to_string())
                 .unwrap_or_else(|| String::new());
-            
-            let match_name = attrs.iter()
+
+            let match_name = attrs
+                .iter()
                 .find(|(key, _)| *key == "matchname")
                 .map(|(_, val)| val.to_string());
-            
+
             // Return the When tag followed by its content chunks as a marker
             let mut result = vec![Chunk::Esi(Tag::When { test, match_name })];
             result.extend(content);
@@ -192,7 +190,7 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
             let mut current_when_tag: Option<Tag> = None;
             let mut current_when_content: Vec<Chunk> = vec![];
             let mut in_otherwise = false;
-            
+
             for chunk in v {
                 match chunk {
                     Chunk::Esi(Tag::When { .. }) => {
@@ -227,15 +225,15 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
                     }
                 }
             }
-            
+
             // Don't forget the last when if there is one
             if let Some(when_tag) = current_when_tag {
                 when_branches.push((when_tag, current_when_content));
             }
-            
-            vec![Chunk::Esi(Tag::Choose { 
+
+            vec![Chunk::Esi(Tag::Choose {
                 when_branches,
-                otherwise_events
+                otherwise_events,
             })]
         },
     )(input)
@@ -245,7 +243,9 @@ fn esi_vars(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     alt((esi_vars_short, esi_vars_long))(input)
 }
 
-fn parse_vars_attributes<'a>(attrs: Vec<(&'a str, &'a str)>) -> Result<Vec<Chunk<'a>>, &'static str> {
+fn parse_vars_attributes<'a>(
+    attrs: Vec<(&'a str, &'a str)>,
+) -> Result<Vec<Chunk<'a>>, &'static str> {
     if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "name") {
         if let Ok((_, expr)) = expression(v) {
             Ok(expr)
@@ -262,7 +262,7 @@ fn esi_vars_short(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
         delimited(
             tag("<esi:vars"),
             attributes,
-            preceded(multispace0, tag("/>")),  // Short form must be self-closing per ESI spec
+            preceded(multispace0, tag("/>")), // Short form must be self-closing per ESI spec
         ),
         parse_vars_attributes,
     )(input)
@@ -290,7 +290,12 @@ fn esi_tag_non_vars(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
 // NOTE: Supports nested variable expressions like $(VAR{$(other)}) as of the nom migration
 fn parse_vars_content(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     fold_many0(
-        alt((interpolated_text, interpolated_expression, esi_tag_non_vars, html)),
+        alt((
+            interpolated_text,
+            interpolated_expression,
+            esi_tag_non_vars,
+            html,
+        )),
         Vec::new,
         |mut acc: Vec<Chunk>, mut item| {
             acc.append(&mut item);
@@ -356,7 +361,11 @@ fn esi_include(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
                     _ => {}
                 }
             }
-            vec![Chunk::Esi(Tag::Include { src, alt, continue_on_error })]
+            vec![Chunk::Esi(Tag::Include {
+                src,
+                alt,
+                continue_on_error,
+            })]
         },
     )(input)
 }
@@ -670,26 +679,18 @@ exception!
     fn test_new_parse_esi_vars_long() {
         // Nested <esi:vars> tags are not supported to prevent infinite recursion
         // The inner <esi:vars> tags should be treated as plain text/HTML
-        let (rest, x) = parse(
-            r#"<esi:vars>hello<br></esi:vars>"#,
-        ).unwrap();
+        let (rest, x) = parse(r#"<esi:vars>hello<br></esi:vars>"#).unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(
-            x,
-            [
-                Chunk::Text("hello"),
-                Chunk::Html("<br>"),
-            ]
-        );
+        assert_eq!(x, [Chunk::Text("hello"), Chunk::Html("<br>"),]);
     }
-    
+
     #[test]
     fn test_nested_vars_not_supported() {
         // This test documents that nested <esi:vars> are explicitly NOT supported
         // The inner <esi:vars> tag will be treated as text
         let input = r#"<esi:vars>outer<esi:vars>inner</esi:vars></esi:vars>"#;
         let result = parse(input);
-        
+
         // The parser should either:
         // 1. Fail to parse completely (leaving remainder), OR
         // 2. Parse the outer vars but treat inner vars as text
@@ -702,13 +703,18 @@ exception!
                     eprintln!("Parsed chunks: {:?}", chunks);
                     // We expect the text "outer<esi:vars>inner" to be captured somehow
                     assert!(
-                        chunks.iter().any(|c| matches!(c, Chunk::Text(t) if t.contains("inner"))),
+                        chunks
+                            .iter()
+                            .any(|c| matches!(c, Chunk::Text(t) if t.contains("inner"))),
                         "Inner <esi:vars> content should be present as text"
                     );
                 } else {
                     // Parser stopped early - this is acceptable behavior
                     eprintln!("Parser stopped with remaining: {:?}", rest);
-                    assert!(rest.contains("<esi:vars>"), "Remaining should include the problematic nested vars");
+                    assert!(
+                        rest.contains("<esi:vars>"),
+                        "Remaining should include the problematic nested vars"
+                    );
                 }
             }
             Err(e) => {
@@ -719,14 +725,19 @@ exception!
     }
     #[test]
     fn test_new_parse_complex_expr() {
-        let (rest, x) = parse(r#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#).unwrap();
+        let (rest, x) =
+            parse(r#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
             [Chunk::Expr(Expr::Comparison {
                 left: Box::new(Expr::Call("call", vec![Expr::String(Some("hello"))])),
                 operator: Operator::Matches,
-                right: Box::new(Expr::Variable("var", Some(Box::new(Expr::String(Some("key")))), None))
+                right: Box::new(Expr::Variable(
+                    "var",
+                    Some(Box::new(Expr::String(Some("key")))),
+                    None
+                ))
             })]
         );
     }
@@ -737,9 +748,18 @@ exception!
             $(QUERY_STRING{param})
         </esi:vars>"#;
         let result = esi_vars_long(input);
-        assert!(result.is_ok(), "esi_vars_long should parse successfully: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "esi_vars_long should parse successfully: {:?}",
+            result.err()
+        );
         let (rest, _chunks) = result.unwrap();
-        assert_eq!(rest.len(), 0, "Parser should consume all input. Remaining: '{}'", rest);
+        assert_eq!(
+            rest.len(),
+            0,
+            "Parser should consume all input. Remaining: '{}'",
+            rest
+        );
     }
 
     #[test]
@@ -755,7 +775,12 @@ exception!
         let (rest, chunks) = parse(input).unwrap();
         eprintln!("Chunks: {:?}", chunks);
         eprintln!("Remaining: {:?}", rest);
-        assert_eq!(rest.len(), 0, "Parser should consume all input. Remaining: '{}'", rest);
+        assert_eq!(
+            rest.len(),
+            0,
+            "Parser should consume all input. Remaining: '{}'",
+            rest
+        );
     }
 
     #[test]
@@ -784,7 +809,8 @@ exception!
     #[test]
     fn test_assign_then_vars() {
         // Test simple case without nested variables (which aren't supported yet)
-        let input = r#"<esi:assign name="key" value="'val'" /><esi:vars>$(QUERY_STRING{param})</esi:vars>"#;
+        let input =
+            r#"<esi:assign name="key" value="'val'" /><esi:vars>$(QUERY_STRING{param})</esi:vars>"#;
         let (rest, _chunks) = parse(input).unwrap();
         assert_eq!(rest.len(), 0);
     }
