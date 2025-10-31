@@ -1,13 +1,11 @@
 #![doc = include_str!("../README.md")]
 
 mod config;
-// mod document;  // Old quick_xml based code - not used by nom parser
 mod error;
 mod expression;
 mod functions;
-mod new_parse;
-// mod parse;  // Old quick_xml based code - not used by nom parser
-mod parser_types;
+mod parser;
+pub mod parser_types;
 
 use crate::expression::{try_evaluate_interpolated, EvalContext};
 use fastly::http::request::PendingRequest;
@@ -17,7 +15,7 @@ use log::{debug, error};
 use std::io::{BufRead, Write};
 
 pub use crate::error::{ExecutionError as ESIError, Result};
-pub use crate::new_parse::parse;
+pub use crate::parser::parse;
 
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;
@@ -490,7 +488,7 @@ impl Processor {
             .map_err(|e| ESIError::WriterError(e))?;
 
         // Parse the document using nom parser
-        let (remaining, chunks) = new_parse::parse(&doc_content)
+        let (remaining, chunks) = parser::parse(&doc_content)
             .map_err(|e| ESIError::ExpressionError(format!("Nom parser error: {:?}", e)))?;
 
         eprintln!("DEBUG: Parser returned {} chunks", chunks.len());
