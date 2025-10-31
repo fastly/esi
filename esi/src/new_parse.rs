@@ -1,8 +1,7 @@
 use nom::branch::alt;
-use nom::bytes::complete::is_not as complete_is_not;
-use nom::bytes::streaming::*;
-use nom::character::streaming::*;
-use nom::combinator::{complete, map, map_res, opt, peek, recognize, success, verify};
+use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_while1};
+use nom::character::complete::{alpha1, anychar, char, multispace0, multispace1};
+use nom::combinator::{map, map_res, opt, peek, recognize, success, verify};
 use nom::error::Error;
 use nom::multi::{fold_many0, length_data, many0, many1, many_till, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
@@ -12,7 +11,7 @@ use crate::parser_types::*;
 
 pub fn parse(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     fold_many0(
-        complete(chunk),
+        chunk,
         Vec::new,
         |mut acc: Vec<Chunk>, mut item| {
             acc.append(&mut item);
@@ -27,7 +26,7 @@ fn chunk(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
 
 fn parse_interpolated(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     fold_many0(
-        complete(interpolated_chunk),
+        interpolated_chunk,
         Vec::new,
         |mut acc: Vec<Chunk>, mut item| {
             acc.append(&mut item);
@@ -291,7 +290,7 @@ fn esi_tag_non_vars(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
 // NOTE: Supports nested variable expressions like $(VAR{$(other)}) as of the nom migration
 fn parse_vars_content(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     fold_many0(
-        complete(alt((interpolated_text, interpolated_expression, esi_tag_non_vars, html))),
+        alt((interpolated_text, interpolated_expression, esi_tag_non_vars, html)),
         Vec::new,
         |mut acc: Vec<Chunk>, mut item| {
             acc.append(&mut item);
@@ -419,12 +418,12 @@ fn start_tag(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     )(input)
 }
 fn text(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
-    map(recognize(many1(complete_is_not("<"))), |s: &str| {
+    map(recognize(many1(is_not("<"))), |s: &str| {
         vec![Chunk::Text(s)]
     })(input)
 }
 fn interpolated_text(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
-    map(recognize(many1(complete_is_not("<$"))), |s: &str| {
+    map(recognize(many1(is_not("<$"))), |s: &str| {
         vec![Chunk::Text(s)]
     })(input)
 }
