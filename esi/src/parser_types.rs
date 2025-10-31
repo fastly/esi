@@ -6,7 +6,7 @@ pub enum Tag<'a> {
         continue_on_error: bool,
     },
     Try {
-        attempt_events: Vec<Chunk<'a>>,
+        attempt_events: Vec<Vec<Chunk<'a>>>,
         except_events: Vec<Chunk<'a>>,
     },
     Assign {

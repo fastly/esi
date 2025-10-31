@@ -129,11 +129,11 @@ fn esi_try(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
                 Chunk::Esi(Tag::Except(cs)) => {
                     except = Some(cs);
                 }
-                _ => {}
+                _ => {}  // Ignore content outside attempt/except blocks
             }
         }
         vec![Chunk::Esi(Tag::Try { 
-            attempt_events: attempts.into_iter().flatten().collect(), 
+            attempt_events: attempts,
             except_events: except.unwrap_or_default()
         })]
     })(input)
