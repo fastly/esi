@@ -21,11 +21,11 @@ pub fn parse(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     )(input)
 }
 
-fn chunk(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn chunk(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     alt((text, esi_tag, html))(input)
 }
 
-fn parse_interpolated(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn parse_interpolated(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     fold_many0(
         complete(interpolated_chunk),
         Vec::new,
@@ -36,11 +36,11 @@ fn parse_interpolated(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     )(input)
 }
 
-fn interpolated_chunk(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn interpolated_chunk(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     alt((interpolated_text, interpolated_expression, esi_tag, html))(input)
 }
 
-fn esi_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_tag(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     alt((
         esi_assign,
         esi_include,
@@ -57,7 +57,7 @@ fn esi_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     ))(input)
 }
 
-fn esi_assign(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_assign(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     alt((esi_assign_short, esi_assign_long))(input)
 }
 
@@ -74,7 +74,7 @@ fn parse_assign_attributes<'a>(attrs: Vec<(&'a str, &'a str)>) -> Vec<Chunk<'a>>
     vec![Chunk::Esi(Tag::Assign { name, value })]
 }
 
-fn esi_assign_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_assign_short(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         delimited(
             tag("<esi:assign"),
@@ -85,7 +85,7 @@ fn esi_assign_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     )(input)
 }
 
-fn esi_assign_long(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_assign_long(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         tuple((
             delimited(
@@ -99,7 +99,7 @@ fn esi_assign_long(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
         |(attrs, _chunks, _)| parse_assign_attributes(attrs),
     )(input)
 }
-fn esi_except(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_except(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         delimited(
             tag("<esi:except>"),
@@ -109,7 +109,7 @@ fn esi_except(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
         |v| vec![Chunk::Esi(Tag::Except(v))],
     )(input)
 }
-fn esi_attempt(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_attempt(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         delimited(
             tag("<esi:attempt>"),
@@ -119,7 +119,7 @@ fn esi_attempt(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
         |v| vec![Chunk::Esi(Tag::Attempt(v))],
     )(input)
 }
-fn esi_try(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_try(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(delimited(tag("<esi:try>"), parse, tag("</esi:try>")), |v| {
         let mut attempts = vec![];
         let mut except = None;
@@ -139,7 +139,7 @@ fn esi_try(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     })(input)
 }
 
-fn esi_otherwise(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_otherwise(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         delimited(
             tag("<esi:otherwise>"),
@@ -150,7 +150,7 @@ fn esi_otherwise(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     )(input)
 }
 
-fn esi_when(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_when(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         tuple((
             delimited(
@@ -161,7 +161,7 @@ fn esi_when(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             parse_interpolated,
             tag("</esi:when>"),
         )),
-        |(attrs, content, _)| {
+        |(attrs, _content, _)| {
             let test = attrs.iter()
                 .find(|(key, _)| *key == "test")
                 .map(|(_, val)| val.to_string())
@@ -176,7 +176,7 @@ fn esi_when(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     )(input)
 }
 
-fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         delimited(tag("<esi:choose>"), parse, tag("</esi:choose>")),
         |v| {
@@ -205,7 +205,7 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     )(input)
 }
 
-fn esi_vars(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_vars(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     alt((esi_vars_short, esi_vars_long))(input)
 }
 
@@ -221,7 +221,7 @@ fn parse_vars_attributes<'a>(attrs: Vec<(&'a str, &'a str)>) -> Result<Vec<Chunk
     }
 }
 
-fn esi_vars_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_vars_short(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map_res(
         delimited(
             tag("<esi:vars"),
@@ -232,14 +232,14 @@ fn esi_vars_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     )(input)
 }
 
-fn esi_vars_long(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_vars_long(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         delimited(tag("<esi:vars>"), parse_interpolated, tag("</esi:vars>")),
         |v| v,
     )(input)
 }
 
-fn esi_comment(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_comment(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         delimited(
             tag("<esi:comment"),
@@ -249,14 +249,14 @@ fn esi_comment(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
         |_| vec![],
     )(input)
 }
-fn esi_remove(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_remove(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         delimited(tag("<esi:remove>"), parse, tag("</esi:remove>")),
         |_| vec![],
     )(input)
 }
 
-fn esi_text(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_text(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         tuple((
             tag("<esi:text>"),
@@ -269,7 +269,7 @@ fn esi_text(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
         |(_, v, _)| vec![Chunk::Text(v)],
     )(input)
 }
-fn esi_include(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn esi_include(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         delimited(
             tag("<esi:include"),
@@ -305,11 +305,11 @@ fn htmlstring(input: &str) -> IResult<&str, &str, Error<&str>> {
     delimited(char('"'), is_not("\""), char('"'))(input) // TODO: obviously wrong
 }
 
-fn html(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn html(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     alt((script, end_tag, start_tag))(input)
 }
 
-fn script(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn script(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         tuple((
             recognize(verify(
@@ -330,7 +330,7 @@ fn script(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     )(input)
 }
 
-fn end_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn end_tag(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         verify(
             recognize(delimited(tag("</"), is_not(">"), char('>'))),
@@ -340,7 +340,7 @@ fn end_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     )(input)
 }
 
-fn start_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn start_tag(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(
         verify(
             recognize(delimited(char('<'), is_not(">"), char('>'))),
@@ -349,12 +349,12 @@ fn start_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
         |s: &str| vec![Chunk::Html(s)],
     )(input)
 }
-fn text(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn text(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(recognize(many1(complete_is_not("<"))), |s: &str| {
         vec![Chunk::Text(s)]
     })(input)
 }
-fn interpolated_text(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn interpolated_text(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(recognize(many1(complete_is_not("<$"))), |s: &str| {
         vec![Chunk::Text(s)]
     })(input)
@@ -372,7 +372,7 @@ fn fn_name(input: &str) -> IResult<&str, &str, Error<&str>> {
     preceded(char('$'), take_while1(is_lower_alphanumeric_or_underscore))(input)
 }
 
-fn var_name(input: &str) -> IResult<&str, (&str, Option<&str>, Option<Expr>), Error<&str>> {
+fn var_name(input: &str) -> IResult<&str, (&str, Option<&str>, Option<Expr<'_>>), Error<&str>> {
     tuple((
         take_while1(is_alphanumeric_or_underscore),
         opt(delimited(char('{'), var_key, char('}'))),
@@ -400,7 +400,7 @@ fn triple_quoted_string(input: &str) -> IResult<&str, &str, Error<&str>> {
     )(input)
 }
 
-fn string(input: &str) -> IResult<&str, Expr, Error<&str>> {
+fn string(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
     map(
         alt((single_quoted_string, triple_quoted_string)),
         |string| {
@@ -421,7 +421,7 @@ fn var_key(input: &str) -> IResult<&str, &str, Error<&str>> {
     ))(input)
 }
 
-fn fn_argument(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
+fn fn_argument(input: &str) -> IResult<&str, Vec<Expr<'_>>, Error<&str>> {
     let (input, mut parsed) = separated_list0(
         tuple((multispace0, char(','), multispace0)),
         fn_nested_argument,
@@ -434,17 +434,17 @@ fn fn_argument(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
     Ok((input, parsed))
 }
 
-fn fn_nested_argument(input: &str) -> IResult<&str, Expr, Error<&str>> {
+fn fn_nested_argument(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
     alt((call, variable, string, bareword))(input)
 }
 
-fn bareword(input: &str) -> IResult<&str, Expr, Error<&str>> {
+fn bareword(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
     map(take_while1(is_alphanumeric_or_underscore), |name: &str| {
         Expr::Variable(name, None, None)
     })(input)
 }
 
-fn call(input: &str) -> IResult<&str, Expr, Error<&str>> {
+fn call(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
     let (input, parsed) = tuple((
         fn_name,
         delimited(
@@ -459,7 +459,7 @@ fn call(input: &str) -> IResult<&str, Expr, Error<&str>> {
     Ok((input, Expr::Call(name, args)))
 }
 
-fn variable(input: &str) -> IResult<&str, Expr, Error<&str>> {
+fn variable(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
     let (input, parsed) = delimited(tag("$("), var_name, char(')'))(input)?;
 
     let (name, key, default) = parsed;
@@ -479,11 +479,11 @@ fn operator(input: &str) -> IResult<&str, Operator, Error<&str>> {
     )(input)
 }
 
-fn interpolated_expression(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn interpolated_expression(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(alt((call, variable)), |expr| vec![Chunk::Expr(expr)])(input)
 }
 
-fn expr(input: &str) -> IResult<&str, Expr, Error<&str>> {
+fn expr(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
     let (rest, exp) = alt((call, variable, string))(input)?;
 
     if let Ok((rest, (operator, right_exp))) =
@@ -501,7 +501,7 @@ fn expr(input: &str) -> IResult<&str, Expr, Error<&str>> {
         Ok((rest, exp))
     }
 }
-fn expression(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+fn expression(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(expr, |x| vec![Chunk::Expr(x)])(input)
 }
 

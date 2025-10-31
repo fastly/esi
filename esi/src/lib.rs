@@ -16,7 +16,7 @@ use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
 use log::{debug, error, trace};
 use std::collections::VecDeque;
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 
 pub use crate::document::{Element, Fragment};
 pub use crate::error::{ExecutionError as ESIError, Result};
