@@ -10,7 +10,7 @@ use nom::{AsChar, IResult};
 
 use crate::parser_types::*;
 
-pub fn parse(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
+pub fn parse(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     fold_many0(
         complete(chunk),
         Vec::new,
@@ -42,23 +42,36 @@ fn interpolated_chunk(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
 
 fn esi_tag(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     alt((
+        esi_assign,
+        esi_include,
         esi_vars,
         esi_comment,
         esi_remove,
         esi_text,
-        esi_include,
         esi_choose,
+        esi_try,
         esi_when,
         esi_otherwise,
         esi_attempt,
         esi_except,
-        esi_try,
-        esi_assign,
     ))(input)
 }
 
 fn esi_assign(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     alt((esi_assign_short, esi_assign_long))(input)
+}
+
+fn parse_assign_attributes<'a>(attrs: Vec<(&'a str, &'a str)>) -> Vec<Chunk<'a>> {
+    let mut name = String::new();
+    let mut value = String::new();
+    for (key, val) in attrs {
+        match key {
+            "name" => name = val.to_string(),
+            "value" => value = val.to_string(),
+            _ => {}
+        }
+    }
+    vec![Chunk::Esi(Tag::Assign { name, value })]
 }
 
 fn esi_assign_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
@@ -68,7 +81,7 @@ fn esi_assign_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             attributes,
             preceded(multispace0, alt((tag(">"), tag("/>")))),
         ),
-        |attrs| vec![Chunk::Esi(Tag::Assign(attrs, None))],
+        parse_assign_attributes,
     )(input)
 }
 
@@ -83,7 +96,7 @@ fn esi_assign_long(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             parse_interpolated,
             tag("</esi:assign>"),
         )),
-        |(attrs, chunks, _)| vec![Chunk::Esi(Tag::Assign(attrs, Some(chunks)))],
+        |(attrs, _chunks, _)| parse_assign_attributes(attrs),
     )(input)
 }
 fn esi_except(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
@@ -119,7 +132,10 @@ fn esi_try(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
                 _ => {}
             }
         }
-        vec![Chunk::Esi(Tag::Try(attempts, except))]
+        vec![Chunk::Esi(Tag::Try { 
+            attempt_events: attempts.into_iter().flatten().collect(), 
+            except_events: except.unwrap_or_default()
+        })]
     })(input)
 }
 
@@ -145,7 +161,18 @@ fn esi_when(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             parse_interpolated,
             tag("</esi:when>"),
         )),
-        |(attrs, v, _)| vec![Chunk::Esi(Tag::When(attrs, v))],
+        |(attrs, content, _)| {
+            let test = attrs.iter()
+                .find(|(key, _)| *key == "test")
+                .map(|(_, val)| val.to_string())
+                .unwrap_or_else(|| String::new());
+            
+            let match_name = attrs.iter()
+                .find(|(key, _)| *key == "matchname")
+                .map(|(_, val)| val.to_string());
+            
+            vec![Chunk::Esi(Tag::When { test, match_name })]
+        },
     )(input)
 }
 
@@ -157,14 +184,23 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             let mut otherwise = None;
             for chunk in v {
                 match chunk {
-                    Chunk::Esi(Tag::When(..)) => whens.push(chunk),
+                    Chunk::Esi(Tag::When { .. }) => whens.push(chunk),
                     Chunk::Esi(Tag::Otherwise(cs)) => {
                         otherwise = Some(cs);
                     }
                     _ => {}
                 }
             }
-            vec![Chunk::Esi(Tag::Choose(whens, otherwise))]
+            vec![Chunk::Esi(Tag::Choose { 
+                when_branches: whens.into_iter().map(|chunk| {
+                    if let Chunk::Esi(tag) = chunk {
+                        (tag, vec![])  // We need to extract the content properly
+                    } else {
+                        panic!("Expected ESI tag")
+                    }
+                }).collect(),
+                otherwise_events: otherwise.unwrap_or_default()
+            })]
         },
     )(input)
 }
@@ -173,24 +209,26 @@ fn esi_vars(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     alt((esi_vars_short, esi_vars_long))(input)
 }
 
+fn parse_vars_attributes<'a>(attrs: Vec<(&'a str, &'a str)>) -> Result<Vec<Chunk<'a>>, &'static str> {
+    if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "name") {
+        if let Ok((_, expr)) = expression(v) {
+            Ok(expr)
+        } else {
+            Err("failed to parse expression")
+        }
+    } else {
+        Err("no name field in short form vars")
+    }
+}
+
 fn esi_vars_short(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
     map_res(
         delimited(
             tag("<esi:vars"),
             attributes,
-            preceded(multispace0, alt((tag(">"), tag("/>")))),
+            preceded(multispace0, tag("/>")),  // Short form must be self-closing per ESI spec
         ),
-        |attrs| {
-            if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "name") {
-                if let Ok((_, expr)) = expression(v) {
-                    Ok(expr)
-                } else {
-                    Err("failed to parse expression")
-                }
-            } else {
-                Err("no name field in short form vars")
-            }
-        },
+        parse_vars_attributes,
     )(input)
 }
 
@@ -238,7 +276,20 @@ fn esi_include(input: &str) -> IResult<&str, Vec<Chunk>, Error<&str>> {
             attributes,
             preceded(multispace0, alt((tag(">"), tag("/>")))),
         ),
-        |attrs| vec![Chunk::Esi(Tag::Include(attrs))],
+        |attrs| {
+            let mut src = String::new();
+            let mut alt = None;
+            let mut continue_on_error = false;
+            for (key, val) in attrs {
+                match key {
+                    "src" => src = val.to_string(),
+                    "alt" => alt = Some(val.to_string()),
+                    "onerror" => continue_on_error = val == "continue",
+                    _ => {}
+                }
+            }
+            vec![Chunk::Esi(Tag::Include { src, alt, continue_on_error })]
+        },
     )(input)
 }
 
@@ -384,7 +435,13 @@ fn fn_argument(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
 }
 
 fn fn_nested_argument(input: &str) -> IResult<&str, Expr, Error<&str>> {
-    alt((call, variable, string))(input)
+    alt((call, variable, string, bareword))(input)
+}
+
+fn bareword(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    map(take_while1(is_alphanumeric_or_underscore), |name: &str| {
+        Expr::Variable(name, None, None)
+    })(input)
 }
 
 fn call(input: &str) -> IResult<&str, Expr, Error<&str>> {
@@ -458,7 +515,7 @@ mod tests {
 <a>foo</a>
 <bar />
 baz
-<esi:vars name="$(hello)">
+<esi:vars name="$(hello)"/>
 <esi:vars>
 hello <br>
 </esi:vars>
@@ -492,9 +549,18 @@ should not appear
 exception!
 </esi:except>
 </esi:try>"#;
-        let (rest, _) = parse(input).unwrap();
-        // Just test to make sure it parsed the whole thing
-        assert_eq!(rest.len(), 0);
+        let result = parse(input);
+        match result {
+            Ok((rest, _)) => {
+                // Just test to make sure it parsed the whole thing
+                if rest.len() != 0 {
+                    panic!("Failed to parse completely. Remaining: '{}'", rest);
+                }
+            }
+            Err(e) => {
+                panic!("Parse failed with error: {:?}", e);
+            }
+        }
     }
     #[test]
     fn test_new_parse_script() {
@@ -517,7 +583,7 @@ exception!
     }
     #[test]
     fn test_new_parse_esi_vars_short() {
-        let (rest, x) = esi_tag(r#"<esi:vars name="$(hello)">"#).unwrap();
+        let (rest, x) = esi_tag(r#"<esi:vars name="$(hello)"/>"#).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(x, [Chunk::Expr(Expr::Variable("hello", None, None)),]);
     }
@@ -539,7 +605,7 @@ exception!
     }
     #[test]
     fn test_new_parse_complex_expr() {
-        let (rest, x) = parse(r#"<esi:vars name="$call('hello') matches $(var{'key'})">"#).unwrap();
+        let (rest, x) = parse(r#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,

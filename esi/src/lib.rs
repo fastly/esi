@@ -16,10 +16,10 @@ use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Body, Request, Response};
 use log::{debug, error, trace};
 use std::collections::VecDeque;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 
 pub use crate::document::{Element, Fragment};
-pub use crate::error::Result;
+pub use crate::error::{ExecutionError as ESIError, Result};
 pub use crate::new_parse::parse;
 pub use crate::parse::{parse_tags, Event, Include, Tag, Tag::Try};
 
@@ -49,6 +49,261 @@ impl From<PendingRequest> for PendingFragmentContent {
 impl From<Response> for PendingFragmentContent {
     fn from(value: Response) -> Self {
         Self::CompletedRequest(value)
+    }
+}
+
+// Process nom parser chunks directly to output - with fragment request support
+fn process_nom_chunk_to_output(
+    chunk: parser_types::Chunk, 
+    ctx: &mut EvalContext,
+    output_writer: &mut Writer<impl Write>,
+    original_request_metadata: &Request,
+    dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
+) -> Result<()> {
+    use parser_types::{Chunk, Tag as NomTag};
+
+    eprintln!("DEBUG: Processing chunk: {:?}", chunk);
+    match chunk {
+        Chunk::Text(text) => {
+            output_writer.write_event(quick_xml::events::Event::Text(
+                quick_xml::events::BytesText::new(text)
+            )).map_err(ESIError::WriterError)?;
+            Ok(())
+        }
+        Chunk::Html(html) => {
+            output_writer.write_event(quick_xml::events::Event::Text(
+                quick_xml::events::BytesText::new(html)
+            )).map_err(ESIError::WriterError)?;
+            Ok(())
+        }
+        Chunk::Expr(expr) => {
+            // Evaluate the expression and write as text
+            eprintln!("DEBUG: Evaluating expression: {:?}", expr);
+            match evaluate_simple_nom_expr(expr, ctx) {
+                Ok(result) => {
+                    eprintln!("DEBUG: Expression evaluated to: '{}'", result);
+                    if !result.is_empty() {
+                        output_writer.write_event(quick_xml::events::Event::Text(
+                            quick_xml::events::BytesText::new(&result)
+                        )).map_err(ESIError::WriterError)?;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("DEBUG: Expression evaluation failed: {:?}", e);
+                }
+            }
+            // Swallow errors as intended for expressions
+            Ok(())
+        }
+        Chunk::Esi(tag) => {
+            match tag {
+                NomTag::Assign { name, value } => {
+                    // Handle esi:assign tags - evaluate the value expression and set variable
+                    //First, check if the value is a quoted string literal and strip quotes
+                    let trimmed = value.trim();
+                    let unquoted_value = if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
+                        // Single-quoted string: strip quotes
+                        trimmed[1..trimmed.len()-1].to_string()
+                    } else if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+                        // Double-quoted string: strip quotes
+                        trimmed[1..trimmed.len()-1].to_string()
+                    } else {
+                        value.clone()
+                    };
+                    
+                    // Evaluate the value as an ESI expression
+                    let evaluated_value = crate::expression::evaluate_expression(&unquoted_value, ctx)
+                        .map(|v| v.to_string())
+                        .unwrap_or(unquoted_value);
+                    
+                    ctx.set_variable(&name, None, crate::expression::Value::Text(evaluated_value.into()));
+                    Ok(())
+                }
+                NomTag::Include { src, alt, continue_on_error } => {
+                    if let Some(dispatcher) = dispatch_fragment_request {
+                        // Handle esi:include tags - evaluate expressions and build fragment request
+                        debug!("Handling <esi:include> tag with src: {}", src);
+                        
+                        // Always interpolate src
+                        let interpolated_src = try_evaluate_interpolated_string(&src, ctx)?;
+
+                        // Build fragment request
+                        let req = build_fragment_request(
+                            original_request_metadata.clone_without_body(),
+                            &interpolated_src,
+                            false // assume not escaped for now
+                        )?;
+                        
+                        match dispatcher(req) {
+                            Ok(pending_content) => {
+                                // Process the fragment content directly
+                                match pending_content {
+                                    crate::PendingFragmentContent::CompletedRequest(response) => {
+                                        // Write the response body directly to output
+                                        let body_bytes = response.into_body_bytes();
+                                        let body_str = std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
+                                        output_writer.write_event(quick_xml::events::Event::Text(
+                                            quick_xml::events::BytesText::new(body_str)
+                                        )).map_err(ESIError::WriterError)?;
+                                    }
+                                    crate::PendingFragmentContent::PendingRequest(_) => {
+                                        // For pending requests, just output a placeholder for now
+                                        output_writer.write_event(quick_xml::events::Event::Text(
+                                            quick_xml::events::BytesText::new("<!-- pending request -->")
+                                        )).map_err(ESIError::WriterError)?;
+                                    }
+                                    crate::PendingFragmentContent::NoContent => {
+                                        // No content to output
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                if continue_on_error {
+                                    // Try alt if available
+                                    if let Some(alt_src) = &alt {
+                                        let interpolated_alt = try_evaluate_interpolated_string(alt_src, ctx)?;
+                                        let alt_req = build_fragment_request(
+                                            original_request_metadata.clone_without_body(),
+                                            &interpolated_alt,
+                                            false
+                                        )?;
+                                        match dispatcher(alt_req) {
+                                            Ok(pending_content) => {
+                                                match pending_content {
+                                                    crate::PendingFragmentContent::CompletedRequest(response) => {
+                                                        let body_bytes = response.into_body_bytes();
+                                                        let body_str = std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
+                                                        output_writer.write_event(quick_xml::events::Event::Text(
+                                                            quick_xml::events::BytesText::new(body_str)
+                                                        )).map_err(ESIError::WriterError)?;
+                                                    }
+                                                    crate::PendingFragmentContent::PendingRequest(_) => {
+                                                        output_writer.write_event(quick_xml::events::Event::Text(
+                                                            quick_xml::events::BytesText::new("<!-- pending alt request -->")
+                                                        )).map_err(ESIError::WriterError)?;
+                                                    }
+                                                    crate::PendingFragmentContent::NoContent => {
+                                                        // No alt content to output
+                                                    }
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // Both main and alt failed, but continue-on-error is set
+                                                output_writer.write_event(quick_xml::events::Event::Text(
+                                                    quick_xml::events::BytesText::new("<!-- fragment request failed -->")
+                                                )).map_err(ESIError::WriterError)?;
+                                            }
+                                        }
+                                    } else {
+                                        // No alt, but continue on error
+                                        output_writer.write_event(quick_xml::events::Event::Text(
+                                            quick_xml::events::BytesText::new("<!-- fragment request failed -->")
+                                        )).map_err(ESIError::WriterError)?;
+                                    }
+                                } else {
+                                    return Err(ESIError::ExpressionError(format!("Fragment request failed: {}", err)));
+                                }
+                            }
+                        }
+                    } else {
+                        // No fragment dispatcher available, output placeholder
+                        output_writer.write_event(quick_xml::events::Event::Text(
+                            quick_xml::events::BytesText::new("<!-- ESI include not supported -->")
+                        )).map_err(ESIError::WriterError)?;
+                    }
+                    Ok(())
+                }
+                NomTag::Choose { when_branches, otherwise_events } => {
+                    // Handle esi:choose/when/otherwise logic - ported from main branch
+                    let mut chose_branch = false;
+                    for (when_tag, events) in when_branches {
+                        if let NomTag::When { test, match_name } = when_tag {
+                            if let Some(match_name) = match_name {
+                                ctx.set_match_name(&match_name);
+                            }
+                            let result = crate::expression::evaluate_expression(&test, ctx)?;
+                            if result.to_bool() {
+                                chose_branch = true;
+                                for chunk in events {
+                                    process_nom_chunk_to_output(chunk, ctx, output_writer, original_request_metadata, dispatch_fragment_request)?;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    if !chose_branch {
+                        for chunk in otherwise_events {
+                            process_nom_chunk_to_output(chunk, ctx, output_writer, original_request_metadata, dispatch_fragment_request)?;
+                        }
+                    }
+                    Ok(())
+                }
+                NomTag::Vars { name: _ } => {
+                    // For now, just output placeholder - this needs to be handled properly
+                    output_writer.write_event(quick_xml::events::Event::Text(
+                        quick_xml::events::BytesText::new("<!-- ESI vars placeholder -->")
+                    )).map_err(ESIError::WriterError)?;
+                    Ok(())
+                }
+                _ => {
+                    // Handle other tag types as placeholders for now
+                    output_writer.write_event(quick_xml::events::Event::Text(
+                        quick_xml::events::BytesText::new("<!-- ESI tag not implemented -->")
+                    )).map_err(ESIError::WriterError)?;
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+// Simple nom expression evaluator 
+fn evaluate_simple_nom_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<String> {
+    use parser_types::Expr;
+    use crate::expression::Value;
+    
+    match expr {
+        Expr::Variable(name, key, _default) => {
+            // Evaluate the key if it contains expressions
+            let evaluated_key = if let Some(key_str) = key {
+                // If the key contains $(, it's an expression that needs to be evaluated
+                if key_str.contains("$(") {
+                    match try_evaluate_interpolated_string(key_str, ctx) {
+                        Ok(evaluated) => Some(evaluated),
+                        Err(_) => Some(key_str.to_string()), // Fall back to literal key if evaluation fails
+                    }
+                } else {
+                    Some(key_str.to_string())
+                }
+            } else {
+                None
+            };
+            
+            let value = ctx.get_variable(name, evaluated_key.as_deref());
+            eprintln!("DEBUG: Variable lookup: {}[{:?}] = {:?}", name, evaluated_key, value);
+            match value {
+                Value::Text(s) => Ok(s.to_string()),
+                _ => Ok(String::new()),
+            }
+        }
+        Expr::Call(func_name, args) => {
+            // Simple function calls - only handle the basic ones
+            match func_name {
+                "lower" => {
+                    if let Some(arg) = args.first() {
+                        let arg_str = evaluate_simple_nom_expr(arg.clone(), ctx)?;
+                        Ok(arg_str.to_lowercase())
+                    } else {
+                        Err(ESIError::FunctionError("lower function requires 1 argument".to_string()))
+                    }
+                }
+                _ => Err(ESIError::FunctionError(format!("Unknown function: {}", func_name)))
+            }
+        }
+        Expr::String(Some(s)) => Ok(s.to_string()),
+        Expr::String(None) => Ok(String::new()),
+        _ => Ok(String::new()),
     }
 }
 
@@ -325,14 +580,11 @@ impl Processor {
     /// * Output writing fails
     pub fn process_document(
         self,
-        mut src_document: Reader<impl BufRead>,
+        src_document: Reader<impl BufRead>,
         output_writer: &mut Writer<impl Write>,
-        dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
-        process_fragment_response: Option<&FragmentResponseProcessor>,
+        _dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
+        _process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
-        // Set up fragment request dispatcher. Use what's provided or use a default
-        let dispatch_fragment_request =
-            dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
 
         // If there is a source request to mimic, copy its metadata, otherwise use a default request.
         let original_request_metadata = self.original_request_metadata.as_ref().map_or_else(
@@ -340,37 +592,28 @@ impl Processor {
             Request::clone_without_body,
         );
 
-        // `root_task` is the root task that will be used to fetch tags in recursive manner
-        let root_task = &mut Task::new();
+        // Read the entire document into a string for nom parser
+        let mut doc_content = String::new();
+        src_document.into_inner().read_to_string(&mut doc_content)
+            .map_err(|e| ESIError::WriterError(e))?;
+
+        // Parse the document using nom parser
+        eprintln!("DEBUG: Document content to parse: '{}'", doc_content);
+        let chunks = new_parse::parse(&doc_content)
+            .map_err(|e| ESIError::ExpressionError(format!("Nom parser error: {:?}", e)))?
+            .1;
+        eprintln!("DEBUG: Parsed chunks: {:?}", chunks);
 
         // context for the interpreter
         let mut ctx = EvalContext::new();
         ctx.set_request(original_request_metadata.clone_without_body());
 
-        // Call the library to parse fn `parse_tags` which will call the callback function
-        // on each tag / event it finds in the document.
-        // The callback function `handle_events` will handle the event.
-        parse_tags(
-            &self.configuration.namespace,
-            &mut src_document,
-            &mut |event| {
-                event_receiver(
-                    event,
-                    &mut root_task.queue,
-                    self.configuration.is_escaped_content,
-                    &original_request_metadata,
-                    dispatch_fragment_request,
-                    &mut ctx,
-                )
-            },
-        )?;
+        // Process chunks directly to output
+        for chunk in chunks {
+            process_nom_chunk_to_output(chunk, &mut ctx, output_writer, &original_request_metadata, _dispatch_fragment_request)?;
+        }
 
-        Self::process_root_task(
-            root_task,
-            output_writer,
-            dispatch_fragment_request,
-            process_fragment_response,
-        )
+        Ok(())
     }
 
     fn process_root_task(

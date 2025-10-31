@@ -405,7 +405,7 @@ fn parse(tokens: &[Token]) -> Result<Expr> {
 }
 
 fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
-    println!("Parsing expression, current token: {cur:?}");
+    debug!("Parsing expression, current token: {cur:?}");
     let node = if let Some(token) = cur.next() {
         match token {
             Token::Integer(i) => Expr::Integer(*i),
