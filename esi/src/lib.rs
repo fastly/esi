@@ -50,6 +50,7 @@ fn process_nom_chunk_to_output(
     output_writer: &mut impl Write,
     original_request_metadata: &Request,
     dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
+    is_escaped_content: bool,
 ) -> Result<()> {
     use parser_types::{Chunk, Tag as NomTag};
 
@@ -131,7 +132,7 @@ fn process_nom_chunk_to_output(
                         let req = build_fragment_request(
                             original_request_metadata.clone_without_body(),
                             &interpolated_src,
-                            false, // assume not escaped for now
+                            is_escaped_content,
                         )?;
 
                         match dispatcher(req) {
@@ -163,7 +164,7 @@ fn process_nom_chunk_to_output(
                                         let alt_req = build_fragment_request(
                                             original_request_metadata.clone_without_body(),
                                             &interpolated_alt,
-                                            false,
+                                            is_escaped_content,
                                         )?;
                                         match dispatcher(alt_req) {
                                             Ok(pending_content) => {
@@ -228,6 +229,7 @@ fn process_nom_chunk_to_output(
                                         output_writer,
                                         original_request_metadata,
                                         dispatch_fragment_request,
+                                        is_escaped_content,
                                     )?;
                                 }
                                 break;
@@ -243,6 +245,7 @@ fn process_nom_chunk_to_output(
                                 output_writer,
                                 original_request_metadata,
                                 dispatch_fragment_request,
+                                is_escaped_content,
                             )?;
                         }
                     }
@@ -555,7 +558,7 @@ impl Processor {
                     let req = build_fragment_request(
                         original_request_metadata.clone_without_body(),
                         &interpolated_src,
-                        false,
+                        self.configuration.is_escaped_content,
                     )?;
 
                     match dispatcher(req) {
@@ -603,7 +606,7 @@ impl Processor {
                     let alt_req = build_fragment_request(
                         original_request_metadata.clone_without_body(),
                         &interpolated_alt,
-                        false,
+                        self.configuration.is_escaped_content,
                     )?;
 
                     match dispatcher(alt_req) {
@@ -665,6 +668,7 @@ impl Processor {
                     output_writer,
                     &original_request_metadata,
                     None, // Don't dispatch fragments here - already done in phase 1
+                    self.configuration.is_escaped_content,
                 )?;
             }
         }
