@@ -145,6 +145,26 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
             let inner_value = eval_expr(*expr, ctx)?;
             Ok(Value::Boolean(!inner_value.to_bool()))
         }
+        parser_types::Expr::Interpolated(elements) => {
+            // Evaluate each element and concatenate the results
+            // This handles compound expressions like: prefix$(VAR)suffix
+            let mut result = String::new();
+            for element in elements {
+                match element {
+                    parser_types::Element::Text(text) => result.push_str(text),
+                    parser_types::Element::Html(html) => result.push_str(html),
+                    parser_types::Element::Expr(expr) => {
+                        let value = eval_expr(expr, ctx)?;
+                        result.push_str(&value.to_string());
+                    }
+                    parser_types::Element::Esi(_) => {
+                        // ESI tags in interpolated expressions should not happen
+                        // but if they do, ignore them
+                    }
+                }
+            }
+            Ok(Value::Text(Cow::Owned(result)))
+        }
     }
 }
 

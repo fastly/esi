@@ -45,26 +45,27 @@ impl From<Response> for PendingFragmentContent {
 
 // Process parser chunks directly to output - with fragment request support
 fn process_chunk_to_output(
-    chunk: parser_types::Chunk,
+    chunk: parser_types::Element,
     ctx: &mut EvalContext,
     output_writer: &mut impl Write,
     original_request_metadata: &Request,
-    dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
+    dispatch_fragment_request: &FragmentRequestDispatcher,
+    process_fragment_response: Option<&FragmentResponseProcessor>,
     is_escaped_content: bool,
 ) -> Result<()> {
-    use parser_types::{Chunk, Tag as NomTag};
+    use parser_types::{Element, Tag as NomTag};
 
     eprintln!("DEBUG: Processing chunk: {:?}", chunk);
     match chunk {
-        Chunk::Text(text) => {
+        Element::Text(text) => {
             output_writer.write_all(text.as_bytes())?;
             Ok(())
         }
-        Chunk::Html(html) => {
+        Element::Html(html) => {
             output_writer.write_all(html.as_bytes())?;
             Ok(())
         }
-        Chunk::Expr(expr) => {
+        Element::Expr(expr) => {
             // Evaluate the expression using the full evaluator and write as text
             match expression::eval_expr(expr, ctx) {
                 Ok(result) => {
@@ -82,41 +83,19 @@ fn process_chunk_to_output(
             }
             Ok(())
         }
-        Chunk::Esi(tag) => {
+        Element::Esi(tag) => {
             match tag {
                 NomTag::Assign { name, value } => {
-                    // Handle esi:assign tags - evaluate the value expression and set variable
-                    //First, check if the value is a quoted string literal and strip quotes
-                    let trimmed = value.trim();
-                    let unquoted_value = if trimmed.starts_with('\'')
-                        && trimmed.ends_with('\'')
-                        && trimmed.len() >= 2
-                    {
-                        // Single-quoted string: strip quotes
-                        trimmed[1..trimmed.len() - 1].to_string()
-                    } else if trimmed.starts_with('"')
-                        && trimmed.ends_with('"')
-                        && trimmed.len() >= 2
-                    {
-                        // Double-quoted string: strip quotes
-                        trimmed[1..trimmed.len() - 1].to_string()
-                    } else {
-                        value.clone()
+                    // Handle esi:assign tags - evaluate the pre-parsed value expression
+                    let evaluated_value = match crate::expression::eval_expr(value, ctx) {
+                        Ok(val) => val,
+                        Err(_) => {
+                            // If evaluation fails, use empty string
+                            crate::expression::Value::Text("".into())
+                        }
                     };
 
-                    // Evaluate the value as an ESI expression using parser
-                    let evaluated_value = crate::parser::parse_expression(&unquoted_value)
-                        .map(|(_, expr)| crate::expression::eval_expr(expr, ctx))
-                        .ok()
-                        .and_then(|r| r.ok())
-                        .map(|v| v.to_string())
-                        .unwrap_or(unquoted_value);
-
-                    ctx.set_variable(
-                        &name,
-                        None,
-                        crate::expression::Value::Text(evaluated_value.into()),
-                    );
+                    ctx.set_variable(&name, None, evaluated_value);
                     Ok(())
                 }
                 NomTag::Include {
@@ -124,100 +103,89 @@ fn process_chunk_to_output(
                     alt,
                     continue_on_error,
                 } => {
-                    if let Some(dispatcher) = dispatch_fragment_request {
-                        // Handle esi:include tags - evaluate expressions and build fragment request
-                        debug!("Handling <esi:include> tag with src: {}", src);
+                    // Handle esi:include tags - evaluate expressions and build fragment request
+                    debug!("Handling <esi:include> tag with src: {}", src);
 
-                        // Always interpolate src
-                        let interpolated_src = try_evaluate_interpolated_string(&src, ctx)?;
+                    // Always interpolate src
+                    let interpolated_src = try_evaluate_interpolated_string(&src, ctx)?;
 
-                        // Build fragment request
-                        let req = build_fragment_request(
-                            original_request_metadata.clone_without_body(),
-                            &interpolated_src,
-                            is_escaped_content,
-                        )?;
+                    // Build fragment request
+                    let req = build_fragment_request(
+                        original_request_metadata.clone_without_body(),
+                        &interpolated_src,
+                        is_escaped_content,
+                    )?;
 
-                        match dispatcher(req) {
-                            Ok(pending_content) => {
-                                // Process the fragment content directly
-                                match pending_content {
-                                    crate::PendingFragmentContent::CompletedRequest(response) => {
-                                        // Write the response body directly to output
-                                        let body_bytes = response.into_body_bytes();
-                                        let body_str = std::str::from_utf8(&body_bytes)
-                                            .unwrap_or("<!-- invalid utf8 -->");
-                                        output_writer.write_all(body_str.as_bytes())?;
-                                    }
-                                    crate::PendingFragmentContent::PendingRequest(pending) => {
-                                        // This shouldn't happen in Phase 3 since we wait for all requests in Phase 2,
-                                        // but handle it gracefully by waiting for the request now
-                                        let response = pending.wait().map_err(|e| {
-                                            ESIError::ExpressionError(format!(
-                                                "Fragment request wait failed: {}",
-                                                e
-                                            ))
-                                        })?;
-                                        let body_bytes = response.into_body_bytes();
-                                        let body_str = std::str::from_utf8(&body_bytes)
-                                            .unwrap_or("<!-- invalid utf8 -->");
-                                        output_writer.write_all(body_str.as_bytes())?;
-                                    }
-                                    crate::PendingFragmentContent::NoContent => {
-                                        // No content to output
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                if continue_on_error {
-                                    // Try alt if available
-                                    if let Some(alt_src) = &alt {
-                                        let interpolated_alt =
-                                            try_evaluate_interpolated_string(alt_src, ctx)?;
-                                        let alt_req = build_fragment_request(
-                                            original_request_metadata.clone_without_body(),
-                                            &interpolated_alt,
-                                            is_escaped_content,
-                                        )?;
-                                        match dispatcher(alt_req) {
-                                            Ok(pending_content) => {
-                                                match pending_content {
-                                                    crate::PendingFragmentContent::CompletedRequest(response) => {
-                                                        let body_bytes = response.into_body_bytes();
-                                                        let body_str = std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
-                                                        output_writer.write_all(body_str.as_bytes())?;
-                                                    }
-                                                    crate::PendingFragmentContent::PendingRequest(_) => {
-                                                        output_writer.write_all(b"<!-- pending alt request -->")?;
-                                                    }
-                                                    crate::PendingFragmentContent::NoContent => {
-                                                        // No alt content to output
-                                                    }
-                                                }
-                                            }
-                                            Err(_) => {
-                                                // Both main and alt failed, but continue-on-error is set
-                                                output_writer.write_all(
-                                                    b"<!-- fragment request failed -->",
-                                                )?;
-                                            }
+                    match dispatch_fragment_request(req.clone_without_body()) {
+                        Ok(pending_content) => {
+                            // Wait for the fragment and process it
+                            let response = pending_content.wait()?;
+
+                            // Apply process_fragment_response callback if provided
+                            let mut req_for_processor = req.clone_without_body();
+                            let final_response = if let Some(processor) = process_fragment_response
+                            {
+                                processor(&mut req_for_processor, response)?
+                            } else {
+                                response
+                            };
+
+                            // Write the response body to output
+                            let body_bytes = final_response.into_body_bytes();
+                            let body_str =
+                                std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
+                            output_writer.write_all(body_str.as_bytes())?;
+                        }
+                        Err(err) => {
+                            if continue_on_error {
+                                // Try alt if available
+                                if let Some(alt_src) = &alt {
+                                    let interpolated_alt =
+                                        try_evaluate_interpolated_string(alt_src, ctx)?;
+                                    let alt_req = build_fragment_request(
+                                        original_request_metadata.clone_without_body(),
+                                        &interpolated_alt,
+                                        is_escaped_content,
+                                    )?;
+                                    match dispatch_fragment_request(alt_req.clone_without_body()) {
+                                        Ok(pending_content) => {
+                                            // Wait for alt fragment and process it
+                                            let response = pending_content.wait()?;
+
+                                            // Apply process_fragment_response callback if provided
+                                            let mut alt_req_for_processor =
+                                                alt_req.clone_without_body();
+                                            let final_response = if let Some(processor) =
+                                                process_fragment_response
+                                            {
+                                                processor(&mut alt_req_for_processor, response)?
+                                            } else {
+                                                response
+                                            };
+
+                                            // Write the alt response body to output
+                                            let body_bytes = final_response.into_body_bytes();
+                                            let body_str = std::str::from_utf8(&body_bytes)
+                                                .unwrap_or("<!-- invalid utf8 -->");
+                                            output_writer.write_all(body_str.as_bytes())?;
                                         }
-                                    } else {
-                                        // No alt, but continue on error
-                                        output_writer
-                                            .write_all(b"<!-- fragment request failed -->")?;
+                                        Err(_) => {
+                                            // Both main and alt failed, but continue-on-error is set
+                                            output_writer
+                                                .write_all(b"<!-- fragment request failed -->")?;
+                                        }
                                     }
                                 } else {
-                                    return Err(ESIError::ExpressionError(format!(
-                                        "Fragment request failed: {}",
-                                        err
-                                    )));
+                                    // No alt, but continue on error
+                                    output_writer.write_all(b"<!-- fragment request failed -->")?;
                                 }
+                            } else {
+                                return Err(ESIError::ExpressionError(format!(
+                                    "Fragment request failed: {}",
+                                    err
+                                )));
                             }
                         }
-                    } else {
-                        // No fragment dispatcher available, output placeholder
-                        output_writer.write_all(b"<!-- ESI include not supported -->")?;
                     }
                     Ok(())
                 }
@@ -225,34 +193,31 @@ fn process_chunk_to_output(
                     when_branches,
                     otherwise_events,
                 } => {
-                    // Handle esi:choose/when/otherwise logic - ported from main branch
+                    // Handle esi:choose/when/otherwise logic per ESI spec:
+                    // - Evaluate each when branch in order
+                    // - Execute only the FIRST when that evaluates to true
+                    // - Execute otherwise only if ALL when branches are false
                     let mut chose_branch = false;
-                    for (when_tag, events) in when_branches {
-                        if let NomTag::When { test, match_name } = when_tag {
-                            if let Some(match_name) = match_name {
-                                ctx.set_match_name(&match_name);
+                    for when_branch in when_branches {
+                        if let Some(match_name) = &when_branch.match_name {
+                            ctx.set_match_name(match_name);
+                        }
+                        // Evaluate the pre-parsed test expression (no need to parse again!)
+                        let result = crate::expression::eval_expr(when_branch.test, ctx)?;
+                        if result.to_bool() {
+                            chose_branch = true;
+                            for chunk in when_branch.content {
+                                process_chunk_to_output(
+                                    chunk,
+                                    ctx,
+                                    output_writer,
+                                    original_request_metadata,
+                                    dispatch_fragment_request,
+                                    process_fragment_response,
+                                    is_escaped_content,
+                                )?;
                             }
-                            let (_, expr) =
-                                crate::parser::parse_expression(&test).map_err(|e| {
-                                    ExecutionError::ExpressionError(format!(
-                                        "Failed to parse test expression: {e}"
-                                    ))
-                                })?;
-                            let result = crate::expression::eval_expr(expr, ctx)?;
-                            if result.to_bool() {
-                                chose_branch = true;
-                                for chunk in events {
-                                    process_chunk_to_output(
-                                        chunk,
-                                        ctx,
-                                        output_writer,
-                                        original_request_metadata,
-                                        dispatch_fragment_request,
-                                        is_escaped_content,
-                                    )?;
-                                }
-                                break;
-                            }
+                            break;
                         }
                     }
 
@@ -264,6 +229,7 @@ fn process_chunk_to_output(
                                 output_writer,
                                 original_request_metadata,
                                 dispatch_fragment_request,
+                                process_fragment_response,
                                 is_escaped_content,
                             )?;
                         }
@@ -286,6 +252,7 @@ fn process_chunk_to_output(
                                     &mut attempt_output,
                                     original_request_metadata,
                                     dispatch_fragment_request,
+                                    process_fragment_response,
                                     is_escaped_content,
                                 )?;
                             }
@@ -310,6 +277,7 @@ fn process_chunk_to_output(
                                 output_writer,
                                 original_request_metadata,
                                 dispatch_fragment_request,
+                                process_fragment_response,
                                 is_escaped_content,
                             )?;
                         }
@@ -350,20 +318,6 @@ impl PendingFragmentContent {
             Self::NoContent => Ok(Response::from_status(StatusCode::NO_CONTENT)),
         }
     }
-}
-
-/// Represents a fragment that needs to be fetched
-struct Fragment {
-    /// Index in the chunks array where this fragment should be inserted
-    chunk_index: usize,
-    /// The original request for this fragment (needed for process_fragment_response callback)
-    request: Request,
-    /// The pending fragment content (request or already completed)
-    pending_content: PendingFragmentContent,
-    /// Alternative source URL if main request fails (built lazily only if needed)
-    alt: Option<String>,
-    /// Whether to continue processing if this fragment fails
-    continue_on_error: bool,
 }
 
 /// A processor for handling ESI responses
@@ -490,20 +444,16 @@ impl Processor {
 
     /// Process an ESI document using the nom parser, handling includes and directives
     ///
-    /// This method uses a three-phase approach to enable **concurrent fragment fetching**:
+    /// Processes ESI directives while streaming content to the output writer. This method
+    /// processes chunks **sequentially**, dispatching and waiting for fragments only as they
+    /// are encountered during processing. This ensures optimal performance by:
     ///
-    /// **Phase 1**: Parse the document and collect all fragment requests. This allows
-    /// us to identify all `<esi:include>` tags upfront.
+    /// - Only fetching fragments that are actually needed (not those in unexecuted branches)
+    /// - Streaming output as soon as fragments complete
+    /// - Not blocking on fragments inside conditional blocks that don't execute
     ///
-    /// **Phase 2**: Dispatch all fragment requests concurrently using Fastly's async
-    /// request capabilities. This minimizes latency by fetching fragments in parallel
-    /// rather than sequentially.
-    ///
-    /// **Phase 3**: Process chunks and stream output, inserting the resolved fragment
-    /// responses in their correct positions.
-    ///
-    /// Processes ESI directives while streaming content to the output writer. Handles:
-    /// - ESI includes with concurrent fragment fetching
+    /// Handles:
+    /// - ESI includes with on-demand fragment fetching
     /// - Variable substitution
     /// - Conditional processing (choose/when/otherwise)
     /// - Try/except blocks
@@ -559,203 +509,25 @@ impl Processor {
             eprintln!("DEBUG: Parser remaining: {:?}", remaining);
         }
 
+        // Set up fragment request dispatcher. Use what's provided or use a default
+        let dispatch_fragment_request =
+            dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
+
         // context for the interpreter
         let mut ctx = EvalContext::new();
         ctx.set_request(original_request_metadata.clone_without_body());
 
-        // PHASE 1: Collect all fragment requests while doing a first pass
-        // This allows us to dispatch all requests concurrently
-        let mut fragments = Vec::new();
-
-        // Use the provided dispatcher or fall back to the default
-        let dispatcher = dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
-
-        for (idx, chunk) in chunks.iter().enumerate() {
-            if let parser_types::Chunk::Esi(parser_types::Tag::Include {
-                src,
-                alt,
-                continue_on_error,
-            }) = chunk
-            {
-                // Interpolate the src URL
-                let interpolated_src = try_evaluate_interpolated_string(src, &mut ctx)?;
-
-                // Build and dispatch the fragment request
-                let req = build_fragment_request(
-                    original_request_metadata.clone_without_body(),
-                    &interpolated_src,
-                    self.configuration.is_escaped_content,
-                )?;
-
-                match dispatcher(req.clone_without_body()) {
-                    Ok(pending_content) => {
-                        fragments.push(Fragment {
-                            chunk_index: idx,
-                            request: req,
-                            pending_content,
-                            alt: alt.clone(),
-                            continue_on_error: *continue_on_error,
-                        });
-                    }
-                    Err(err) => {
-                        // Main request failed during dispatch
-                        // Try alt if available
-                        if let Some(alt_src) = alt {
-                            let interpolated_alt =
-                                try_evaluate_interpolated_string(alt_src, &mut ctx)?;
-                            let alt_req = build_fragment_request(
-                                original_request_metadata.clone_without_body(),
-                                &interpolated_alt,
-                                self.configuration.is_escaped_content,
-                            )?;
-
-                            match dispatcher(alt_req.clone_without_body()) {
-                                Ok(alt_pending) => {
-                                    fragments.push(Fragment {
-                                        chunk_index: idx,
-                                        request: alt_req,
-                                        pending_content: alt_pending,
-                                        alt: None, // Alt already used
-                                        continue_on_error: *continue_on_error,
-                                    });
-                                }
-                                Err(_) => {
-                                    // Both main and alt failed
-                                    if *continue_on_error {
-                                        fragments.push(Fragment {
-                                            chunk_index: idx,
-                                            request: req,
-                                            pending_content: PendingFragmentContent::NoContent,
-                                            alt: None,
-                                            continue_on_error: *continue_on_error,
-                                        });
-                                    } else {
-                                        return Err(ESIError::ExpressionError(format!(
-                                            "Fragment dispatch failed: {}",
-                                            err
-                                        )));
-                                    }
-                                }
-                            }
-                        } else {
-                            // No alt, check if we should continue
-                            if *continue_on_error {
-                                fragments.push(Fragment {
-                                    chunk_index: idx,
-                                    request: req,
-                                    pending_content: PendingFragmentContent::NoContent,
-                                    alt: None,
-                                    continue_on_error: *continue_on_error,
-                                });
-                            } else {
-                                return Err(ESIError::ExpressionError(format!(
-                                    "Fragment dispatch failed: {}",
-                                    err
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // PHASE 2: Wait for all pending fragment requests to complete
-        // This allows concurrent fetching instead of sequential
-        let mut fragment_responses: std::collections::HashMap<usize, Result<Vec<u8>>> =
-            std::collections::HashMap::new();
-
-        for mut fragment_info in fragments {
-            let response_result = fragment_info.pending_content.wait();
-
-            // Apply the fragment response processor if provided
-            let processed_response = match response_result {
-                Ok(resp) => {
-                    if let Some(processor) = process_fragment_response {
-                        processor(&mut fragment_info.request, resp)
-                    } else {
-                        Ok(resp)
-                    }
-                }
-                Err(e) => Err(e),
-            };
-
-            // If main request failed and we have an alt, try the alt
-            let final_response = if processed_response.is_err() && fragment_info.alt.is_some() {
-                let alt = fragment_info.alt.unwrap();
-                let interpolated_alt = try_evaluate_interpolated_string(&alt, &mut ctx)?;
-                let mut alt_req = build_fragment_request(
-                    original_request_metadata.clone_without_body(),
-                    &interpolated_alt,
-                    self.configuration.is_escaped_content,
-                )?;
-
-                match dispatcher(alt_req.clone_without_body()) {
-                    Ok(alt_pending) => {
-                        let alt_resp = alt_pending.wait()?;
-                        // Also process the alt response
-                        if let Some(processor) = process_fragment_response {
-                            processor(&mut alt_req, alt_resp)
-                        } else {
-                            Ok(alt_resp)
-                        }
-                    }
-                    Err(e) => {
-                        if fragment_info.continue_on_error {
-                            Ok(Response::from_status(StatusCode::NO_CONTENT))
-                        } else {
-                            Err(ESIError::ExpressionError(format!(
-                                "Alt fragment failed: {}",
-                                e
-                            )))
-                        }
-                    }
-                }
-            } else {
-                processed_response
-            };
-
-            // Convert response to bytes immediately
-            let body_bytes = match final_response {
-                Ok(response) => Ok(response.into_body_bytes()),
-                Err(e) => {
-                    if fragment_info.continue_on_error {
-                        Ok(Vec::new()) // Empty body for failed fragments with continue_on_error
-                    } else {
-                        Err(e)
-                    }
-                }
-            };
-
-            fragment_responses.insert(fragment_info.chunk_index, body_bytes);
-        }
-
-        // PHASE 3: Process chunks and output, using the resolved fragment responses
-        for (idx, chunk) in chunks.into_iter().enumerate() {
-            // Check if this chunk is a fragment that we fetched
-            if let Some(body_result) = fragment_responses.remove(&idx) {
-                match body_result {
-                    Ok(body_bytes) => {
-                        // Write the fragment response body to output
-                        let body_str =
-                            std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
-                        output_writer.write_all(body_str.as_bytes())?;
-                    }
-                    Err(err) => {
-                        // Fragment failed and continue_on_error was false
-                        return Err(err);
-                    }
-                }
-            } else {
-                // Not a fragment - process normally
-                process_chunk_to_output(
-                    chunk,
-                    &mut ctx,
-                    output_writer,
-                    &original_request_metadata,
-                    None, // Don't dispatch fragments here - already done in phase 1
-                    self.configuration.is_escaped_content,
-                )?;
-            }
+        // Process chunks sequentially, dispatching and waiting for fragments only as encountered
+        for chunk in chunks {
+            process_chunk_to_output(
+                chunk,
+                &mut ctx,
+                output_writer,
+                &original_request_metadata,
+                dispatch_fragment_request,
+                process_fragment_response,
+                self.configuration.is_escaped_content,
+            )?;
         }
 
         Ok(())
@@ -849,10 +621,10 @@ where
     // Process each chunk
     for chunk in chunks {
         match chunk {
-            parser_types::Chunk::Text(text) => {
+            parser_types::Element::Text(text) => {
                 segment_handler(text.to_string())?;
             }
-            parser_types::Chunk::Expr(expr) => {
+            parser_types::Element::Expr(expr) => {
                 // Evaluate the expression using eval_expr
                 match crate::expression::eval_expr(expr, ctx) {
                     Ok(value) => segment_handler(value.to_string())?,
@@ -896,3 +668,4 @@ pub fn try_evaluate_interpolated_string(input: &str, ctx: &mut EvalContext) -> R
 
     Ok(result)
 }
+// Helper Functions

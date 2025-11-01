@@ -740,3 +740,40 @@ fn test_alt_url_with_function_interpolation() {
         result
     );
 }
+
+// Test interpolated compound expressions in long form assign
+#[test]
+fn test_assign_long_form_interpolation() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="greeting">Hello $(HTTP_HOST)!</esi:assign>
+        <esi:vars>$(greeting)</esi:vars>
+    "#;
+    let mut req = Request::get("http://example.com/test");
+    req.set_header("Host", "example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "Hello example.com!",
+        "Long form assign with interpolation should concatenate text and variables"
+    );
+}
+
+// Test multiple variables in long form assign
+#[test]
+fn test_assign_long_form_multiple_variables() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="first" value="'John'" />
+        <esi:assign name="last" value="'Doe'" />
+        <esi:assign name="full_name">$(first) $(last)</esi:assign>
+        <esi:vars>$(full_name)</esi:vars>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result.trim(),
+        "John Doe",
+        "Long form assign should handle multiple variables in compound expression"
+    );
+}

@@ -1,3 +1,11 @@
+/// Represents a single when branch in a choose block
+#[derive(Debug, PartialEq, Clone)]
+pub struct WhenBranch<'a> {
+    pub test: Expr<'a>,
+    pub match_name: Option<String>,
+    pub content: Vec<Element<'a>>,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Tag<'a> {
     Include {
@@ -6,31 +14,31 @@ pub enum Tag<'a> {
         continue_on_error: bool,
     },
     Try {
-        attempt_events: Vec<Vec<Chunk<'a>>>,
-        except_events: Vec<Chunk<'a>>,
+        attempt_events: Vec<Vec<Element<'a>>>,
+        except_events: Vec<Element<'a>>,
     },
     Assign {
         name: String,
-        value: String,
+        value: Expr<'a>,
     },
     Vars {
         name: Option<String>,
     },
     When {
-        test: String,
+        test: &'a str,
         match_name: Option<String>,
     },
     Choose {
-        when_branches: Vec<(Tag<'a>, Vec<Chunk<'a>>)>,
-        otherwise_events: Vec<Chunk<'a>>,
+        when_branches: Vec<WhenBranch<'a>>,
+        otherwise_events: Vec<Element<'a>>,
     },
-    Attempt(Vec<Chunk<'a>>),
-    Except(Vec<Chunk<'a>>),
-    Otherwise, // Changed to unit variant like When - content follows as separate chunks
+    Attempt(Vec<Element<'a>>),
+    Except(Vec<Element<'a>>),
+    Otherwise,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Chunk<'a> {
+pub enum Element<'a> {
     Esi(Tag<'a>),
     Expr(Expr<'a>),
     Html(&'a str),
@@ -49,6 +57,9 @@ pub enum Expr<'a> {
     },
     Call(&'a str, Vec<Expr<'a>>),
     Not(Box<Expr<'a>>),
+    /// Represents a compound expression with interpolated text and expressions
+    /// Used for cases like: <esi:assign name="x">prefix$(VAR)suffix</esi:assign>
+    Interpolated(Vec<Element<'a>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
