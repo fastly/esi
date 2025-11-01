@@ -53,7 +53,7 @@ fn fetch_elements(
     process_fragment_response: Option<&FragmentResponseProcessor>,
     is_escaped_content: bool,
 ) -> Result<()> {
-    use parser_types::{Element, Tag as NomTag};
+    use parser_types::{Element, Tag};
 
     eprintln!("DEBUG: Processing element: {:?}", element);
     match element {
@@ -85,7 +85,7 @@ fn fetch_elements(
         }
         Element::Esi(tag) => {
             match tag {
-                NomTag::Assign { name, value } => {
+                Tag::Assign { name, value } => {
                     // Handle esi:assign tags - evaluate the pre-parsed value expression
                     let evaluated_value = match crate::expression::eval_expr(value, ctx) {
                         Ok(val) => val,
@@ -98,7 +98,7 @@ fn fetch_elements(
                     ctx.set_variable(&name, None, evaluated_value);
                     Ok(())
                 }
-                NomTag::Include {
+                Tag::Include {
                     src,
                     alt,
                     continue_on_error,
@@ -189,7 +189,7 @@ fn fetch_elements(
                     }
                     Ok(())
                 }
-                NomTag::Choose {
+                Tag::Choose {
                     when_branches,
                     otherwise_events,
                 } => {
@@ -236,7 +236,7 @@ fn fetch_elements(
                     }
                     Ok(())
                 }
-                NomTag::Try {
+                Tag::Try {
                     attempt_events,
                     except_events,
                 } => {
@@ -284,16 +284,13 @@ fn fetch_elements(
                     }
                     Ok(())
                 }
-                NomTag::Vars { .. } => {
+                Tag::Vars { .. } => {
                     // <esi:vars> is handled by the parser - it returns elements directly, never creates a Tag::Vars
                     // If we see this, it's a parser bug. Just skip it.
                     debug!("Unexpected Tag::Vars - parser should return elements directly for <esi:vars>");
                     Ok(())
                 }
-                NomTag::When { .. }
-                | NomTag::Attempt(_)
-                | NomTag::Except(_)
-                | NomTag::Otherwise => {
+                Tag::When { .. } | Tag::Attempt(_) | Tag::Except(_) | Tag::Otherwise => {
                     // These tags should only appear inside Choose/Try blocks and are handled there
                     // If they appear standalone, it's likely a parser bug or malformed ESI
                     debug!(
@@ -534,10 +531,7 @@ impl Processor {
     }
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
+// Default fragment request dispatcher that uses the request's hostname as backend
 fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
     debug!("no dispatch method configured, defaulting to hostname");
     let backend = req
