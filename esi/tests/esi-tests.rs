@@ -357,3 +357,386 @@ fn test_choose_with_esi_tags_in_otherwise() {
         result
     );
 }
+
+// Test that configuration.is_escaped_content controls HTML entity decoding
+#[test]
+fn test_configuration_is_escaped_content() {
+    init_logs();
+
+    // Test with HTML-escaped URL (default behavior)
+    let input = r#"<esi:include src="http://example.com/path?param=value&amp;other=test"/>"#;
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+
+    // Custom dispatcher that captures the URL
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let captured_url = Rc::new(RefCell::new(String::new()));
+    let captured_url_clone = captured_url.clone();
+    let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
+        *captured_url_clone.borrow_mut() = req.get_url_str().to_string();
+        Ok(esi::PendingFragmentContent::CompletedRequest(
+            fastly::Response::from_body("fragment content"),
+        ))
+    };
+
+    let processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default(), // is_escaped_content = true by default
+    );
+
+    processor
+        .process_document(reader, &mut output, Some(&dispatcher), None)
+        .expect("Processing should succeed");
+
+    // With is_escaped_content=true, &amp; should be decoded to &
+    let url = captured_url.borrow();
+    assert!(
+        url.contains("param=value&other=test"),
+        "URL should have &amp; decoded to &. Got: {}",
+        url
+    );
+}
+
+#[test]
+fn test_configuration_is_escaped_content_disabled() {
+    init_logs();
+
+    // Test with HTML-escaped URL but with is_escaped_content = false
+    let input = r#"<esi:include src="http://example.com/path?param=value&amp;other=test"/>"#;
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+
+    // Custom dispatcher that captures the URL
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let captured_url = Rc::new(RefCell::new(String::new()));
+    let captured_url_clone = captured_url.clone();
+    let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
+        *captured_url_clone.borrow_mut() = req.get_url_str().to_string();
+        Ok(esi::PendingFragmentContent::CompletedRequest(
+            fastly::Response::from_body("fragment content"),
+        ))
+    };
+
+    let processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default().with_escaped(false), // Disable HTML entity decoding
+    );
+
+    processor
+        .process_document(reader, &mut output, Some(&dispatcher), None)
+        .expect("Processing should succeed");
+
+    // With is_escaped_content=false, &amp; should NOT be decoded
+    let url = captured_url.borrow();
+    assert!(
+        url.contains("&amp;"),
+        "URL should keep &amp; as-is. Got: {}",
+        url
+    );
+}
+
+// Test that process_fragment_response callback is invoked
+#[test]
+fn test_process_fragment_response_callback() {
+    init_logs();
+
+    let input = r#"<esi:include src="http://example.com/fragment"/>"#;
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+
+    // Dispatcher returns a response
+    let dispatcher = |_req: Request| -> esi::Result<esi::PendingFragmentContent> {
+        let mut resp = fastly::Response::from_body("original content");
+        resp.set_header("X-Custom-Header", "original-value");
+        Ok(esi::PendingFragmentContent::CompletedRequest(resp))
+    };
+
+    // Response processor that modifies the response
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let callback_invoked = Rc::new(RefCell::new(false));
+    let callback_invoked_clone = callback_invoked.clone();
+    let processor_callback =
+        move |_req: &mut Request, mut resp: fastly::Response| -> esi::Result<fastly::Response> {
+            *callback_invoked_clone.borrow_mut() = true;
+            // Modify the response body
+            resp.set_body("modified content");
+            // Add a header to prove we processed it
+            resp.set_header("X-Processed", "true");
+            Ok(resp)
+        };
+
+    let processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default(),
+    );
+
+    processor
+        .process_document(
+            reader,
+            &mut output,
+            Some(&dispatcher),
+            Some(&processor_callback),
+        )
+        .expect("Processing should succeed");
+
+    let result = String::from_utf8(output).unwrap();
+
+    // Should contain the modified content
+    assert!(
+        result.contains("modified content"),
+        "Output should contain modified content from processor callback. Got: {}",
+        result
+    );
+    assert!(
+        !result.contains("original content"),
+        "Output should NOT contain original content. Got: {}",
+        result
+    );
+    assert!(
+        *callback_invoked.borrow(),
+        "Response processor callback should have been invoked"
+    );
+}
+
+// Test that process_fragment_response is also called for alt URLs
+#[test]
+fn test_process_fragment_response_on_alt() {
+    init_logs();
+
+    let input = r#"<esi:include src="http://example.com/main" alt="http://example.com/fallback" onerror="continue"/>"#;
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+
+    // Dispatcher that fails for main, succeeds for alt
+    let dispatcher = |req: Request| -> esi::Result<esi::PendingFragmentContent> {
+        if req.get_url_str().contains("/main") {
+            // Main request fails
+            Err(esi::ExecutionError::ExpressionError(
+                "main failed".to_string(),
+            ))
+        } else {
+            // Alt request succeeds
+            Ok(esi::PendingFragmentContent::CompletedRequest(
+                fastly::Response::from_body("alt content"),
+            ))
+        }
+    };
+
+    // Response processor that should be called for the alt response
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let alt_processed = Rc::new(RefCell::new(false));
+    let alt_processed_clone = alt_processed.clone();
+    let processor_callback =
+        move |req: &mut Request, mut resp: fastly::Response| -> esi::Result<fastly::Response> {
+            if req.get_url_str().contains("/fallback") {
+                *alt_processed_clone.borrow_mut() = true;
+                resp.set_body("processed alt content");
+            }
+            Ok(resp)
+        };
+
+    let processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default(),
+    );
+
+    processor
+        .process_document(
+            reader,
+            &mut output,
+            Some(&dispatcher),
+            Some(&processor_callback),
+        )
+        .expect("Processing should succeed");
+
+    let result = String::from_utf8(output).unwrap();
+
+    assert!(
+        result.contains("processed alt content"),
+        "Output should contain processed alt content. Got: {}",
+        result
+    );
+    assert!(
+        *alt_processed.borrow(),
+        "Response processor should have been invoked for alt URL"
+    );
+}
+
+// Test that process_fragment_response can return errors
+#[test]
+fn test_process_fragment_response_error_handling() {
+    init_logs();
+
+    let input = r#"<esi:include src="http://example.com/fragment"/>"#;
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+
+    // Dispatcher returns a response
+    let dispatcher = |_req: Request| -> esi::Result<esi::PendingFragmentContent> {
+        Ok(esi::PendingFragmentContent::CompletedRequest(
+            fastly::Response::from_body("content"),
+        ))
+    };
+
+    // Response processor that returns an error
+    let processor_callback =
+        |_req: &mut Request, _resp: fastly::Response| -> esi::Result<fastly::Response> {
+            Err(esi::ExecutionError::ExpressionError(
+                "processing failed".to_string(),
+            ))
+        };
+
+    let processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default(),
+    );
+
+    let result = processor.process_document(
+        reader,
+        &mut output,
+        Some(&dispatcher),
+        Some(&processor_callback),
+    );
+
+    // Should propagate the error from the processor
+    assert!(
+        result.is_err(),
+        "Should return error from processor callback"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("processing failed"),
+        "Error should be from the processor callback"
+    );
+}
+
+// Test that alt URLs support interpolation (variables from request)
+#[test]
+fn test_alt_url_with_interpolation() {
+    init_logs();
+
+    // Test with interpolated variable in alt URL using QUERY_STRING
+    let input = r#"
+        <esi:include src="http://example.com/main" alt="http://example.com/fallback?id=$(QUERY_STRING{fallback_id})" onerror="continue"/>
+    "#;
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+
+    // Dispatcher that fails for main, succeeds for alt
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let captured_alt_url = Rc::new(RefCell::new(String::new()));
+    let captured_alt_url_clone = captured_alt_url.clone();
+    let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
+        if req.get_url_str().contains("/main") {
+            // Main request fails
+            Err(esi::ExecutionError::ExpressionError(
+                "main failed".to_string(),
+            ))
+        } else {
+            // Alt request succeeds - capture the URL
+            *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();
+            Ok(esi::PendingFragmentContent::CompletedRequest(
+                fastly::Response::from_body("alt content"),
+            ))
+        }
+    };
+
+    let processor = Processor::new(
+        Some(Request::get("http://example.com/?fallback_id=12345")),
+        Configuration::default(),
+    );
+
+    processor
+        .process_document(reader, &mut output, Some(&dispatcher), None)
+        .expect("Processing should succeed");
+
+    let result = String::from_utf8(output).unwrap();
+
+    // Verify the alt URL was interpolated correctly
+    let alt_url = captured_alt_url.borrow();
+    assert!(
+        alt_url.contains("id=12345"),
+        "Alt URL should have interpolated variable. Got: {}",
+        alt_url
+    );
+
+    // Verify content from alt was used
+    assert!(
+        result.contains("alt content"),
+        "Output should contain alt content. Got: {}",
+        result
+    );
+}
+
+// Test that alt URLs support function calls in interpolation
+#[test]
+fn test_alt_url_with_function_interpolation() {
+    init_logs();
+
+    // Test with function call in alt URL (similar to spec example) using HTTP_HOST
+    let input = r#"
+        <esi:include src="http://example.com/main" alt="http://example.com/fallback?host=$lower($(HTTP_HOST))" onerror="continue"/>
+    "#;
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+
+    // Dispatcher that fails for main, succeeds for alt
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let captured_alt_url = Rc::new(RefCell::new(String::new()));
+    let captured_alt_url_clone = captured_alt_url.clone();
+    let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
+        if req.get_url_str().contains("/main") {
+            // Main request fails
+            Err(esi::ExecutionError::ExpressionError(
+                "main failed".to_string(),
+            ))
+        } else {
+            // Alt request succeeds - capture the URL
+            *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();
+            Ok(esi::PendingFragmentContent::CompletedRequest(
+                fastly::Response::from_body("alt with function"),
+            ))
+        }
+    };
+
+    let mut req = Request::get("http://Example.COM/");
+    req.set_header("Host", "Example.COM");
+
+    let processor = Processor::new(Some(req), Configuration::default());
+
+    processor
+        .process_document(reader, &mut output, Some(&dispatcher), None)
+        .expect("Processing should succeed");
+
+    let result = String::from_utf8(output).unwrap();
+
+    // Verify the alt URL was interpolated with function call (lower case)
+    let alt_url = captured_alt_url.borrow();
+    assert!(
+        alt_url.contains("host=example.com"),
+        "Alt URL should have interpolated and lowercased HTTP_HOST. Got: {}",
+        alt_url
+    );
+
+    // Verify content from alt was used
+    assert!(
+        result.contains("alt with function"),
+        "Output should contain alt content. Got: {}",
+        result
+    );
+}

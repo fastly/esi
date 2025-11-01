@@ -334,6 +334,8 @@ impl PendingFragmentContent {
 struct Fragment {
     /// Index in the chunks array where this fragment should be inserted
     chunk_index: usize,
+    /// The original request for this fragment (needed for process_fragment_response callback)
+    request: Request,
     /// The pending fragment content (request or already completed)
     pending_content: PendingFragmentContent,
     /// Alternative source URL if main request fails (built lazily only if needed)
@@ -502,8 +504,8 @@ impl Processor {
         self,
         mut src_document: impl BufRead,
         output_writer: &mut impl Write,
-        _dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
-        _process_fragment_response: Option<&FragmentResponseProcessor>,
+        dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
         // If there is a source request to mimic, copy its metadata, otherwise use a default request.
         let original_request_metadata = self.original_request_metadata.as_ref().map_or_else(
@@ -543,7 +545,10 @@ impl Processor {
         // This allows us to dispatch all requests concurrently
         let mut fragments = Vec::new();
 
-        if let Some(dispatcher) = _dispatch_fragment_request {
+        // Use the provided dispatcher or fall back to the default
+        let dispatcher = dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
+
+        if true {
             for (idx, chunk) in chunks.iter().enumerate() {
                 if let parser_types::Chunk::Esi(parser_types::Tag::Include {
                     src,
@@ -561,29 +566,73 @@ impl Processor {
                         self.configuration.is_escaped_content,
                     )?;
 
-                    match dispatcher(req) {
+                    match dispatcher(req.clone_without_body()) {
                         Ok(pending_content) => {
                             fragments.push(Fragment {
                                 chunk_index: idx,
+                                request: req,
                                 pending_content,
                                 alt: alt.clone(),
                                 continue_on_error: *continue_on_error,
                             });
                         }
                         Err(err) => {
-                            if !continue_on_error {
-                                return Err(ESIError::ExpressionError(format!(
-                                    "Fragment dispatch failed: {}",
-                                    err
-                                )));
+                            // Main request failed during dispatch
+                            // Try alt if available
+                            if let Some(alt_src) = alt {
+                                let interpolated_alt =
+                                    try_evaluate_interpolated_string(alt_src, &mut ctx)?;
+                                let alt_req = build_fragment_request(
+                                    original_request_metadata.clone_without_body(),
+                                    &interpolated_alt,
+                                    self.configuration.is_escaped_content,
+                                )?;
+
+                                match dispatcher(alt_req.clone_without_body()) {
+                                    Ok(alt_pending) => {
+                                        fragments.push(Fragment {
+                                            chunk_index: idx,
+                                            request: alt_req,
+                                            pending_content: alt_pending,
+                                            alt: None, // Alt already used
+                                            continue_on_error: *continue_on_error,
+                                        });
+                                    }
+                                    Err(_) => {
+                                        // Both main and alt failed
+                                        if *continue_on_error {
+                                            fragments.push(Fragment {
+                                                chunk_index: idx,
+                                                request: req,
+                                                pending_content: PendingFragmentContent::NoContent,
+                                                alt: None,
+                                                continue_on_error: *continue_on_error,
+                                            });
+                                        } else {
+                                            return Err(ESIError::ExpressionError(format!(
+                                                "Fragment dispatch failed: {}",
+                                                err
+                                            )));
+                                        }
+                                    }
+                                }
+                            } else {
+                                // No alt, check if we should continue
+                                if *continue_on_error {
+                                    fragments.push(Fragment {
+                                        chunk_index: idx,
+                                        request: req,
+                                        pending_content: PendingFragmentContent::NoContent,
+                                        alt: None,
+                                        continue_on_error: *continue_on_error,
+                                    });
+                                } else {
+                                    return Err(ESIError::ExpressionError(format!(
+                                        "Fragment dispatch failed: {}",
+                                        err
+                                    )));
+                                }
                             }
-                            // If continue_on_error, we'll handle this during output phase
-                            fragments.push(Fragment {
-                                chunk_index: idx,
-                                pending_content: PendingFragmentContent::NoContent,
-                                alt: alt.clone(),
-                                continue_on_error: *continue_on_error,
-                            });
                         }
                     }
                 }
@@ -595,38 +644,54 @@ impl Processor {
         let mut fragment_responses: std::collections::HashMap<usize, Result<Vec<u8>>> =
             std::collections::HashMap::new();
 
-        for fragment_info in fragments {
+        for mut fragment_info in fragments {
             let response_result = fragment_info.pending_content.wait();
 
-            // If main request failed and we have an alt, try the alt
-            let final_response = if response_result.is_err() && fragment_info.alt.is_some() {
-                if let Some(dispatcher) = _dispatch_fragment_request {
-                    let alt = fragment_info.alt.unwrap();
-                    let interpolated_alt = try_evaluate_interpolated_string(&alt, &mut ctx)?;
-                    let alt_req = build_fragment_request(
-                        original_request_metadata.clone_without_body(),
-                        &interpolated_alt,
-                        self.configuration.is_escaped_content,
-                    )?;
+            // Apply the fragment response processor if provided
+            let processed_response = match response_result {
+                Ok(resp) => {
+                    if let Some(processor) = process_fragment_response {
+                        processor(&mut fragment_info.request, resp)
+                    } else {
+                        Ok(resp)
+                    }
+                }
+                Err(e) => Err(e),
+            };
 
-                    match dispatcher(alt_req) {
-                        Ok(alt_pending) => alt_pending.wait(),
-                        Err(e) => {
-                            if fragment_info.continue_on_error {
-                                Ok(Response::from_status(StatusCode::NO_CONTENT))
-                            } else {
-                                Err(ESIError::ExpressionError(format!(
-                                    "Alt fragment failed: {}",
-                                    e
-                                )))
-                            }
+            // If main request failed and we have an alt, try the alt
+            let final_response = if processed_response.is_err() && fragment_info.alt.is_some() {
+                let alt = fragment_info.alt.unwrap();
+                let interpolated_alt = try_evaluate_interpolated_string(&alt, &mut ctx)?;
+                let mut alt_req = build_fragment_request(
+                    original_request_metadata.clone_without_body(),
+                    &interpolated_alt,
+                    self.configuration.is_escaped_content,
+                )?;
+
+                match dispatcher(alt_req.clone_without_body()) {
+                    Ok(alt_pending) => {
+                        let alt_resp = alt_pending.wait()?;
+                        // Also process the alt response
+                        if let Some(processor) = process_fragment_response {
+                            processor(&mut alt_req, alt_resp)
+                        } else {
+                            Ok(alt_resp)
                         }
                     }
-                } else {
-                    response_result
+                    Err(e) => {
+                        if fragment_info.continue_on_error {
+                            Ok(Response::from_status(StatusCode::NO_CONTENT))
+                        } else {
+                            Err(ESIError::ExpressionError(format!(
+                                "Alt fragment failed: {}",
+                                e
+                            )))
+                        }
+                    }
                 }
             } else {
-                response_result
+                processed_response
             };
 
             // Convert response to bytes immediately
@@ -692,22 +757,12 @@ fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
     Ok(PendingFragmentContent::PendingRequest(pending_req))
 }
 
-// Simple HTML entity decoder for common entities
-fn decode_html_entities(input: &str) -> String {
-    input
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-}
-
 // Helper function to build a fragment request from a URL
 // For HTML content the URL is unescaped if it's escaped (default).
 // It can be disabled in the processor configuration for a non-HTML content.
 fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> Result<Request> {
     let escaped_url = if is_escaped {
-        decode_html_entities(url)
+        html_escape::decode_html_entities(url).into_owned()
     } else {
         url.to_string()
     };
