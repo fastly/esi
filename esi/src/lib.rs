@@ -43,9 +43,9 @@ impl From<Response> for PendingFragmentContent {
     }
 }
 
-// Process parser chunks directly to output - with fragment request support
-fn process_chunk_to_output(
-    chunk: parser_types::Element,
+//
+fn fetch_elements(
+    element: parser_types::Element,
     ctx: &mut EvalContext,
     output_writer: &mut impl Write,
     original_request_metadata: &Request,
@@ -55,8 +55,8 @@ fn process_chunk_to_output(
 ) -> Result<()> {
     use parser_types::{Element, Tag as NomTag};
 
-    eprintln!("DEBUG: Processing chunk: {:?}", chunk);
-    match chunk {
+    eprintln!("DEBUG: Processing element: {:?}", element);
+    match element {
         Element::Text(text) => {
             output_writer.write_all(text.as_bytes())?;
             Ok(())
@@ -206,9 +206,9 @@ fn process_chunk_to_output(
                         let result = crate::expression::eval_expr(when_branch.test, ctx)?;
                         if result.to_bool() {
                             chose_branch = true;
-                            for chunk in when_branch.content {
-                                process_chunk_to_output(
-                                    chunk,
+                            for element in when_branch.content {
+                                fetch_elements(
+                                    element,
                                     ctx,
                                     output_writer,
                                     original_request_metadata,
@@ -222,9 +222,9 @@ fn process_chunk_to_output(
                     }
 
                     if !chose_branch {
-                        for chunk in otherwise_events {
-                            process_chunk_to_output(
-                                chunk,
+                        for element in otherwise_events {
+                            fetch_elements(
+                                element,
                                 ctx,
                                 output_writer,
                                 original_request_metadata,
@@ -242,12 +242,12 @@ fn process_chunk_to_output(
                 } => {
                     // Try processing attempt blocks - if any fail, process except block
                     let mut any_succeeded = false;
-                    for attempt_chunks in attempt_events {
+                    for attempt_elements in attempt_events {
                         let mut attempt_output = Vec::new();
                         let attempt_result = (|| {
-                            for chunk in attempt_chunks {
-                                process_chunk_to_output(
-                                    chunk,
+                            for element in attempt_elements {
+                                fetch_elements(
+                                    element,
                                     ctx,
                                     &mut attempt_output,
                                     original_request_metadata,
@@ -270,9 +270,9 @@ fn process_chunk_to_output(
 
                     // If all attempts failed, process except block
                     if !any_succeeded {
-                        for chunk in except_events {
-                            process_chunk_to_output(
-                                chunk,
+                        for element in except_events {
+                            fetch_elements(
+                                element,
                                 ctx,
                                 output_writer,
                                 original_request_metadata,
@@ -285,9 +285,9 @@ fn process_chunk_to_output(
                     Ok(())
                 }
                 NomTag::Vars { .. } => {
-                    // <esi:vars> is handled by the parser - it returns chunks directly, never creates a Tag::Vars
+                    // <esi:vars> is handled by the parser - it returns elements directly, never creates a Tag::Vars
                     // If we see this, it's a parser bug. Just skip it.
-                    debug!("Unexpected Tag::Vars - parser should return chunks directly for <esi:vars>");
+                    debug!("Unexpected Tag::Vars - parser should return elements directly for <esi:vars>");
                     Ok(())
                 }
                 NomTag::When { .. }
@@ -445,7 +445,7 @@ impl Processor {
     /// Process an ESI document using the nom parser, handling includes and directives
     ///
     /// Processes ESI directives while streaming content to the output writer. This method
-    /// processes chunks **sequentially**, dispatching and waiting for fragments only as they
+    /// processes elements **sequentially**, dispatching and waiting for fragments only as they
     /// are encountered during processing. This ensures optimal performance by:
     ///
     /// - Only fetching fragments that are actually needed (not those in unexecuted branches)
@@ -492,12 +492,12 @@ impl Processor {
             .map_err(ESIError::WriterError)?;
 
         // Parse the document using nom parser
-        let (remaining, chunks) = parser::parse(&doc_content)
+        let (remaining, elements) = parser::parse(&doc_content)
             .map_err(|e| ESIError::ExpressionError(format!("Nom parser error: {:?}", e)))?;
 
-        eprintln!("DEBUG: Parser returned {} chunks", chunks.len());
-        for (i, chunk) in chunks.iter().enumerate() {
-            eprintln!("DEBUG: Chunk[{}]: {:?}", i, chunk);
+        eprintln!("DEBUG: Parser returned {} elements", elements.len());
+        for (i, element) in elements.iter().enumerate() {
+            eprintln!("DEBUG: Chunk[{}]: {:?}", i, element);
         }
 
         // Log warning if parser didn't consume everything (may indicate unsupported features)
@@ -517,10 +517,10 @@ impl Processor {
         let mut ctx = EvalContext::new();
         ctx.set_request(original_request_metadata.clone_without_body());
 
-        // Process chunks sequentially, dispatching and waiting for fragments only as encountered
-        for chunk in chunks {
-            process_chunk_to_output(
-                chunk,
+        // Process elements sequentially, dispatching and waiting for fragments only as encountered
+        for element in elements {
+            fetch_elements(
+                element,
                 &mut ctx,
                 output_writer,
                 &original_request_metadata,
@@ -609,8 +609,8 @@ where
     F: FnMut(String) -> Result<()>,
 {
     // Parse the input string with interpolated expressions using nom parser
-    let chunks = match crate::parser::parse_interpolated_string(input) {
-        Ok((_, chunks)) => chunks,
+    let elements = match crate::parser::parse_interpolated_string(input) {
+        Ok((_, elements)) => elements,
         Err(_) => {
             // If parsing fails, treat the whole input as text
             segment_handler(input.to_string())?;
@@ -618,9 +618,9 @@ where
         }
     };
 
-    // Process each chunk
-    for chunk in chunks {
-        match chunk {
+    // Process each element
+    for element in elements {
+        match element {
             parser_types::Element::Text(text) => {
                 segment_handler(text.to_string())?;
             }

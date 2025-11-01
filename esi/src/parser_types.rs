@@ -18,7 +18,7 @@ pub enum Tag<'a> {
         except_events: Vec<Element<'a>>,
     },
     Assign {
-        name: String,
+        name: &'a str,
         value: Expr<'a>,
     },
     Vars {

@@ -10,7 +10,7 @@ use nom::{AsChar, IResult};
 use crate::parser_types::*;
 
 pub fn parse(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
-    fold_many0(chunk, Vec::new, |mut acc: Vec<Element>, mut item| {
+    fold_many0(element, Vec::new, |mut acc: Vec<Element>, mut item| {
         acc.append(&mut item);
         acc
     })(input)
@@ -33,13 +33,13 @@ pub fn parse_interpolated_string(input: &str) -> IResult<&str, Vec<Element<'_>>,
     )(input)
 }
 
-fn chunk(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
+fn element(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
     alt((text, esi_tag, html))(input)
 }
 
 fn parse_interpolated(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
     fold_many0(
-        interpolated_chunk,
+        interpolated_element,
         Vec::new,
         |mut acc: Vec<Element>, mut item| {
             acc.append(&mut item);
@@ -48,7 +48,7 @@ fn parse_interpolated(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str
     )(input)
 }
 
-fn interpolated_chunk(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
+fn interpolated_element(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
     alt((interpolated_text, interpolated_expression, esi_tag, html))(input)
 }
 
@@ -74,11 +74,11 @@ fn esi_assign(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
 }
 
 fn parse_assign_attributes_short<'a>(attrs: Vec<(&'a str, &'a str)>) -> Vec<Element<'a>> {
-    let mut name = String::new();
+    let mut name = "";
     let mut value_str = "";
     for (key, val) in attrs {
         match key {
-            "name" => name = val.to_string(),
+            "name" => name = val,
             "value" => value_str = val,
             _ => {}
         }
@@ -101,10 +101,10 @@ fn parse_assign_long<'a>(
     attrs: Vec<(&'a str, &'a str)>,
     content: Vec<Element<'a>>,
 ) -> Vec<Element<'a>> {
-    let mut name = String::new();
+    let mut name = "";
     for (key, val) in attrs {
         if key == "name" {
-            name = val.to_string();
+            name = val;
         }
     }
 
@@ -188,8 +188,8 @@ fn esi_try(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
     map(delimited(tag("<esi:try>"), parse, tag("</esi:try>")), |v| {
         let mut attempts = vec![];
         let mut except = None;
-        for chunk in v {
-            match chunk {
+        for element in v {
+            match element {
                 Element::Esi(Tag::Attempt(cs)) => attempts.push(cs),
                 Element::Esi(Tag::Except(cs)) => {
                     except = Some(cs);
@@ -212,7 +212,7 @@ fn esi_otherwise(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
             tag("</esi:otherwise>"),
         )),
         |(_, content, _)| {
-            // Return the Otherwise tag followed by its content chunks (same as esi_when)
+            // Return the Otherwise tag followed by its content elements (same as esi_when)
             let mut result = vec![Element::Esi(Tag::Otherwise)];
             result.extend(content);
             result
@@ -243,7 +243,7 @@ fn esi_when(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
                 .find(|(key, _)| *key == "matchname")
                 .map(|(_, val)| val.to_string());
 
-            // Return the When tag followed by its content chunks as a marker
+            // Return the When tag followed by its content elements as a marker
             let mut result = vec![Element::Esi(Tag::When { test, match_name })];
             result.extend(content);
             result
@@ -260,8 +260,8 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
             let mut current_when: Option<WhenBranch> = None;
             let mut in_otherwise = false;
 
-            for chunk in v {
-                match chunk {
+            for element in v {
+                match element {
                     Element::Esi(Tag::When { test, match_name }) => {
                         // Save any previous when
                         if let Some(when_branch) = current_when.take() {
@@ -296,9 +296,9 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
                     _ => {
                         // Accumulate content for the current when or otherwise
                         if in_otherwise {
-                            otherwise_events.push(chunk);
+                            otherwise_events.push(element);
                         } else if let Some(ref mut when_branch) = current_when {
-                            when_branch.content.push(chunk);
+                            when_branch.content.push(element);
                         }
                         // Content outside when/otherwise blocks is discarded (per ESI spec)
                     }
@@ -318,10 +318,10 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
     )(input)
 }
 
-// Note: <esi:vars> does NOT create a Tag::Vars chunk. Instead, it parses the content
+// Note: <esi:vars> does NOT create a Tag::Vars element. Instead, it parses the content
 // (either the body of <esi:vars>...</esi:vars> or the name attribute of <esi:vars name="..."/>)
-// and returns the evaluated content directly as Vec<Chunk>. These chunks (Text, Expr, Html, etc.)
-// are then flattened into the main chunk stream and processed normally by process_chunk() in lib.rs.
+// and returns the evaluated content directly as Vec<Element>. These elements (Text, Expr, Html, etc.)
+// are then flattened into the main element stream and processed normally by process_elements() in lib.rs.
 fn esi_vars(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
     alt((esi_vars_short, esi_vars_long))(input)
 }
@@ -817,15 +817,15 @@ exception!
         // 1. Fail to parse completely (leaving remainder), OR
         // 2. Parse the outer vars but treat inner vars as text
         match result {
-            Ok((rest, chunks)) => {
+            Ok((rest, elements)) => {
                 // If it parses, check that we either have remaining input
                 // or the inner <esi:vars> is treated as text
                 if rest.is_empty() {
                     // Inner vars should be treated as text/HTML
-                    eprintln!("Parsed chunks: {:?}", chunks);
+                    eprintln!("Parsed elements: {:?}", elements);
                     // We expect the text "outer<esi:vars>inner" to be captured somehow
                     assert!(
-                        chunks
+                        elements
                             .iter()
                             .any(|c| matches!(c, Element::Text(t) if t.contains("inner"))),
                         "Inner <esi:vars> content should be present as text"
@@ -875,7 +875,7 @@ exception!
             "esi_vars_long should parse successfully: {:?}",
             result.err()
         );
-        let (rest, _chunks) = result.unwrap();
+        let (rest, _elements) = result.unwrap();
         assert_eq!(
             rest.len(),
             0,
@@ -894,8 +894,8 @@ exception!
             $(QUERY_STRING{$(keyVar)})
         </esi:vars>
     "#;
-        let (rest, chunks) = parse(input).unwrap();
-        eprintln!("Chunks: {:?}", chunks);
+        let (rest, elements) = parse(input).unwrap();
+        eprintln!("Chunks: {:?}", elements);
         eprintln!("Remaining: {:?}", rest);
         assert_eq!(
             rest.len(),
@@ -933,7 +933,7 @@ exception!
         // Test simple case without nested variables (which aren't supported yet)
         let input =
             r#"<esi:assign name="key" value="'val'" /><esi:vars>$(QUERY_STRING{param})</esi:vars>"#;
-        let (rest, _chunks) = parse(input).unwrap();
+        let (rest, _elements) = parse(input).unwrap();
         assert_eq!(rest.len(), 0);
     }
 

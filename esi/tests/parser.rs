@@ -6,13 +6,13 @@ use esi::parse;
 #[test]
 fn test_parse_basic_include() {
     let input = r#"<html><body><esi:include src="https://example.com/hello"/></body></html>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
     // Find the Include tag
-    let include_found = chunks.iter().any(|chunk| {
-        matches!(chunk, esi::parser_types::Element::Esi(
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error }
         ) if src == "https://example.com/hello" && alt.is_none() && !continue_on_error)
     });
@@ -23,12 +23,12 @@ fn test_parse_basic_include() {
 #[test]
 fn test_parse_include_with_alt_and_onerror() {
     let input = r#"<esi:include src="abc" alt="def" onerror="continue"/>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let include_found = chunks.iter().any(|chunk| {
-        matches!(chunk, esi::parser_types::Element::Esi(
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error }
         ) if src == "abc" && alt == &Some("def".to_string()) && *continue_on_error)
     });
@@ -43,12 +43,12 @@ fn test_parse_include_with_alt_and_onerror() {
 #[test]
 fn test_parse_open_include() {
     let input = r#"<esi:include src="abc" alt="def" onerror="continue"></esi:include>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let include_found = chunks.iter().any(|chunk| {
-        matches!(chunk, esi::parser_types::Chunk::Esi(
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Chunk::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error }
         ) if src == "abc" && alt == &Some("def".to_string()) && *continue_on_error)
     });
@@ -60,12 +60,12 @@ fn test_parse_open_include() {
 #[test]
 fn test_parse_include_with_onerror() {
     let input = r#"<esi:include src="/_fragments/content.html" onerror="continue"/>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let include_found = chunks.iter().any(|chunk| {
-        matches!(chunk, esi::parser_types::Element::Esi(
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error }
         ) if src == "/_fragments/content.html" && alt.is_none() && *continue_on_error)
     });
@@ -87,15 +87,15 @@ fn test_parse_try_with_attempt_and_except() {
     </esi:except>
 </esi:try>"#;
     
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     assert_eq!(remaining, "");
     
     // Find the Try tag
-    let try_tag_found = chunks.iter().any(|chunk| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Try { attempt_events, except_events }) = chunk {
+    let try_tag_found = elements.iter().any(|element| {
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Try { attempt_events, except_events }) = element {
             // Check attempt contains include for /abc
-            let attempt_has_abc = attempt_events.iter().any(|attempt_chunks| {
-                attempt_chunks.iter().any(|c| {
+            let attempt_has_abc = attempt_events.iter().any(|attempt_elements| {
+                attempt_elements.iter().any(|c| {
                     matches!(c, esi::parser_types::Element::Esi(
                         esi::parser_types::Tag::Include { src, .. }
                     ) if src == "/abc")
@@ -137,15 +137,15 @@ fn test_parse_nested_try() {
     </esi:except>
 </esi:try>"#;
     
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     assert_eq!(remaining, "");
     
     // Find outer Try tag
-    let nested_try_found = chunks.iter().any(|chunk| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Try { attempt_events, except_events }) = chunk {
+    let nested_try_found = elements.iter().any(|element| {
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Try { attempt_events, except_events }) = element {
             // Check outer attempt contains /abc
-            let has_abc = attempt_events.iter().any(|attempt_chunks| {
-                attempt_chunks.iter().any(|c| {
+            let has_abc = attempt_events.iter().any(|attempt_elements| {
+                attempt_elements.iter().any(|c| {
                     matches!(c, esi::parser_types::Element::Esi(
                         esi::parser_types::Tag::Include { src, .. }
                     ) if src == "/abc")
@@ -153,8 +153,8 @@ fn test_parse_nested_try() {
             });
             
             // Check outer attempt contains nested Try
-            let has_nested_try = attempt_events.iter().any(|attempt_chunks| {
-                attempt_chunks.iter().any(|c| {
+            let has_nested_try = attempt_events.iter().any(|attempt_elements| {
+                attempt_elements.iter().any(|c| {
                     matches!(c, esi::parser_types::Element::Esi(esi::parser_types::Tag::Try { .. }))
                 })
             });
@@ -178,17 +178,17 @@ fn test_parse_nested_try() {
 #[test]
 fn test_parse_assign() {
     let input = r#"<esi:assign name="foo" value="bar"/>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let assign_found = chunks.iter().any(|chunk| {
+    let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Assign { name, value }
-        ) = chunk {
+        ) = element {
             // Value is now a pre-parsed Expr
             // "bar" (not a valid ESI expression) becomes Expr::String(Some("bar"))
-            name == "foo" && matches!(value, esi::parser_types::Expr::String(Some("bar")))
+            *name == "foo" && matches!(value, esi::parser_types::Expr::String(Some("bar")))
         } else {
             false
         }
@@ -200,15 +200,15 @@ fn test_parse_assign() {
 #[test]
 fn test_parse_assign_short_with_integer() {
     let input = r#"<esi:assign name="count" value="123"/>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let assign_found = chunks.iter().any(|chunk| {
+    let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Assign { name, value }
-        ) = chunk {
-            name == "count" && *value == esi::parser_types::Expr::Integer(123)
+        ) = element {
+            *name == "count" && *value == esi::parser_types::Expr::Integer(123)
         } else {
             false
         }
@@ -220,15 +220,15 @@ fn test_parse_assign_short_with_integer() {
 #[test]
 fn test_parse_assign_short_with_variable() {
     let input = r#"<esi:assign name="copy" value="$(HTTP_HOST)"/>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let assign_found = chunks.iter().any(|chunk| {
+    let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Assign { name, value }
-        ) = chunk {
-            name == "copy" && matches!(value, esi::parser_types::Expr::Variable("HTTP_HOST", None, None))
+        ) = element {
+            *name == "copy" && matches!(value, esi::parser_types::Expr::Variable("HTTP_HOST", None, None))
         } else {
             false
         }
@@ -240,15 +240,15 @@ fn test_parse_assign_short_with_variable() {
 #[test]
 fn test_parse_assign_short_with_quoted_string() {
     let input = r#"<esi:assign name="text" value="'hello world'"/>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let assign_found = chunks.iter().any(|chunk| {
+    let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Assign { name, value }
-        ) = chunk {
-            name == "text" && matches!(value, esi::parser_types::Expr::String(Some("hello world")))
+        ) = element {
+            *name == "text" && matches!(value, esi::parser_types::Expr::String(Some("hello world")))
         } else {
             false
         }
@@ -262,15 +262,15 @@ fn test_parse_assign_long_form() {
     let input = r#"<esi:assign name="message">
         'This is a long form assign'
     </esi:assign>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let assign_found = chunks.iter().any(|chunk| {
+    let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Assign { name, value }
-        ) = chunk {
-            name == "message" && matches!(value, esi::parser_types::Expr::String(Some(_)))
+        ) = element {
+            *name == "message" && matches!(value, esi::parser_types::Expr::String(Some(_)))
         } else {
             false
         }
@@ -282,15 +282,15 @@ fn test_parse_assign_long_form() {
 #[test]
 fn test_parse_assign_long_with_variable() {
     let input = r#"<esi:assign name="host">$(HTTP_HOST)</esi:assign>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let assign_found = chunks.iter().any(|chunk| {
+    let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Assign { name, value }
-        ) = chunk {
-            name == "host" && matches!(value, esi::parser_types::Expr::Variable("HTTP_HOST", None, None))
+        ) = element {
+            *name == "host" && matches!(value, esi::parser_types::Expr::Variable("HTTP_HOST", None, None))
         } else {
             false
         }
@@ -302,15 +302,15 @@ fn test_parse_assign_long_with_variable() {
 #[test]
 fn test_parse_assign_with_function() {
     let input = r#"<esi:assign name="result" value="$url_encode('hello world')"/>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let assign_found = chunks.iter().any(|chunk| {
+    let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Assign { name, value }
-        ) = chunk {
-            name == "result" && matches!(value, esi::parser_types::Expr::Call("url_encode", _))
+        ) = element {
+            *name == "result" && matches!(value, esi::parser_types::Expr::Call("url_encode", _))
         } else {
             false
         }
@@ -323,15 +323,15 @@ fn test_parse_assign_with_function() {
 fn test_parse_assign_long_with_interpolation() {
     // Test compound expression with mixed text and variable
     let input = r#"<esi:assign name="message">Hello $(name)!</esi:assign>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let assign_found = chunks.iter().any(|chunk| {
+    let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Assign { name, value }
-        ) = chunk {
-            if name == "message" {
+        ) = element {
+            if *name == "message" {
                 // Should be an Interpolated expression with multiple elements
                 if let esi::parser_types::Expr::Interpolated(elements) = value {
                     // Should have: "Hello ", $(name), "!"
@@ -357,15 +357,15 @@ fn test_parse_assign_long_with_interpolation() {
 fn test_parse_assign_long_with_multiple_variables() {
     // Test compound expression with multiple variables
     let input = r#"<esi:assign name="full_name">$(first) $(last)</esi:assign>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    let assign_found = chunks.iter().any(|chunk| {
+    let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Assign { name, value }
-        ) = chunk {
-            if name == "full_name" {
+        ) = element {
+            if *name == "full_name" {
                 // Should be an Interpolated expression
                 matches!(value, esi::parser_types::Expr::Interpolated(_))
             } else {
@@ -382,13 +382,13 @@ fn test_parse_assign_long_with_multiple_variables() {
 #[test]
 fn test_parse_vars_short_form() {
     let input = r#"<esi:vars name="$(foo)"/>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    // Short form vars should produce an expression chunk
-    let var_found = chunks.iter().any(|chunk| {
-        matches!(chunk, esi::parser_types::Element::Expr(
+    // Short form vars should produce an expression element
+    let var_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Expr(
             esi::parser_types::Expr::Variable("foo", None, None)
         ))
     });
@@ -399,13 +399,13 @@ fn test_parse_vars_short_form() {
 #[test]
 fn test_parse_vars_long_form() {
     let input = r#"<esi:vars>$(foo)</esi:vars>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    // Long form vars should produce an expression chunk
-    let var_found = chunks.iter().any(|chunk| {
-        matches!(chunk, esi::parser_types::Element::Expr(
+    // Long form vars should produce an expression element
+    let var_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Expr(
             esi::parser_types::Expr::Variable("foo", None, None)
         ))
     });
@@ -425,11 +425,11 @@ fn test_parse_choose_when_otherwise() {
     </esi:otherwise>
 </esi:choose>"#;
     
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     assert_eq!(remaining, "");
     
-    let choose_found = chunks.iter().any(|chunk| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Choose { when_branches, otherwise_events }) = chunk {
+    let choose_found = elements.iter().any(|element| {
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Choose { when_branches, otherwise_events }) = element {
             let has_when = !when_branches.is_empty();
             let has_otherwise = !otherwise_events.is_empty();
             
@@ -469,12 +469,12 @@ fn test_parse_choose_multiple_when() {
     </esi:otherwise>
 </esi:choose>"#;
     
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     assert_eq!(remaining, "");
     
     // Verify we have multiple when branches using the new structure
-    let choose_found = chunks.iter().any(|chunk| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Choose { when_branches, otherwise_events }) = chunk {
+    let choose_found = elements.iter().any(|element| {
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Choose { when_branches, otherwise_events }) = element {
             // Should have 3 when branches
             assert_eq!(when_branches.len(), 3, "Should have 3 when branches");
             
@@ -498,20 +498,20 @@ fn test_parse_choose_multiple_when() {
 #[test]
 fn test_parse_remove() {
     let input = r#"<html><esi:remove>This should not appear</esi:remove><body>visible</body></html>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    // esi:remove content should not appear in chunks at all
-    let has_removed_text = chunks.iter().any(|chunk| {
-        matches!(chunk, esi::parser_types::Element::Text(t) if t.contains("should not appear"))
+    // esi:remove content should not appear in elements at all
+    let has_removed_text = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Text(t) if t.contains("should not appear"))
     });
     
-    assert!(!has_removed_text, "Content inside esi:remove should not appear in parsed chunks");
+    assert!(!has_removed_text, "Content inside esi:remove should not appear in parsed elements");
     
     // But visible content should be there
-    let has_visible = chunks.iter().any(|chunk| {
-        matches!(chunk, esi::parser_types::Element::Text(t) if t.contains("visible"))
+    let has_visible = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Text(t) if t.contains("visible"))
     });
     
     assert!(has_visible, "Content outside esi:remove should be parsed");
@@ -520,28 +520,28 @@ fn test_parse_remove() {
 #[test]
 fn test_parse_comment() {
     let input = r#"<html><esi:comment text="This is a comment"/><body>visible</body></html>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
-    // esi:comment should not produce any chunks
-    let comment_count = chunks.iter().filter(|chunk| {
-        matches!(chunk, esi::parser_types::Element::Esi(esi::parser_types::Tag::Vars { .. }))
+    // esi:comment should not produce any elements
+    let comment_count = elements.iter().filter(|element| {
+        matches!(element, esi::parser_types::Element::Esi(esi::parser_types::Tag::Vars { .. }))
     }).count();
     
-    assert_eq!(comment_count, 0, "Comments should not produce chunks");
+    assert_eq!(comment_count, 0, "Comments should not produce elements");
 }
 
 #[test]
 fn test_parse_text_tag() {
     let input = r#"<esi:text>This <esi:include src="test"/> should appear as-is</esi:text>"#;
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     
     assert_eq!(remaining, "");
     
     // esi:text content should be plain text, ESI tags inside should not be parsed
-    let text_found = chunks.iter().any(|chunk| {
-        matches!(chunk, esi::parser_types::Element::Text(t) 
+    let text_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Text(t) 
             if t.contains("<esi:include") && t.contains("should appear as-is"))
     });
     
@@ -561,17 +561,17 @@ fn test_parse_mixed_content() {
     </body>
 </html>"#;
     
-    let (remaining, chunks) = parse(input).expect("should parse");
+    let (remaining, elements) = parse(input).expect("should parse");
     assert_eq!(remaining, "");
     
     // Should have HTML, expressions, ESI tags, and text
-    let has_html = chunks.iter().any(|c| matches!(c, esi::parser_types::Element::Html(_)));
-    let has_expr = chunks.iter().any(|c| matches!(c, esi::parser_types::Element::Expr(_)));
-    let has_esi = chunks.iter().any(|c| matches!(c, esi::parser_types::Element::Esi(_)));
-    let has_text = chunks.iter().any(|c| matches!(c, esi::parser_types::Element::Text(_)));
+    let has_html = elements.iter().any(|c| matches!(c, esi::parser_types::Element::Html(_)));
+    let has_expr = elements.iter().any(|c| matches!(c, esi::parser_types::Element::Expr(_)));
+    let has_esi = elements.iter().any(|c| matches!(c, esi::parser_types::Element::Esi(_)));
+    let has_text = elements.iter().any(|c| matches!(c, esi::parser_types::Element::Text(_)));
     
-    assert!(has_html, "Should have HTML chunks");
-    assert!(has_expr, "Should have expression chunks");
-    assert!(has_esi, "Should have ESI tag chunks");
-    assert!(has_text, "Should have text chunks");
+    assert!(has_html, "Should have HTML elements");
+    assert!(has_expr, "Should have expression elements");
+    assert!(has_esi, "Should have ESI tag elements");
+    assert!(has_text, "Should have text elements");
 }
