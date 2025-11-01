@@ -517,7 +517,7 @@ impl Processor {
         let mut doc_content = String::new();
         src_document
             .read_to_string(&mut doc_content)
-            .map_err(|e| ESIError::WriterError(e))?;
+            .map_err(ESIError::WriterError)?;
 
         // Parse the document using nom parser
         let (remaining, chunks) = parser::parse(&doc_content)

@@ -166,7 +166,7 @@ fn esi_when(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
                 .iter()
                 .find(|(key, _)| *key == "test")
                 .map(|(_, val)| val.to_string())
-                .unwrap_or_else(|| String::new());
+                .unwrap_or_else(String::new);
 
             let match_name = attrs
                 .iter()
@@ -449,12 +449,15 @@ fn fn_name(input: &str) -> IResult<&str, &str, Error<&str>> {
     preceded(char('$'), take_while1(is_lower_alphanumeric_or_underscore))(input)
 }
 
-fn var_name(input: &str) -> IResult<&str, (&str, Option<Expr<'_>>, Option<Expr<'_>>), Error<&str>> {
-    tuple((
-        take_while1(is_alphanumeric_or_underscore),
-        opt(delimited(char('{'), var_key_expr, char('}'))),
-        opt(preceded(char('|'), fn_nested_argument)),
-    ))(input)
+fn var_name(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
+    map(
+        tuple((
+            take_while1(is_alphanumeric_or_underscore),
+            opt(delimited(char('{'), var_key_expr, char('}'))),
+            opt(preceded(char('|'), fn_nested_argument)),
+        )),
+        |(name, key, default)| Expr::Variable(name, key.map(Box::new), default.map(Box::new)),
+    )(input)
 }
 
 fn not_dollar_or_curlies(input: &str) -> IResult<&str, &str, Error<&str>> {
@@ -547,13 +550,7 @@ fn call(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
 }
 
 fn variable(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
-    let (input, parsed) = delimited(tag("$("), var_name, char(')'))(input)?;
-
-    let (name, key, default) = parsed;
-    let key = key.map(Box::new);
-    let default = default.map(Box::new);
-
-    Ok((input, Expr::Variable(name, key, default)))
+    delimited(tag("$("), var_name, char(')'))(input)
 }
 
 fn operator(input: &str) -> IResult<&str, Operator, Error<&str>> {
@@ -581,7 +578,7 @@ fn expr(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
             rest,
             Expr::Comparison {
                 left: Box::new(exp),
-                operator: operator,
+                operator,
                 right: Box::new(right_exp),
             },
         ))
@@ -641,7 +638,7 @@ exception!
         match result {
             Ok((rest, _)) => {
                 // Just test to make sure it parsed the whole thing
-                if rest.len() != 0 {
+                if !rest.is_empty() {
                     panic!("Failed to parse completely. Remaining: '{}'", rest);
                 }
             }
