@@ -149,9 +149,19 @@ fn process_chunk_to_output(
                                             .unwrap_or("<!-- invalid utf8 -->");
                                         output_writer.write_all(body_str.as_bytes())?;
                                     }
-                                    crate::PendingFragmentContent::PendingRequest(_) => {
-                                        // For pending requests, just output a placeholder for now
-                                        output_writer.write_all(b"<!-- pending request -->")?;
+                                    crate::PendingFragmentContent::PendingRequest(pending) => {
+                                        // This shouldn't happen in Phase 3 since we wait for all requests in Phase 2,
+                                        // but handle it gracefully by waiting for the request now
+                                        let response = pending.wait().map_err(|e| {
+                                            ESIError::ExpressionError(format!(
+                                                "Fragment request wait failed: {}",
+                                                e
+                                            ))
+                                        })?;
+                                        let body_bytes = response.into_body_bytes();
+                                        let body_str = std::str::from_utf8(&body_bytes)
+                                            .unwrap_or("<!-- invalid utf8 -->");
+                                        output_writer.write_all(body_str.as_bytes())?;
                                     }
                                     crate::PendingFragmentContent::NoContent => {
                                         // No content to output
@@ -260,9 +270,68 @@ fn process_chunk_to_output(
                     }
                     Ok(())
                 }
-                _ => {
-                    // Handle other tag types as placeholders for now
-                    output_writer.write_all(b"<!-- ESI tag not implemented -->")?;
+                NomTag::Try {
+                    attempt_events,
+                    except_events,
+                } => {
+                    // Try processing attempt blocks - if any fail, process except block
+                    let mut any_succeeded = false;
+                    for attempt_chunks in attempt_events {
+                        let mut attempt_output = Vec::new();
+                        let attempt_result = (|| {
+                            for chunk in attempt_chunks {
+                                process_chunk_to_output(
+                                    chunk,
+                                    ctx,
+                                    &mut attempt_output,
+                                    original_request_metadata,
+                                    dispatch_fragment_request,
+                                    is_escaped_content,
+                                )?;
+                            }
+                            Ok::<(), ExecutionError>(())
+                        })();
+
+                        if attempt_result.is_ok() {
+                            // Attempt succeeded - write its output and we're done
+                            output_writer.write_all(&attempt_output)?;
+                            any_succeeded = true;
+                            break;
+                        }
+                        // Attempt failed - try next attempt
+                    }
+
+                    // If all attempts failed, process except block
+                    if !any_succeeded {
+                        for chunk in except_events {
+                            process_chunk_to_output(
+                                chunk,
+                                ctx,
+                                output_writer,
+                                original_request_metadata,
+                                dispatch_fragment_request,
+                                is_escaped_content,
+                            )?;
+                        }
+                    }
+                    Ok(())
+                }
+                NomTag::Vars { .. } => {
+                    // <esi:vars> is handled by the parser - it returns chunks directly, never creates a Tag::Vars
+                    // If we see this, it's a parser bug. Just skip it.
+                    debug!("Unexpected Tag::Vars - parser should return chunks directly for <esi:vars>");
+                    Ok(())
+                }
+                NomTag::When { .. }
+                | NomTag::Attempt(_)
+                | NomTag::Except(_)
+                | NomTag::Otherwise => {
+                    // These tags should only appear inside Choose/Try blocks and are handled there
+                    // If they appear standalone, it's likely a parser bug or malformed ESI
+                    debug!(
+                        "Unexpected standalone {:?} tag - should be inside Choose/Try block",
+                        tag
+                    );
                     Ok(())
                 }
             }
