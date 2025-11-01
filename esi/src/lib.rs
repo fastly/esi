@@ -7,7 +7,7 @@ mod functions;
 mod parser;
 pub mod parser_types;
 
-use crate::expression::{try_evaluate_interpolated, EvalContext};
+use crate::expression::EvalContext;
 use fastly::http::request::PendingRequest;
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Request, Response};
@@ -43,8 +43,8 @@ impl From<Response> for PendingFragmentContent {
     }
 }
 
-// Process nom parser chunks directly to output - with fragment request support
-fn process_nom_chunk_to_output(
+// Process parser chunks directly to output - with fragment request support
+fn process_chunk_to_output(
     chunk: parser_types::Chunk,
     ctx: &mut EvalContext,
     output_writer: &mut impl Write,
@@ -65,20 +65,21 @@ fn process_nom_chunk_to_output(
             Ok(())
         }
         Chunk::Expr(expr) => {
-            // Evaluate the expression and write as text
-            eprintln!("DEBUG: Evaluating expression: {:?}", expr);
-            match evaluate_simple_nom_expr(expr, ctx) {
+            // Evaluate the expression using the full evaluator and write as text
+            match expression::eval_expr(expr, ctx) {
                 Ok(result) => {
-                    eprintln!("DEBUG: Expression evaluated to: '{}'", result);
-                    if !result.is_empty() {
-                        output_writer.write_all(result.as_bytes())?;
+                    // Don't output anything for Null values
+                    if !matches!(result, expression::Value::Null) {
+                        let result_str = result.to_string();
+                        if !result_str.is_empty() {
+                            output_writer.write_all(result_str.as_bytes())?;
+                        }
                     }
                 }
                 Err(e) => {
-                    eprintln!("DEBUG: Expression evaluation failed: {:?}", e);
+                    debug!("Expression evaluation failed: {:?}", e);
                 }
             }
-            // Swallow errors as intended for expressions
             Ok(())
         }
         Chunk::Esi(tag) => {
@@ -103,11 +104,13 @@ fn process_nom_chunk_to_output(
                         value.clone()
                     };
 
-                    // Evaluate the value as an ESI expression
-                    let evaluated_value =
-                        crate::expression::evaluate_expression(&unquoted_value, ctx)
-                            .map(|v| v.to_string())
-                            .unwrap_or(unquoted_value);
+                    // Evaluate the value as an ESI expression using parser
+                    let evaluated_value = crate::parser::parse_expression(&unquoted_value)
+                        .map(|(_, expr)| crate::expression::eval_expr(expr, ctx))
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .map(|v| v.to_string())
+                        .unwrap_or(unquoted_value);
 
                     ctx.set_variable(
                         &name,
@@ -219,11 +222,17 @@ fn process_nom_chunk_to_output(
                             if let Some(match_name) = match_name {
                                 ctx.set_match_name(&match_name);
                             }
-                            let result = crate::expression::evaluate_expression(&test, ctx)?;
+                            let (_, expr) =
+                                crate::parser::parse_expression(&test).map_err(|e| {
+                                    ExecutionError::ExpressionError(format!(
+                                        "Failed to parse test expression: {e}"
+                                    ))
+                                })?;
+                            let result = crate::expression::eval_expr(expr, ctx)?;
                             if result.to_bool() {
                                 chose_branch = true;
                                 for chunk in events {
-                                    process_nom_chunk_to_output(
+                                    process_chunk_to_output(
                                         chunk,
                                         ctx,
                                         output_writer,
@@ -239,7 +248,7 @@ fn process_nom_chunk_to_output(
 
                     if !chose_branch {
                         for chunk in otherwise_events {
-                            process_nom_chunk_to_output(
+                            process_chunk_to_output(
                                 chunk,
                                 ctx,
                                 output_writer,
@@ -251,11 +260,6 @@ fn process_nom_chunk_to_output(
                     }
                     Ok(())
                 }
-                NomTag::Vars { name: _ } => {
-                    // For now, just output placeholder - this needs to be handled properly
-                    output_writer.write_all(b"<!-- ESI vars placeholder -->")?;
-                    Ok(())
-                }
                 _ => {
                     // Handle other tag types as placeholders for now
                     output_writer.write_all(b"<!-- ESI tag not implemented -->")?;
@@ -263,57 +267,6 @@ fn process_nom_chunk_to_output(
                 }
             }
         }
-    }
-}
-
-// Simple nom expression evaluator
-fn evaluate_simple_nom_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<String> {
-    use crate::expression::Value;
-    use parser_types::Expr;
-
-    match expr {
-        Expr::Variable(name, key, _default) => {
-            // Evaluate the key expression if present
-            let evaluated_key = if let Some(key_expr) = key {
-                // Recursively evaluate the key expression
-                let key_result = evaluate_simple_nom_expr(*key_expr, ctx)?;
-                Some(key_result)
-            } else {
-                None
-            };
-
-            let value = ctx.get_variable(name, evaluated_key.as_deref());
-            eprintln!(
-                "DEBUG: Variable lookup: {}[{:?}] = {:?}",
-                name, evaluated_key, value
-            );
-            match value {
-                Value::Text(s) => Ok(s.to_string()),
-                _ => Ok(String::new()),
-            }
-        }
-        Expr::Call(func_name, args) => {
-            // Simple function calls - only handle the basic ones
-            match func_name {
-                "lower" => {
-                    if let Some(arg) = args.first() {
-                        let arg_str = evaluate_simple_nom_expr(arg.clone(), ctx)?;
-                        Ok(arg_str.to_lowercase())
-                    } else {
-                        Err(ESIError::FunctionError(
-                            "lower function requires 1 argument".to_string(),
-                        ))
-                    }
-                }
-                _ => Err(ESIError::FunctionError(format!(
-                    "Unknown function: {}",
-                    func_name
-                ))),
-            }
-        }
-        Expr::String(Some(s)) => Ok(s.to_string()),
-        Expr::String(None) => Ok(String::new()),
-        _ => Ok(String::new()),
     }
 }
 
@@ -727,7 +680,7 @@ impl Processor {
                 }
             } else {
                 // Not a fragment - process normally
-                process_nom_chunk_to_output(
+                process_chunk_to_output(
                     chunk,
                     &mut ctx,
                     output_writer,
@@ -816,33 +769,36 @@ pub fn process_interpolated_chars<F>(
 where
     F: FnMut(String) -> Result<()>,
 {
-    let mut buf = vec![];
-    let mut cur = input.chars().peekable();
-
-    while let Some(c) = cur.peek() {
-        if *c == '$' {
-            let mut new_cur = cur.clone();
-
-            if let Some(value) = try_evaluate_interpolated(&mut new_cur, ctx) {
-                // If we have accumulated text, output it first
-                if !buf.is_empty() {
-                    segment_handler(buf.into_iter().collect())?;
-                    buf = vec![];
-                }
-
-                // Output the evaluated expression result
-                segment_handler(value.to_string())?;
-            }
-            // Update our position
-            cur = new_cur;
-        } else {
-            buf.push(cur.next().unwrap());
+    // Parse the input string with interpolated expressions using nom parser
+    let chunks = match crate::parser::parse_interpolated_string(input) {
+        Ok((_, chunks)) => chunks,
+        Err(_) => {
+            // If parsing fails, treat the whole input as text
+            segment_handler(input.to_string())?;
+            return Ok(());
         }
-    }
+    };
 
-    // Output any remaining text
-    if !buf.is_empty() {
-        segment_handler(buf.into_iter().collect())?;
+    // Process each chunk
+    for chunk in chunks {
+        match chunk {
+            parser_types::Chunk::Text(text) => {
+                segment_handler(text.to_string())?;
+            }
+            parser_types::Chunk::Expr(expr) => {
+                // Evaluate the expression using eval_expr
+                match crate::expression::eval_expr(expr, ctx) {
+                    Ok(value) => segment_handler(value.to_string())?,
+                    Err(e) => {
+                        // Log the error but continue processing (same behavior as old code)
+                        debug!("Error while evaluating interpolated expression: {e}");
+                    }
+                }
+            }
+            _ => {
+                // Skip ESI tags (shouldn't happen in interpolated strings but handle gracefully)
+            }
+        }
     }
 
     Ok(())

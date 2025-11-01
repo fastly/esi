@@ -16,6 +16,23 @@ pub fn parse(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     })(input)
 }
 
+/// Parses a standalone ESI expression (for use in test attributes, etc.)
+pub fn parse_expression(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
+    expr(input)
+}
+
+/// Parses a string that may contain interpolated expressions like $(VAR)
+pub fn parse_interpolated_string(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
+    fold_many0(
+        alt((interpolated_expression, interpolated_text)),
+        Vec::new,
+        |mut acc: Vec<Chunk>, mut item| {
+            acc.append(&mut item);
+            acc
+        },
+    )(input)
+}
+
 fn chunk(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     alt((text, esi_tag, html))(input)
 }
@@ -239,6 +256,10 @@ fn esi_choose(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     )(input)
 }
 
+// Note: <esi:vars> does NOT create a Tag::Vars chunk. Instead, it parses the content
+// (either the body of <esi:vars>...</esi:vars> or the name attribute of <esi:vars name="..."/>)
+// and returns the evaluated content directly as Vec<Chunk>. These chunks (Text, Expr, Html, etc.)
+// are then flattened into the main chunk stream and processed normally by process_chunk() in lib.rs.
 fn esi_vars(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     alt((esi_vars_short, esi_vars_long))(input)
 }
@@ -525,7 +546,17 @@ fn fn_argument(input: &str) -> IResult<&str, Vec<Expr<'_>>, Error<&str>> {
 }
 
 fn fn_nested_argument(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
-    alt((call, variable, string, bareword))(input)
+    alt((call, variable, string, integer, bareword))(input)
+}
+
+fn integer(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
+    map_res(
+        recognize(tuple((
+            opt(char('-')),
+            take_while1(|c: char| c.is_ascii_digit()),
+        ))),
+        |s: &str| s.parse::<i32>().map(Expr::Integer),
+    )(input)
 }
 
 fn bareword(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
@@ -554,25 +585,51 @@ fn variable(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
 }
 
 fn operator(input: &str) -> IResult<&str, Operator, Error<&str>> {
-    map(
-        alt((tag("matches"), tag("matches_i"))),
-        |opstr| match opstr {
-            "matches" => Operator::Matches,
-            "matches_i" => Operator::MatchesInsensitive,
-            _ => unreachable!(),
-        },
-    )(input)
+    alt((
+        // Try longer operators first
+        map(tag("matches_i"), |_| Operator::MatchesInsensitive),
+        map(tag("matches"), |_| Operator::Matches),
+        map(tag("=="), |_| Operator::Equals),
+        map(tag("!="), |_| Operator::NotEquals),
+        map(tag("<="), |_| Operator::LessThanOrEqual),
+        map(tag(">="), |_| Operator::GreaterThanOrEqual),
+        map(tag("<"), |_| Operator::LessThan),
+        map(tag(">"), |_| Operator::GreaterThan),
+        map(tag("&&"), |_| Operator::And),
+        map(tag("||"), |_| Operator::Or),
+    ))(input)
 }
 
 fn interpolated_expression(input: &str) -> IResult<&str, Vec<Chunk<'_>>, Error<&str>> {
     map(alt((call, variable)), |expr| vec![Chunk::Expr(expr)])(input)
 }
 
+fn primary_expr(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
+    alt((
+        // Parse negation: !expr
+        map(
+            preceded(char('!'), preceded(multispace0, primary_expr)),
+            |expr| Expr::Not(Box::new(expr)),
+        ),
+        // Parse grouped expression: (expr)
+        delimited(
+            char('('),
+            delimited(multispace0, expr, multispace0),
+            char(')'),
+        ),
+        // Parse basic expressions
+        call,
+        variable,
+        integer,
+        string,
+    ))(input)
+}
+
 fn expr(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
-    let (rest, exp) = alt((call, variable, string))(input)?;
+    let (rest, exp) = primary_expr(input)?;
 
     if let Ok((rest, (operator, right_exp))) =
-        tuple((delimited(multispace1, operator, multispace1), expr))(rest)
+        tuple((delimited(multispace0, operator, multispace0), expr))(rest)
     {
         Ok((
             rest,
@@ -839,5 +896,109 @@ exception!
         .unwrap();
         // just make sure it parsed the whole thing
         assert_eq!(rest.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_equality_operators() {
+        let input = r#"$(foo) == 'bar'"#;
+        let (rest, result) = expr(input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::Equals,
+                ..
+            }
+        ));
+
+        let input2 = r#"$(foo) != 'bar'"#;
+        let (rest, result) = expr(input2).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::NotEquals,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_comparison_operators() {
+        let input = r#"$(count) < 10"#;
+        let (rest, result) = expr(input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::LessThan,
+                ..
+            }
+        ));
+
+        let input2 = r#"$(count) >= 5"#;
+        let (rest, result) = expr(input2).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::GreaterThanOrEqual,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_logical_operators() {
+        // With parentheses to enforce correct precedence
+        let input = r#"($(foo) == 'bar') && ($(baz) == 'qux')"#;
+        let (rest, result) = expr(input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::And,
+                ..
+            }
+        ));
+
+        let input2 = r#"($(foo) == 'bar') || ($(baz) == 'qux')"#;
+        let (rest, result) = expr(input2).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::Or,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_negation() {
+        let input = r#"!$(flag)"#;
+        let (rest, result) = expr(input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(result, Expr::Not(_)));
+
+        // Test negation with comparison
+        let input2 = r#"!($(foo) == 'bar')"#;
+        let (rest, result) = expr(input2).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(result, Expr::Not(_)));
+    }
+
+    #[test]
+    fn test_parse_grouped_expressions() {
+        let input = r#"($(foo) == 'bar')"#;
+        let (rest, result) = expr(input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::Equals,
+                ..
+            }
+        ));
     }
 }

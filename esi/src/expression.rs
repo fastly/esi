@@ -3,65 +3,155 @@ use fastly::Request;
 use log::debug;
 use regex::RegexBuilder;
 use std::borrow::Cow;
-use std::fmt::Write;
-use std::iter::Peekable;
-use std::slice::Iter;
-use std::str::Chars;
 use std::{collections::HashMap, fmt::Display};
 
-use crate::{functions, ExecutionError, Result};
-/// Attempts to evaluate an interpolated expression, returning None on failure
+use crate::{functions, parser_types, ExecutionError, Result};
+
+/// Evaluates a nom-parsed expression directly without re-lexing/parsing
 ///
-/// This function evaluates expressions like `$(HTTP_HOST)` in ESI markup, gracefully
-/// handling failures by returning None instead of propagating errors. This ensures
-/// that a failed expression evaluation does not halt overall document processing.
+/// This function takes an expression that was already parsed by the nom parser
+/// and evaluates it using the full expression evaluator, supporting all operators,
+/// comparisons, and functions.
 ///
 /// # Arguments
-/// * `cur` - Peekable character iterator containing the expression to evaluate
+/// * `expr` - The parsed expression from nom parser
 /// * `ctx` - Evaluation context containing variables and state
 ///
 /// # Returns
-/// * `Option<Value>` - The evaluated expression value if successful, None if evaluation fails
-/// ```
-pub fn try_evaluate_interpolated(
-    cur: &mut Peekable<Chars>,
-    ctx: &mut EvalContext,
-) -> Option<Value> {
-    evaluate_interpolated(cur, ctx)
-        .map_err(|e| {
-            // We eat the error here because a failed expression should result in an empty result
-            // and not prevent the rest of the file from processing.
-            debug!("Error while evaluating interpolated expression: {e}");
-        })
-        .ok()
-}
+/// * `Result<Value>` - The evaluated expression result or an error
+pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Value> {
+    match expr {
+        parser_types::Expr::Integer(i) => Ok(Value::Integer(i)),
+        parser_types::Expr::String(Some(s)) => Ok(Value::Text(Cow::Owned(s.to_string()))),
+        parser_types::Expr::String(None) => Ok(Value::Text(Cow::Owned(String::new()))),
+        parser_types::Expr::Variable(name, key, default) => {
+            // Evaluate the key expression if present
+            let evaluated_key = if let Some(key_expr) = key {
+                let key_result = eval_expr(*key_expr, ctx)?;
+                Some(key_result.to_string())
+            } else {
+                None
+            };
 
-fn evaluate_interpolated(cur: &mut Peekable<Chars>, ctx: &mut EvalContext) -> Result<Value> {
-    lex_interpolated_expr(cur)
-        .and_then(|tokens| parse(&tokens))
-        .and_then(|expr| eval_expr(expr, ctx))
+            let value = ctx.get_variable(name, evaluated_key.as_deref());
+
+            // If value is Null and we have a default, evaluate and use the default
+            if matches!(value, Value::Null) {
+                if let Some(default_expr) = default {
+                    return eval_expr(*default_expr, ctx);
+                }
+            }
+
+            Ok(value)
+        }
+        parser_types::Expr::Comparison {
+            left,
+            operator,
+            right,
+        } => {
+            let left_val = eval_expr(*left, ctx)?;
+            let right_val = eval_expr(*right, ctx)?;
+
+            match operator {
+                parser_types::Operator::Matches | parser_types::Operator::MatchesInsensitive => {
+                    let test = left_val.to_string();
+                    let pattern = right_val.to_string();
+
+                    let re = if operator == parser_types::Operator::Matches {
+                        RegexBuilder::new(&pattern).build()?
+                    } else {
+                        RegexBuilder::new(&pattern).case_insensitive(true).build()?
+                    };
+
+                    if let Some(captures) = re.captures(&test) {
+                        for (i, cap) in captures.iter().enumerate() {
+                            let capval = cap.map_or(Value::Null, |s| {
+                                Value::Text(Cow::Owned(s.as_str().into()))
+                            });
+                            ctx.set_variable(&ctx.match_name.clone(), Some(&i.to_string()), capval);
+                        }
+                        Ok(Value::Boolean(true))
+                    } else {
+                        Ok(Value::Boolean(false))
+                    }
+                }
+                parser_types::Operator::Equals => {
+                    // Try numeric comparison first, then string comparison
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        Ok(Value::Boolean(l == r))
+                    } else {
+                        Ok(Value::Boolean(
+                            left_val.to_string() == right_val.to_string(),
+                        ))
+                    }
+                }
+                parser_types::Operator::NotEquals => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        Ok(Value::Boolean(l != r))
+                    } else {
+                        Ok(Value::Boolean(
+                            left_val.to_string() != right_val.to_string(),
+                        ))
+                    }
+                }
+                parser_types::Operator::LessThan => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        Ok(Value::Boolean(l < r))
+                    } else {
+                        Ok(Value::Boolean(left_val.to_string() < right_val.to_string()))
+                    }
+                }
+                parser_types::Operator::LessThanOrEqual => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        Ok(Value::Boolean(l <= r))
+                    } else {
+                        Ok(Value::Boolean(
+                            left_val.to_string() <= right_val.to_string(),
+                        ))
+                    }
+                }
+                parser_types::Operator::GreaterThan => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        Ok(Value::Boolean(l > r))
+                    } else {
+                        Ok(Value::Boolean(left_val.to_string() > right_val.to_string()))
+                    }
+                }
+                parser_types::Operator::GreaterThanOrEqual => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        Ok(Value::Boolean(l >= r))
+                    } else {
+                        Ok(Value::Boolean(
+                            left_val.to_string() >= right_val.to_string(),
+                        ))
+                    }
+                }
+                parser_types::Operator::And => {
+                    Ok(Value::Boolean(left_val.to_bool() && right_val.to_bool()))
+                }
+                parser_types::Operator::Or => {
+                    Ok(Value::Boolean(left_val.to_bool() || right_val.to_bool()))
+                }
+            }
+        }
+        parser_types::Expr::Call(func_name, args) => {
+            let mut values = Vec::new();
+            for arg in args {
+                values.push(eval_expr(arg, ctx)?);
+            }
+            call_dispatch(func_name, &values)
+        }
+        parser_types::Expr::Not(expr) => {
+            let inner_value = eval_expr(*expr, ctx)?;
+            Ok(Value::Boolean(!inner_value.to_bool()))
+        }
+    }
 }
 
 /// Evaluates an ESI expression string in the given context
 ///
 /// # Arguments
 /// * `raw_expr` - The raw expression string to evaluate
-/// * `ctx` - Evaluation context containing variables and state
-///
-/// # Returns
-/// * `Result<Value>` - The evaluated expression result or an error
-///
-pub fn evaluate_expression(raw_expr: &str, ctx: &mut EvalContext) -> Result<Value> {
-    lex_expr(raw_expr)
-        .and_then(|tokens| parse(&tokens))
-        .and_then(|expr: Expr| eval_expr(expr, ctx))
-        .map_err(|e| {
-            ExecutionError::ExpressionError(format!(
-                "Error occurred during expression evaluation: {e}"
-            ))
-        })
-}
-
 pub struct EvalContext {
     vars: HashMap<String, Value>,
     match_name: String,
@@ -230,111 +320,6 @@ impl Display for Value {
     }
 }
 
-fn eval_expr(expr: Expr, ctx: &mut EvalContext) -> Result<Value> {
-    let result = match expr {
-        Expr::Integer(i) => Value::Integer(i),
-        Expr::String(s) => Value::Text(s.into()),
-        Expr::Variable(key, None) => ctx.get_variable(&key, None),
-        Expr::Variable(key, Some(subkey_expr)) => {
-            let subkey = eval_expr(*subkey_expr, ctx)?.to_string();
-            ctx.get_variable(&key, Some(&subkey))
-        }
-        Expr::Comparison(c) => {
-            let left = eval_expr(c.left, ctx)?;
-            let right = eval_expr(c.right, ctx)?;
-            match c.operator {
-                Operator::Matches | Operator::MatchesInsensitive => {
-                    let test = left.to_string();
-                    let pattern = right.to_string();
-
-                    let re = if c.operator == Operator::Matches {
-                        RegexBuilder::new(&pattern).build()?
-                    } else {
-                        RegexBuilder::new(&pattern).case_insensitive(true).build()?
-                    };
-
-                    if let Some(captures) = re.captures(&test) {
-                        for (i, cap) in captures.iter().enumerate() {
-                            let capval = cap.map_or(Value::Null, |s| {
-                                Value::Text(Cow::Owned(s.as_str().into()))
-                            });
-                            {
-                                ctx.set_variable(
-                                    &ctx.match_name.clone(),
-                                    Some(&i.to_string()),
-                                    capval,
-                                );
-                            }
-                        }
-                        Value::Boolean(true)
-                    } else {
-                        Value::Boolean(false)
-                    }
-                }
-                Operator::Equals => {
-                    // Try numeric comparison first, then string comparison
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
-                        Value::Boolean(l == r)
-                    } else {
-                        Value::Boolean(left.to_string() == right.to_string())
-                    }
-                }
-                Operator::NotEquals => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
-                        Value::Boolean(l != r)
-                    } else {
-                        Value::Boolean(left.to_string() != right.to_string())
-                    }
-                }
-                Operator::LessThan => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
-                        Value::Boolean(l < r)
-                    } else {
-                        Value::Boolean(left.to_string() < right.to_string())
-                    }
-                }
-                Operator::LessThanOrEqual => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
-                        Value::Boolean(l <= r)
-                    } else {
-                        Value::Boolean(left.to_string() <= right.to_string())
-                    }
-                }
-                Operator::GreaterThan => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
-                        Value::Boolean(l > r)
-                    } else {
-                        Value::Boolean(left.to_string() > right.to_string())
-                    }
-                }
-                Operator::GreaterThanOrEqual => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left, &right) {
-                        Value::Boolean(l >= r)
-                    } else {
-                        Value::Boolean(left.to_string() >= right.to_string())
-                    }
-                }
-                Operator::And => Value::Boolean(left.to_bool() && right.to_bool()),
-                Operator::Or => Value::Boolean(left.to_bool() || right.to_bool()),
-            }
-        }
-        Expr::Call(identifier, args) => {
-            let mut values = Vec::new();
-            for arg in args {
-                values.push(eval_expr(arg, ctx)?);
-            }
-            call_dispatch(&identifier, &values)?
-        }
-        Expr::Not(expr) => {
-            // Evaluate the inner expression and negate its boolean value
-            let inner_value = eval_expr(*expr, ctx)?;
-            Value::Boolean(!inner_value.to_bool())
-        }
-    };
-    debug!("Expression result: {result:?}");
-    Ok(result)
-}
-
 fn call_dispatch(identifier: &str, args: &[Value]) -> Result<Value> {
     match identifier {
         "ping" => Ok(Value::Text("pong".into())),
@@ -347,812 +332,30 @@ fn call_dispatch(identifier: &str, args: &[Value]) -> Result<Value> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum Expr {
-    Integer(i32),
-    String(String),
-    Variable(String, Option<Box<Expr>>),
-    Comparison(Box<Comparison>),
-    Call(String, Vec<Expr>),
-    Not(Box<Expr>), // Unary negation
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Operator {
-    Matches,
-    MatchesInsensitive,
-    Equals,
-    NotEquals,
-    LessThan,
-    LessThanOrEqual,
-    GreaterThan,
-    GreaterThanOrEqual,
-    And,
-    Or,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct Comparison {
-    left: Expr,
-    operator: Operator,
-    right: Expr,
-}
-// The parser attempts to implement this BNF:
-//
-// Expr     <- integer | string | Variable | Call | BinaryOp
-// Variable <- '$' '(' bareword ['{' Expr '}'] ')'
-// Call     <- '$' bareword '(' Expr? [',' Expr] ')'
-// BinaryOp <- Expr Operator Expr
-//
-fn parse(tokens: &[Token]) -> Result<Expr> {
-    let mut cur = tokens.iter().peekable();
-
-    let expr = parse_expr(&mut cur)
-        .map_err(|e| ExecutionError::ExpressionError(format!("parse error: {e}")))?;
-
-    // Check if we've reached the end of the tokens
-    if cur.peek().is_some() {
-        let cur_left = cur.fold(String::new(), |mut acc, t| {
-            write!(&mut acc, "{t:?}").unwrap();
-            acc
-        });
-        return Err(ExecutionError::ExpressionError(format!(
-            "expected eof. tokens left: {cur_left}"
-        )));
-    }
-
-    Ok(expr)
-}
-
-fn parse_expr(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
-    debug!("Parsing expression, current token: {cur:?}");
-    let node = if let Some(token) = cur.next() {
-        match token {
-            Token::Integer(i) => Expr::Integer(*i),
-            Token::String(s) => Expr::String(s.clone()),
-            Token::Dollar => parse_dollar(cur)?,
-            Token::Negation => {
-                // Handle unary negation by parsing the expression that follows
-                // and wrapping it in a Not expression
-                let expr = parse_expr(cur)?;
-                Expr::Not(Box::new(expr))
-            }
-            Token::OpenParen => {
-                // Handle parenthesized expressions
-                let inner_expr = parse_expr(cur)?;
-
-                // Expect a closing parenthesis
-                if matches!(cur.next(), Some(Token::CloseParen)) {
-                    inner_expr
-                } else {
-                    return Err(ExecutionError::ExpressionError(
-                        "missing closing parenthesis".to_string(),
-                    ));
-                }
-            }
-            unexpected => {
-                return Err(ExecutionError::ExpressionError(format!(
-                    "unexpected token starting expression: {unexpected:?}",
-                )));
-            }
-        }
-    } else {
-        return Err(ExecutionError::ExpressionError(
-            "unexpected end of tokens".to_string(),
-        ));
-    };
-
-    // Check if there's a binary operation, or if we've reached the end of the expression
-    match cur.peek() {
-        Some(Token::Operation(op)) => {
-            let operator = op.clone();
-            cur.next(); // consume the operator token
-            let left = node;
-            let right = parse_expr(cur)?;
-            let expr = Expr::Comparison(Box::new(Comparison {
-                left,
-                operator,
-                right,
-            }));
-            Ok(expr)
-        }
-        _ => Ok(node),
-    }
-}
-
-fn parse_dollar(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
-    match cur.next() {
-        Some(Token::OpenParen) => parse_variable(cur),
-        Some(Token::Bareword(s)) => parse_call(s, cur),
-        unexpected => Err(ExecutionError::ExpressionError(format!(
-            "unexpected token: {unexpected:?}",
-        ))),
-    }
-}
-
-fn parse_variable(cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
-    let Some(Token::Bareword(basename)) = cur.next() else {
-        return Err(ExecutionError::ExpressionError(format!(
-            "unexpected token: {:?}",
-            cur.next()
-        )));
-    };
-
-    match cur.next() {
-        Some(Token::OpenBracket) => {
-            // Allow bareword as string in subfield position
-            let subfield = if let Some(Token::Bareword(s)) = cur.peek() {
-                debug!("Parsing bareword subfield: {s}");
-                cur.next();
-                Expr::String(s.clone())
-            } else {
-                debug!("Parsing non-bareword subfield, {:?}", cur.peek());
-                // Parse the subfield expression
-                parse_expr(cur)?
-            };
-
-            let Some(Token::CloseBracket) = cur.next() else {
-                return Err(ExecutionError::ExpressionError(format!(
-                    "unexpected token: {:?}",
-                    cur.next()
-                )));
-            };
-
-            let Some(Token::CloseParen) = cur.next() else {
-                return Err(ExecutionError::ExpressionError(format!(
-                    "unexpected token: {:?}",
-                    cur.next()
-                )));
-            };
-
-            Ok(Expr::Variable(
-                basename.to_string(),
-                Some(Box::new(subfield)),
-            ))
-        }
-        Some(Token::CloseParen) => Ok(Expr::Variable(basename.to_string(), None)),
-        unexpected => Err(ExecutionError::ExpressionError(format!(
-            "unexpected token: {unexpected:?}",
-        ))),
-    }
-}
-
-fn parse_call(identifier: &str, cur: &mut Peekable<Iter<Token>>) -> Result<Expr> {
-    match cur.next() {
-        Some(Token::OpenParen) => {
-            let mut args = Vec::new();
-            loop {
-                if Some(&&Token::CloseParen) == cur.peek() {
-                    cur.next();
-                    break;
-                }
-                args.push(parse_expr(cur)?);
-                match cur.peek() {
-                    Some(&&Token::CloseParen) => {
-                        cur.next();
-                        break;
-                    }
-                    Some(&&Token::Comma) => {
-                        cur.next();
-                        continue;
-                    }
-                    _ => {
-                        return Err(ExecutionError::ExpressionError(
-                            "unexpected token in arg list".to_string(),
-                        ));
-                    }
-                }
-            }
-            Ok(Expr::Call(identifier.to_string(), args))
-        }
-        _ => Err(ExecutionError::ExpressionError(
-            "unexpected token following identifier".to_string(),
-        )),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Token {
-    Integer(i32),
-    String(String),
-    OpenParen,
-    CloseParen,
-    OpenBracket,
-    CloseBracket,
-    Comma,
-    Dollar,
-    Operation(Operator),
-    Negation,
-    Bareword(String),
-}
-
-fn lex_expr(expr: &str) -> Result<Vec<Token>> {
-    let mut cur = expr.chars().peekable();
-    // Lex the expression, but don't stop at the first closing paren
-    let single = false;
-    lex_tokens(&mut cur, single)
-}
-
-fn lex_interpolated_expr(cur: &mut Peekable<Chars>) -> Result<Vec<Token>> {
-    if cur.peek() != Some(&'$') {
-        return Err(ExecutionError::ExpressionError("no expression".to_string()));
-    }
-    // Lex the expression, but stop at the first closing paren
-    let single = true;
-    lex_tokens(cur, single)
-}
-
-// Lexes an expression, stopping at the first closing paren if `single` is true
-fn lex_tokens(cur: &mut Peekable<Chars>, single: bool) -> Result<Vec<Token>> {
-    let mut result = Vec::new();
-    let mut paren_depth = 0;
-
-    while let Some(&c) = cur.peek() {
-        match c {
-            '\'' => {
-                cur.next();
-                result.push(get_string(cur)?);
-            }
-            '$' => {
-                cur.next();
-                result.push(Token::Dollar);
-            }
-            '0'..='9' | '-' => {
-                result.push(get_integer(cur)?);
-            }
-            'a'..='z' | 'A'..='Z' => {
-                let bareword = get_bareword(cur);
-
-                // Check if it's an operator
-                if let Token::Bareword(ref word) = bareword {
-                    match word.as_str() {
-                        "matches" => result.push(Token::Operation(Operator::Matches)),
-                        "matches_i" => result.push(Token::Operation(Operator::MatchesInsensitive)),
-                        _ => result.push(bareword),
-                    }
-                } else {
-                    result.push(get_bareword(cur));
-                }
-            }
-            '(' | ')' | '{' | '}' | ',' => {
-                cur.next();
-                match c {
-                    '(' => {
-                        result.push(Token::OpenParen);
-                        paren_depth += 1;
-                    }
-                    ')' => {
-                        result.push(Token::CloseParen);
-                        paren_depth -= 1;
-                        if single && paren_depth <= 0 {
-                            break;
-                        }
-                    }
-                    '{' => result.push(Token::OpenBracket),
-                    '}' => result.push(Token::CloseBracket),
-                    ',' => result.push(Token::Comma),
-                    _ => unreachable!(),
-                }
-            }
-            '=' => {
-                cur.next(); // consume the first '='
-                if cur.peek() == Some(&'=') {
-                    cur.next(); // consume the second '='
-                    result.push(Token::Operation(Operator::Equals));
-                } else {
-                    return Err(ExecutionError::ExpressionError(
-                        "single '=' not supported, use '==' for equality".to_string(),
-                    ));
-                }
-            }
-            '!' => {
-                cur.next(); // consume first '!'
-                if cur.peek() == Some(&'=') {
-                    cur.next(); // consume the '='
-                    result.push(Token::Operation(Operator::NotEquals));
-                } else {
-                    result.push(Token::Negation);
-                }
-            }
-            '&' => {
-                cur.next(); // consume first '&'
-                if cur.peek() == Some(&'&') {
-                    cur.next(); // consume the second '&'
-                    result.push(Token::Operation(Operator::And));
-                } else {
-                    return Err(ExecutionError::ExpressionError(
-                        "single '&' not supported, use '&&' for logical AND".to_string(),
-                    ));
-                }
-            }
-            '|' => {
-                cur.next(); // consume first '|'
-                if cur.peek() == Some(&'|') {
-                    cur.next(); // consume the second '|'
-                    result.push(Token::Operation(Operator::Or));
-                } else {
-                    return Err(ExecutionError::ExpressionError(
-                        "single '|' not supported, use '||' for logical OR".to_string(),
-                    ));
-                }
-            }
-            '<' => {
-                cur.next();
-                if cur.peek() == Some(&'=') {
-                    cur.next();
-                    result.push(Token::Operation(Operator::LessThanOrEqual));
-                } else {
-                    result.push(Token::Operation(Operator::LessThan));
-                }
-            }
-            '>' => {
-                cur.next();
-                if cur.peek() == Some(&'=') {
-                    cur.next();
-                    result.push(Token::Operation(Operator::GreaterThanOrEqual));
-                } else {
-                    result.push(Token::Operation(Operator::GreaterThan));
-                }
-            }
-            ' ' => {
-                cur.next(); // Ignore spaces
-            }
-            _ => {
-                return Err(ExecutionError::ExpressionError(
-                    // "error in lexing interpolated".to_string(),
-                    format!("error in lexing interpolated `{c}`"),
-                ));
-            }
-        }
-    }
-    // We should have hit the end of the expression
-    if paren_depth != 0 {
-        return Err(ExecutionError::ExpressionError(
-            "missing closing parenthesis".to_string(),
-        ));
-    }
-
-    Ok(result)
-}
-
-fn get_integer(cur: &mut Peekable<Chars>) -> Result<Token> {
-    let mut buf = Vec::new();
-    let c = cur.next().unwrap();
-    buf.push(c);
-
-    if c == '0' {
-        // Zero is a special case, as the only number that can start with a zero.
-        let Some(c) = cur.peek() else {
-            cur.next();
-            // EOF after a zero. That's a valid number.
-            return Ok(Token::Integer(0));
-        };
-        // Make sure the zero isn't followed by another digit.
-        if let '0'..='9' = *c {
-            return Err(ExecutionError::ExpressionError(
-                "invalid number".to_string(),
-            ));
-        }
-    }
-
-    if c == '-' {
-        let Some(c) = cur.next() else {
-            return Err(ExecutionError::ExpressionError(
-                "invalid number".to_string(),
-            ));
-        };
-        match c {
-            '1'..='9' => buf.push(c),
-            _ => {
-                return Err(ExecutionError::ExpressionError(
-                    "invalid number".to_string(),
-                ))
-            }
-        }
-    }
-
-    while let Some(c) = cur.peek() {
-        match c {
-            '0'..='9' => buf.push(cur.next().unwrap()),
-            _ => break,
-        }
-    }
-    let Ok(num) = buf.into_iter().collect::<String>().parse() else {
-        return Err(ExecutionError::ExpressionError(
-            "invalid number".to_string(),
-        ));
-    };
-    Ok(Token::Integer(num))
-}
-
-fn get_bareword(cur: &mut Peekable<Chars>) -> Token {
-    let mut buf = Vec::new();
-    buf.push(cur.next().unwrap());
-
-    while let Some(c) = cur.peek() {
-        match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => buf.push(cur.next().unwrap()),
-            _ => break,
-        }
-    }
-    Token::Bareword(buf.into_iter().collect())
-}
-
-fn get_string(cur: &mut Peekable<Chars>) -> Result<Token> {
-    let mut buf = Vec::new();
-    let mut triple_tick = false;
-
-    if cur.peek() == Some(&'\'') {
-        // This is either an empty string, or the start of a triple tick string
-        cur.next();
-        if cur.peek() == Some(&'\'') {
-            // It's a triple tick string
-            triple_tick = true;
-            cur.next();
-        } else {
-            // It's an empty string, let's just return it
-            return Ok(Token::String(String::new()));
-        }
-    }
-
-    while let Some(c) = cur.next() {
-        match c {
-            '\'' => {
-                if !triple_tick {
-                    break;
-                }
-                if let Some(c2) = cur.next() {
-                    if c2 == '\'' && cur.peek() == Some(&'\'') {
-                        // End of a triple tick string
-                        cur.next();
-                        break;
-                    }
-                    // Just two ticks
-                    buf.push(c);
-                    buf.push(c2);
-                } else {
-                    // error
-                    return Err(ExecutionError::ExpressionError(
-                        "unexpected eof while parsing string".to_string(),
-                    ));
-                }
-            }
-            '\\' => {
-                if triple_tick {
-                    // no escaping inside a triple tick string
-                    buf.push(c);
-                } else {
-                    // in a normal string, we'll ignore this and buffer the
-                    // next char
-                    if let Some(escaped_c) = cur.next() {
-                        buf.push(escaped_c);
-                    } else {
-                        // error
-                        return Err(ExecutionError::ExpressionError(
-                            "unexpected eof while parsing string".to_string(),
-                        ));
-                    }
-                }
-            }
-            _ => buf.push(c),
-        }
-    }
-    Ok(Token::String(buf.into_iter().collect()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use regex::Regex;
 
-    #[test]
-    fn test_lex_integer() -> Result<()> {
-        let tokens = lex_expr("1 23 456789 0 -987654 -32 -1 0")?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Integer(1),
-                Token::Integer(23),
-                Token::Integer(456789),
-                Token::Integer(0),
-                Token::Integer(-987654),
-                Token::Integer(-32),
-                Token::Integer(-1),
-                Token::Integer(0)
-            ]
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_empty_string() -> Result<()> {
-        let tokens = lex_expr("''")?;
-        assert_eq!(tokens, vec![Token::String("".to_string())]);
-        Ok(())
-    }
-    #[test]
-    fn test_lex_simple_string() -> Result<()> {
-        let tokens = lex_expr("'hello'")?;
-        assert_eq!(tokens, vec![Token::String("hello".to_string())]);
-        Ok(())
-    }
-    #[test]
-    fn test_lex_escaped_string() -> Result<()> {
-        let tokens = lex_expr(r#"'hel\'lo'"#)?;
-        assert_eq!(tokens, vec![Token::String("hel\'lo".to_string())]);
-        Ok(())
-    }
-    #[test]
-    fn test_lex_triple_tick_string() -> Result<()> {
-        let tokens = lex_expr(r#"'''h'el''l\'o\'''"#)?;
-        assert_eq!(tokens, vec![Token::String(r#"h'el''l\'o\"#.to_string())]);
-        Ok(())
-    }
-    #[test]
-    fn test_lex_triple_tick_and_escaping_torture() -> Result<()> {
-        let tokens = lex_expr(r#"'\\\'triple\'/' matches '''\'triple'/'''"#)?;
-        assert_eq!(tokens[0], tokens[2]);
-        let Token::String(ref test) = tokens[0] else {
-            panic!()
-        };
-        let Token::String(ref pattern) = tokens[2] else {
-            panic!()
-        };
-        let re = Regex::new(pattern)?;
-        assert!(re.is_match(test));
-        Ok(())
+    // Helper function for testing expression evaluation
+    // Parses and evaluates a raw expression string
+    //
+    // # Arguments
+    // * `raw_expr` - Raw expression string to evaluate
+    // * `ctx` - Evaluation context containing variables and state
+    //
+    // # Returns
+    // * `Result<Value>` - The evaluated expression result or an error
+    fn evaluate_expression(raw_expr: &str, ctx: &mut EvalContext) -> Result<Value> {
+        let (_, expr) = crate::parser::parse_expression(raw_expr).map_err(|e| {
+            ExecutionError::ExpressionError(format!("Failed to parse expression: {e}"))
+        })?;
+        eval_expr(expr, ctx).map_err(|e| {
+            ExecutionError::ExpressionError(format!(
+                "Error occurred during expression evaluation: {e}"
+            ))
+        })
     }
 
-    #[test]
-    fn test_lex_variable() -> Result<()> {
-        let tokens = lex_expr("$(hello)")?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::OpenParen,
-                Token::Bareword("hello".to_string()),
-                Token::CloseParen
-            ]
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_variable_with_subscript() -> Result<()> {
-        let tokens = lex_expr("$(hello{'goodbye'})")?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::OpenParen,
-                Token::Bareword("hello".to_string()),
-                Token::OpenBracket,
-                Token::String("goodbye".to_string()),
-                Token::CloseBracket,
-                Token::CloseParen,
-            ]
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_variable_with_integer_subscript() -> Result<()> {
-        let tokens = lex_expr("$(hello{6})")?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::OpenParen,
-                Token::Bareword("hello".to_string()),
-                Token::OpenBracket,
-                Token::Integer(6),
-                Token::CloseBracket,
-                Token::CloseParen,
-            ]
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_matches_operator() -> Result<()> {
-        let tokens = lex_expr("matches")?;
-        assert_eq!(tokens, vec![Token::Operation(Operator::Matches)]);
-        Ok(())
-    }
-    #[test]
-    fn test_lex_matches_i_operator() -> Result<()> {
-        let tokens = lex_expr("matches_i")?;
-        assert_eq!(tokens, vec![Token::Operation(Operator::MatchesInsensitive)]);
-        Ok(())
-    }
-    #[test]
-    fn test_lex_identifier() -> Result<()> {
-        let tokens = lex_expr("$foo2BAZ")?;
-        assert_eq!(
-            tokens,
-            vec![Token::Dollar, Token::Bareword("foo2BAZ".to_string())]
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_simple_call() -> Result<()> {
-        let tokens = lex_expr("$fn()")?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::Bareword("fn".to_string()),
-                Token::OpenParen,
-                Token::CloseParen
-            ]
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_call_with_arg() -> Result<()> {
-        let tokens = lex_expr("$fn('hello')")?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::Bareword("fn".to_string()),
-                Token::OpenParen,
-                Token::String("hello".to_string()),
-                Token::CloseParen
-            ]
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_call_with_empty_string_arg() -> Result<()> {
-        let tokens = lex_expr("$fn('')")?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::Bareword("fn".to_string()),
-                Token::OpenParen,
-                Token::String("".to_string()),
-                Token::CloseParen
-            ]
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_call_with_two_args() -> Result<()> {
-        let tokens = lex_expr("$fn($(hello), 'hello')")?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::Bareword("fn".to_string()),
-                Token::OpenParen,
-                Token::Dollar,
-                Token::OpenParen,
-                Token::Bareword("hello".to_string()),
-                Token::CloseParen,
-                Token::Comma,
-                Token::String("hello".to_string()),
-                Token::CloseParen
-            ]
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_lex_comparison() -> Result<()> {
-        let tokens = lex_expr("$(foo) matches 'bar'")?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::OpenParen,
-                Token::Bareword("foo".to_string()),
-                Token::CloseParen,
-                Token::Operation(Operator::Matches),
-                Token::String("bar".to_string())
-            ]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_integer() -> Result<()> {
-        let tokens = lex_expr("1")?;
-        let expr = parse(&tokens)?;
-        assert_eq!(expr, Expr::Integer(1));
-        Ok(())
-    }
-    #[test]
-    fn test_parse_simple_string() -> Result<()> {
-        let tokens = lex_expr("'hello'")?;
-        let expr = parse(&tokens)?;
-        assert_eq!(expr, Expr::String("hello".to_string()));
-        Ok(())
-    }
-    #[test]
-    fn test_parse_variable() -> Result<()> {
-        let tokens = lex_expr("$(hello)")?;
-        let expr = parse(&tokens)?;
-        assert_eq!(expr, Expr::Variable("hello".to_string(), None));
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_comparison() -> Result<()> {
-        let tokens = lex_expr("$(foo) matches 'bar'")?;
-        let expr = parse(&tokens)?;
-        assert_eq!(
-            expr,
-            Expr::Comparison(Box::new(Comparison {
-                left: Expr::Variable("foo".to_string(), None),
-                operator: Operator::Matches,
-                right: Expr::String("bar".to_string()),
-            }))
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_parse_call() -> Result<()> {
-        let tokens = lex_expr("$hello()")?;
-        let expr = parse(&tokens)?;
-        assert_eq!(expr, Expr::Call("hello".to_string(), Vec::new()));
-        Ok(())
-    }
-    #[test]
-    fn test_parse_call_with_arg() -> Result<()> {
-        let tokens = lex_expr("$fn('hello')")?;
-        let expr = parse(&tokens)?;
-        assert_eq!(
-            expr,
-            Expr::Call("fn".to_string(), vec![Expr::String("hello".to_string())])
-        );
-        Ok(())
-    }
-    #[test]
-    fn test_parse_call_with_two_args() -> Result<()> {
-        let tokens = lex_expr("$fn($(hello), 'hello')")?;
-        let expr = parse(&tokens)?;
-        assert_eq!(
-            expr,
-            Expr::Call(
-                "fn".to_string(),
-                vec![
-                    Expr::Variable("hello".to_string(), None),
-                    Expr::String("hello".to_string())
-                ]
-            )
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_eval_string() -> Result<()> {
-        let expr = Expr::String("hello".to_string());
-        let result = eval_expr(expr, &mut EvalContext::new())?;
-        assert_eq!(result, Value::Text("hello".into()));
-        Ok(())
-    }
-
-    #[test]
-    fn test_eval_variable() -> Result<()> {
-        let expr = Expr::Variable("hello".to_string(), None);
-        let result = eval_expr(
-            expr,
-            &mut EvalContext::from([("hello".to_string(), Value::Text("goodbye".into()))]),
-        )?;
-        assert_eq!(result, Value::Text("goodbye".into()));
-        Ok(())
-    }
-    #[test]
-    fn test_eval_subscripted_variable() -> Result<()> {
-        let expr = Expr::Variable(
-            "hello".to_string(),
-            Some(Box::new(Expr::String("abc".to_string()))),
-        );
-        let result = eval_expr(
-            expr,
-            &mut EvalContext::from([("hello[abc]".to_string(), Value::Text("goodbye".into()))]),
-        )?;
-        assert_eq!(result, Value::Text("goodbye".into()));
-        Ok(())
-    }
     #[test]
     fn test_eval_matches_comparison() -> Result<()> {
         let result = evaluate_expression(
@@ -1408,103 +611,6 @@ mod tests {
 
         Ok(())
     }
-    #[test]
-    fn test_lex_interpolated_basic() -> Result<()> {
-        let mut chars = "$(foo)bar".chars().peekable();
-        let tokens = lex_interpolated_expr(&mut chars)?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::OpenParen,
-                Token::Bareword("foo".to_string()),
-                Token::CloseParen
-            ]
-        );
-        // Verify remaining chars are untouched
-        assert_eq!(chars.collect::<String>(), "bar");
-        Ok(())
-    }
-
-    #[test]
-    fn test_lex_interpolated_nested() -> Result<()> {
-        let mut chars = "$(foo{$(bar)})rest".chars().peekable();
-        let tokens = lex_interpolated_expr(&mut chars)?;
-        assert_eq!(
-            tokens,
-            vec![
-                Token::Dollar,
-                Token::OpenParen,
-                Token::Bareword("foo".to_string()),
-                Token::OpenBracket,
-                Token::Dollar,
-                Token::OpenParen,
-                Token::Bareword("bar".to_string()),
-                Token::CloseParen,
-                Token::CloseBracket,
-                Token::CloseParen
-            ]
-        );
-        assert_eq!(chars.collect::<String>(), "rest");
-        Ok(())
-    }
-
-    #[test]
-    fn test_lex_interpolated_no_dollar() {
-        let mut chars = "foo".chars().peekable();
-        assert!(lex_interpolated_expr(&mut chars).is_err());
-    }
-
-    #[test]
-    fn test_lex_interpolated_incomplete() {
-        let mut chars = "$(foo".chars().peekable();
-        assert!(lex_interpolated_expr(&mut chars).is_err());
-    }
-
-    #[test]
-    fn test_var_subfield_missing_closing_bracket() {
-        let input = r#"
-        <esi:vars>
-            $(QUERY_STRING{param)
-        </esi:vars>
-        "#;
-        let mut chars = input.chars().peekable();
-        assert!(lex_interpolated_expr(&mut chars).is_err());
-    }
-
-    #[test]
-    fn test_invalid_standalone_bareword() {
-        let input = r#"
-        <esi:vars>
-            bareword
-        </esi:vars>
-        "#;
-        let mut chars = input.chars().peekable();
-        assert!(lex_interpolated_expr(&mut chars).is_err());
-    }
-
-    #[test]
-    fn test_mixed_subfield_types() {
-        let input = r#"$(QUERY_STRING{param})"#;
-        let mut chars = input.chars().peekable();
-        // let result =
-        // evaluate_interpolated(&mut chars, &mut ctx).expect("Processing should succeed");
-        let result = lex_interpolated_expr(&mut chars).expect("Processing should succeed");
-        println!("Tokens: {result:?}");
-        assert_eq!(
-            result,
-            vec![
-                Token::Dollar,
-                Token::OpenParen,
-                Token::Bareword("QUERY_STRING".into()),
-                Token::OpenBracket,
-                Token::Bareword("param".into()),
-                Token::CloseBracket,
-                Token::CloseParen
-            ]
-        );
-    }
-
     #[test]
     fn test_get_variable_query_string() {
         let mut ctx = EvalContext::new();

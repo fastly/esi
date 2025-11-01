@@ -48,10 +48,19 @@ pub enum Expr<'a> {
         right: Box<Expr<'a>>,
     },
     Call(&'a str, Vec<Expr<'a>>),
+    Not(Box<Expr<'a>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
     Matches,
     MatchesInsensitive,
+    Equals,
+    NotEquals,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    And,
+    Or,
 }

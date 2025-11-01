@@ -8,6 +8,11 @@ pub fn lower(args: &[Value]) -> Result<Value> {
         ));
     }
 
+    // If the argument is Null, return Null (don't convert to "null" string)
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
     Ok(Value::Text(args[0].to_string().to_lowercase().into()))
 }
 
