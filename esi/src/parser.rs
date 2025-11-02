@@ -16,6 +16,40 @@ pub fn parse(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
     })(input)
 }
 
+/// Callback-based parser that invokes a callback for each element as it's parsed
+/// This enables streaming processing without building an AST first
+pub fn parse_with_callback<'a, F>(
+    input: &'a str,
+    mut callback: F,
+) -> IResult<&'a str, (), Error<&'a str>>
+where
+    F: FnMut(Vec<Element<'a>>) -> Result<(), String>,
+{
+    let mut remaining = input;
+
+    while !remaining.is_empty() {
+        match element(remaining) {
+            Ok((rest, elements)) => {
+                // Call the callback with parsed elements
+                if let Err(_e) = callback(elements) {
+                    return Err(nom::Err::Failure(Error::new(
+                        rest,
+                        nom::error::ErrorKind::Fail,
+                    )));
+                }
+                remaining = rest;
+            }
+            Err(nom::Err::Error(_)) => {
+                // No more elements to parse
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok((remaining, ()))
+}
+
 /// Parses a standalone ESI expression (for use in test attributes, etc.)
 pub fn parse_expression(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
     expr(input)

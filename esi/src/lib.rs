@@ -203,15 +203,22 @@ impl Processor {
         }
     }
 
-    /// Process an ESI document using the nom parser, handling includes and directives
+    /// Process an ESI document using callback-based parsing, handling includes and directives
     ///
-    /// Processes ESI directives while streaming content to the output writer. This method
-    /// processes elements **sequentially**, dispatching and waiting for fragments only as they
-    /// are encountered during processing. This ensures optimal performance by:
+    /// Uses a streaming parser that invokes callbacks as elements are parsed, enabling:
+    /// - True streaming execution (no AST intermediate storage)
+    /// - Parallel fragment fetching (all includes dispatched before any wait)
+    /// - Minimal memory footprint (process elements as they're parsed)
     ///
+    /// Processing happens in two phases:
+    /// 1. **Parse & Dispatch**: Parse document with callbacks that evaluate conditionals and dispatch
+    ///    all HTTP requests immediately (but don't wait). This builds an execution queue.
+    /// 2. **Execute**: Walk the execution queue, waiting for fragments and writing output.
+    ///
+    /// This ensures optimal performance by:
     /// - Only fetching fragments that are actually needed (not those in unexecuted branches)
+    /// - Parallel fetching of all required fragments
     /// - Streaming output as soon as fragments complete
-    /// - Not blocking on fragments inside conditional blocks that don't execute
     ///
     /// Handles:
     /// - ESI includes with on-demand fragment fetching
@@ -246,59 +253,56 @@ impl Processor {
             .read_to_string(&mut doc_content)
             .map_err(ESIError::WriterError)?;
 
-        // Parse the document using nom parser
-        let (remaining, elements) = parser::parse(&doc_content)
-            .map_err(|e| ESIError::ExpressionError(format!("Nom parser error: {:?}", e)))?;
+        // Set up fragment request dispatcher. Use what's provided or use a default
+        let dispatch_fragment_request =
+            dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
 
-        eprintln!("DEBUG: Parser returned {} elements", elements.len());
-        for (i, element) in elements.iter().enumerate() {
-            eprintln!("DEBUG: Chunk[{}]: {:?}", i, element);
+        // Queue for execution elements (dispatched includes and raw content)
+        let mut execution_queue: Vec<ExecutionElement> = Vec::new();
+
+        // Parse with callback - as we parse, we dispatch includes and build the execution queue
+        let parse_result = parser::parse_with_callback(&doc_content, |elements| {
+            for element in elements {
+                match self.process_element(element, dispatch_fragment_request) {
+                    Ok(mut exec_elements) => {
+                        execution_queue.append(&mut exec_elements);
+                    }
+                    Err(e) => {
+                        return Err(format!("Error processing element: {}", e));
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        // Check parse result
+        if let Err(e) = parse_result {
+            return Err(ESIError::ExpressionError(format!(
+                "Nom parser error: {:?}",
+                e
+            )));
         }
 
-        // Log warning if parser didn't consume everything (may indicate unsupported features)
+        let (remaining, _) = parse_result.unwrap();
+
+        // Log warning if parser didn't consume everything
         if !remaining.is_empty() {
             debug!(
                 "Parser did not consume all input. Remaining: '{}'",
                 remaining.chars().take(100).collect::<String>()
             );
-            eprintln!("DEBUG: Parser remaining: {:?}", remaining);
         }
 
-        // Set up fragment request dispatcher. Use what's provided or use a default
-        let dispatch_fragment_request =
-            dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
-
-        // PHASE 1: Dispatch all includes
-        // Walk the AST, evaluate conditionals, and dispatch HTTP requests
-        // All dispatches happen before any wait() calls - this enables parallel fetching!
-        let execution_elements =
-            self.process_parsed_document(elements, dispatch_fragment_request)?;
-
-        // PHASE 2: Execute (wait for fragments and write output)
-        // Now that all HTTP requests are in flight, we wait for them as needed
+        // Execute the queue (wait for fragments and write output)
+        // All HTTP requests are now in flight, we wait for them as needed
         self.execute_queue(
-            execution_elements,
+            execution_queue,
             output_writer,
             dispatch_fragment_request,
             process_fragment_response,
         )?;
 
         Ok(())
-    }
-
-    /// Process parsed AST to runtime Elements, dispatching all includes
-    fn process_parsed_document<'a>(
-        &mut self,
-        parsed_elements: Vec<parser_types::Element<'a>>,
-        dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<Vec<ExecutionElement<'a>>> {
-        let mut result = Vec::new();
-
-        for element in parsed_elements {
-            result.extend(self.process_element(element, dispatcher)?);
-        }
-
-        Ok(result)
     }
 
     /// Process a single parsed element to runtime Elements
