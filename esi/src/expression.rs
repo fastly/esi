@@ -264,6 +264,10 @@ impl EvalContext {
     pub fn set_request(&mut self, request: Request) {
         self.request = request;
     }
+
+    pub fn get_request(&self) -> &Request {
+        &self.request
+    }
 }
 
 impl<const N: usize> From<[(String, Value); N]> for EvalContext {
