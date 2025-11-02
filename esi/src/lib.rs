@@ -43,7 +43,111 @@ impl From<Response> for PendingFragmentContent {
     }
 }
 
-//
+/// Representation of an ESI fragment request with its metadata and pending response
+pub struct Fragment {
+    /// Metadata of the request
+    pub(crate) request: Request,
+    /// An optional alternate request to send if the original request fails
+    pub(crate) alt: Option<String>,
+    /// Whether to continue on error
+    pub(crate) continue_on_error: bool,
+    /// The pending fragment response, which can be polled to retrieve the content
+    pub(crate) pending_content: PendingFragmentContent,
+}
+
+/// Process an esi:include tag by fetching the fragment and writing it to the output
+fn process_include(
+    fragment: Fragment,
+    ctx: &mut EvalContext,
+    output_writer: &mut impl Write,
+    original_request_metadata: &Request,
+    dispatch_fragment_request: &FragmentRequestDispatcher,
+    process_fragment_response: Option<&FragmentResponseProcessor>,
+    is_escaped_content: bool,
+) -> Result<()> {
+    // Deconstruct the fragment
+    let Fragment {
+        request,
+        alt,
+        continue_on_error,
+        pending_content,
+    } = fragment;
+
+    // Wait for the fragment response
+    let response = pending_content.wait()?;
+
+    // Apply process_fragment_response callback if provided
+    let mut req_for_processor = request.clone_without_body();
+    let final_response = if let Some(processor) = process_fragment_response {
+        processor(&mut req_for_processor, response)?
+    } else {
+        response
+    };
+
+    // Check if request was successful
+    if final_response.get_status().is_success() {
+        // Write the response body to output
+        let body_bytes = final_response.into_body_bytes();
+        let body_str = std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
+        output_writer.write_all(body_str.as_bytes())?;
+        Ok(())
+    } else {
+        // Response status is NOT success, either continue, fallback to alt, or fail
+        if let Some(alt_src) = alt {
+            debug!("Main request failed, trying alt");
+            let interpolated_alt = try_evaluate_interpolated_string(&alt_src, ctx)?;
+            let alt_req = build_fragment_request(
+                original_request_metadata.clone_without_body(),
+                &interpolated_alt,
+                is_escaped_content,
+            )?;
+
+            match dispatch_fragment_request(alt_req.clone_without_body()) {
+                Ok(alt_pending) => {
+                    // Wait for alt fragment and process it
+                    let alt_response = alt_pending.wait()?;
+
+                    // Apply process_fragment_response callback if provided
+                    let mut alt_req_for_processor = alt_req.clone_without_body();
+                    let final_alt_response = if let Some(processor) = process_fragment_response {
+                        processor(&mut alt_req_for_processor, alt_response)?
+                    } else {
+                        alt_response
+                    };
+
+                    // Write the alt response body to output
+                    let body_bytes = final_alt_response.into_body_bytes();
+                    let body_str =
+                        std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
+                    output_writer.write_all(body_str.as_bytes())?;
+                    Ok(())
+                }
+                Err(_) => {
+                    if continue_on_error {
+                        // Both main and alt failed, but continue-on-error is set
+                        output_writer.write_all(b"<!-- fragment request failed -->")?;
+                        Ok(())
+                    } else {
+                        Err(ESIError::ExpressionError(
+                            "Both main and alt fragment requests failed".to_string(),
+                        ))
+                    }
+                }
+            }
+        } else if continue_on_error {
+            // No alt, but continue on error
+            debug!("Main request failed, no alt, continuing due to continue_on_error");
+            output_writer.write_all(b"<!-- fragment request failed -->")?;
+            Ok(())
+        } else {
+            Err(ESIError::ExpressionError(format!(
+                "Fragment request failed with status: {}",
+                final_response.get_status()
+            )))
+        }
+    }
+}
+
 fn fetch_elements(
     element: parser_types::Element,
     ctx: &mut EvalContext,
@@ -103,10 +207,7 @@ fn fetch_elements(
                     alt,
                     continue_on_error,
                 } => {
-                    // Handle esi:include tags - evaluate expressions and build fragment request
-                    debug!("Handling <esi:include> tag with src: {}", src);
-
-                    // Always interpolate src
+                    // Interpolate src
                     let interpolated_src = try_evaluate_interpolated_string(&src, ctx)?;
 
                     // Build fragment request
@@ -116,78 +217,79 @@ fn fetch_elements(
                         is_escaped_content,
                     )?;
 
+                    // Dispatch the request
                     match dispatch_fragment_request(req.clone_without_body()) {
                         Ok(pending_content) => {
-                            // Wait for the fragment and process it
-                            let response = pending_content.wait()?;
-
-                            // Apply process_fragment_response callback if provided
-                            let mut req_for_processor = req.clone_without_body();
-                            let final_response = if let Some(processor) = process_fragment_response
-                            {
-                                processor(&mut req_for_processor, response)?
-                            } else {
-                                response
+                            // Create the fragment
+                            let fragment = Fragment {
+                                request: req,
+                                alt: alt.map(|s| s.to_string()),
+                                continue_on_error,
+                                pending_content,
                             };
 
-                            // Write the response body to output
-                            let body_bytes = final_response.into_body_bytes();
-                            let body_str =
-                                std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
-                            output_writer.write_all(body_str.as_bytes())?;
+                            // Process the fragment
+                            process_include(
+                                fragment,
+                                ctx,
+                                output_writer,
+                                original_request_metadata,
+                                dispatch_fragment_request,
+                                process_fragment_response,
+                                is_escaped_content,
+                            )
                         }
                         Err(err) => {
+                            // Main dispatch failed
                             if continue_on_error {
                                 // Try alt if available
-                                if let Some(alt_src) = &alt {
+                                if let Some(alt_src) = alt {
                                     let interpolated_alt =
-                                        try_evaluate_interpolated_string(alt_src, ctx)?;
+                                        try_evaluate_interpolated_string(&alt_src, ctx)?;
                                     let alt_req = build_fragment_request(
                                         original_request_metadata.clone_without_body(),
                                         &interpolated_alt,
                                         is_escaped_content,
                                     )?;
+
                                     match dispatch_fragment_request(alt_req.clone_without_body()) {
-                                        Ok(pending_content) => {
-                                            // Wait for alt fragment and process it
-                                            let response = pending_content.wait()?;
-
-                                            // Apply process_fragment_response callback if provided
-                                            let mut alt_req_for_processor =
-                                                alt_req.clone_without_body();
-                                            let final_response = if let Some(processor) =
-                                                process_fragment_response
-                                            {
-                                                processor(&mut alt_req_for_processor, response)?
-                                            } else {
-                                                response
+                                        Ok(alt_pending) => {
+                                            let alt_fragment = Fragment {
+                                                request: alt_req,
+                                                alt: None,
+                                                continue_on_error,
+                                                pending_content: alt_pending,
                                             };
-
-                                            // Write the alt response body to output
-                                            let body_bytes = final_response.into_body_bytes();
-                                            let body_str = std::str::from_utf8(&body_bytes)
-                                                .unwrap_or("<!-- invalid utf8 -->");
-                                            output_writer.write_all(body_str.as_bytes())?;
+                                            process_include(
+                                                alt_fragment,
+                                                ctx,
+                                                output_writer,
+                                                original_request_metadata,
+                                                dispatch_fragment_request,
+                                                process_fragment_response,
+                                                is_escaped_content,
+                                            )
                                         }
                                         Err(_) => {
-                                            // Both main and alt failed, but continue-on-error is set
+                                            // Both failed but continue on error
                                             output_writer
                                                 .write_all(b"<!-- fragment request failed -->")?;
+                                            Ok(())
                                         }
                                     }
                                 } else {
                                     // No alt, but continue on error
                                     output_writer.write_all(b"<!-- fragment request failed -->")?;
+                                    Ok(())
                                 }
                             } else {
-                                return Err(ESIError::ExpressionError(format!(
-                                    "Fragment request failed: {}",
+                                Err(ESIError::ExpressionError(format!(
+                                    "Fragment request dispatch failed: {}",
                                     err
-                                )));
+                                )))
                             }
                         }
                     }
-                    Ok(())
                 }
                 Tag::Choose {
                     when_branches,

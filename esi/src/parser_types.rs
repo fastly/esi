@@ -9,8 +9,8 @@ pub struct WhenBranch<'a> {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Tag<'a> {
     Include {
-        src: String,
-        alt: Option<String>,
+        src: &'a str,
+        alt: Option<&'a str>,
         continue_on_error: bool,
     },
     Try {

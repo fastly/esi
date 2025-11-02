@@ -433,13 +433,13 @@ fn esi_include(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
             preceded(multispace0, alt((tag(">"), tag("/>")))),
         ),
         |attrs| {
-            let mut src = String::new();
+            let mut src = "";
             let mut alt = None;
             let mut continue_on_error = false;
             for (key, val) in attrs {
                 match key {
-                    "src" => src = val.to_string(),
-                    "alt" => alt = Some(val.to_string()),
+                    "src" => src = val,
+                    "alt" => alt = Some(val),
                     "onerror" => continue_on_error = val == "continue",
                     _ => {}
                 }
