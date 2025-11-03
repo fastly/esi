@@ -459,47 +459,13 @@ impl Processor {
                                 continue_on_error,
                             }) => {
                                 // Dispatch the include and add to attempt queue
-                                let interpolated_src =
-                                    try_evaluate_interpolated_string(&src, &mut self.ctx)?;
-                                let req = build_fragment_request(
-                                    self.ctx.get_request().clone_without_body(),
-                                    &interpolated_src,
-                                    self.configuration.is_escaped_content,
+                                let queued_element = self.dispatch_include_to_element(
+                                    &src,
+                                    alt,
+                                    continue_on_error,
+                                    dispatcher,
                                 )?;
-
-                                match dispatcher(req.clone_without_body()) {
-                                    Ok(pending_content) => {
-                                        let fragment = Fragment {
-                                            request: req,
-                                            alt: alt.map(|s| s.to_string()),
-                                            continue_on_error,
-                                            pending_content,
-                                        };
-                                        attempt_queue
-                                            .push(QueuedElement::Include(Box::new(fragment)));
-                                    }
-                                    Err(err) => {
-                                        if continue_on_error {
-                                            if let Some(alt_src) = alt {
-                                                self.dispatch_and_queue_include(
-                                                    &alt_src,
-                                                    None,
-                                                    continue_on_error,
-                                                    dispatcher,
-                                                )?;
-                                            } else {
-                                                attempt_queue.push(QueuedElement::Content(
-                                                    b"<!-- fragment request failed -->".to_vec(),
-                                                ));
-                                            }
-                                        } else {
-                                            return Err(ESIError::ExpressionError(format!(
-                                                "Fragment dispatch failed: {}",
-                                                err
-                                            )));
-                                        }
-                                    }
-                                }
+                                attempt_queue.push(queued_element);
                             }
                             Element::Esi(Tag::Choose {
                                 when_branches,
@@ -579,46 +545,14 @@ impl Processor {
                             alt,
                             continue_on_error,
                         }) => {
-                            let interpolated_src =
-                                try_evaluate_interpolated_string(&src, &mut self.ctx)?;
-                            let req = build_fragment_request(
-                                self.ctx.get_request().clone_without_body(),
-                                &interpolated_src,
-                                self.configuration.is_escaped_content,
+                            // Dispatch the include and add to except queue
+                            let queued_element = self.dispatch_include_to_element(
+                                &src,
+                                alt,
+                                continue_on_error,
+                                dispatcher,
                             )?;
-
-                            match dispatcher(req.clone_without_body()) {
-                                Ok(pending_content) => {
-                                    let fragment = Fragment {
-                                        request: req,
-                                        alt: alt.map(|s| s.to_string()),
-                                        continue_on_error,
-                                        pending_content,
-                                    };
-                                    except_queue.push(QueuedElement::Include(Box::new(fragment)));
-                                }
-                                Err(err) => {
-                                    if continue_on_error {
-                                        if let Some(alt_src) = alt {
-                                            self.dispatch_and_queue_include(
-                                                &alt_src,
-                                                None,
-                                                continue_on_error,
-                                                dispatcher,
-                                            )?;
-                                        } else {
-                                            except_queue.push(QueuedElement::Content(
-                                                b"<!-- fragment request failed -->".to_vec(),
-                                            ));
-                                        }
-                                    } else {
-                                        return Err(ESIError::ExpressionError(format!(
-                                            "Fragment dispatch failed: {}",
-                                            err
-                                        )));
-                                    }
-                                }
-                            }
+                            except_queue.push(queued_element);
                         }
                         _ => {}
                     }
@@ -645,6 +579,21 @@ impl Processor {
         continue_on_error: bool,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<()> {
+        let queued_element =
+            self.dispatch_include_to_element(src, alt, continue_on_error, dispatcher)?;
+        self.queue.push_back(queued_element);
+        Ok(())
+    }
+
+    /// Dispatch an include and return a QueuedElement (for flexible queue insertion)
+    /// This is the single source of truth for include dispatching logic
+    fn dispatch_include_to_element(
+        &mut self,
+        src: &str,
+        alt: Option<&str>,
+        continue_on_error: bool,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<QueuedElement> {
         let interpolated_src = try_evaluate_interpolated_string(src, &mut self.ctx)?;
 
         let req = build_fragment_request(
@@ -661,8 +610,7 @@ impl Processor {
                     continue_on_error,
                     pending_content: pending,
                 };
-                self.queue
-                    .push_back(QueuedElement::Include(Box::new(fragment)));
+                Ok(QueuedElement::Include(Box::new(fragment)))
             }
             Err(_) if continue_on_error => {
                 // Try alt or add error placeholder
@@ -683,30 +631,23 @@ impl Processor {
                                 continue_on_error,
                                 pending_content: alt_pending,
                             };
-                            self.queue
-                                .push_back(QueuedElement::Include(Box::new(alt_fragment)));
+                            Ok(QueuedElement::Include(Box::new(alt_fragment)))
                         }
-                        Err(_) => {
-                            self.queue.push_back(QueuedElement::Content(
-                                b"<!-- fragment request failed -->".to_vec(),
-                            ));
-                        }
+                        Err(_) => Ok(QueuedElement::Content(
+                            b"<!-- fragment request failed -->".to_vec(),
+                        )),
                     }
                 } else {
-                    self.queue.push_back(QueuedElement::Content(
+                    Ok(QueuedElement::Content(
                         b"<!-- fragment request failed -->".to_vec(),
-                    ));
+                    ))
                 }
             }
-            Err(e) => {
-                return Err(ESIError::ExpressionError(format!(
-                    "Fragment dispatch failed: {}",
-                    e
-                )))
-            }
+            Err(e) => Err(ESIError::ExpressionError(format!(
+                "Fragment dispatch failed: {}",
+                e
+            ))),
         }
-
-        Ok(())
     }
 
     /// Check ready queue items - non-blocking poll
