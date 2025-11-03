@@ -12,6 +12,7 @@ use fastly::http::request::{PendingRequest, PollResult};
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Request, Response};
 use log::{debug, error};
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 
@@ -63,8 +64,7 @@ enum QueuedElement {
     Content(Vec<u8>),
     /// A dispatched include waiting to be executed
     Include(Box<Fragment>),
-    /// A try block with attempts and except clause (currently handled inline, not queued)
-    #[allow(dead_code)]
+    /// A try block with attempts and except clause
     Try {
         attempt_elements: Vec<Vec<QueuedElement>>,
         except_elements: Vec<QueuedElement>,
@@ -428,11 +428,7 @@ impl Processor {
 
                     for elem in attempt {
                         if self
-                            .process_element_streaming(
-                                elem.clone(),
-                                &mut attempt_buffer,
-                                dispatcher,
-                            )
+                            .process_element_streaming(elem.clone(), &mut attempt_buffer, dispatcher)
                             .is_err()
                         {
                             attempt_succeeded = false;
@@ -852,6 +848,339 @@ impl Processor {
                 "Fragment request failed with status: {}",
                 final_response.get_status()
             )))
+        }
+    }
+}
+
+// Default fragment request dispatcher that uses the request's hostname as backend
+fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
+    debug!("no dispatch method configured, defaulting to hostname");
+    let backend = req
+        &mut self,
+        parsed_elements: Vec<parser_types::Element<'a>>,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<Vec<ExecutionElement<'a>>> {
+        let mut result = Vec::new();
+
+        for element in parsed_elements {
+            result.extend(self.process_element(element, dispatcher)?);
+        }
+
+        Ok(result)
+    }
+
+    /// Process a single parsed element to runtime Elements
+    fn process_element<'a>(
+        &mut self,
+        element: parser_types::Element<'a>,
+        dispatch_fragment_request: &FragmentRequestDispatcher,
+    ) -> Result<Vec<ExecutionElement<'a>>> {
+        use parser_types::{Element, Tag};
+
+        let mut result = Vec::new();
+
+        match element {
+            Element::Text(text) => {
+                result.push(ExecutionElement::Raw(Cow::Borrowed(text.as_bytes())));
+            }
+            Element::Html(html) => {
+                result.push(ExecutionElement::Raw(Cow::Borrowed(html.as_bytes())));
+            }
+            Element::Expr(expr) => {
+                // Evaluate expression and convert to text
+                match expression::eval_expr(expr, &mut self.ctx) {
+                    Ok(value) => {
+                        if !matches!(value, expression::Value::Null) {
+                            let text = value.to_string();
+                            if !text.is_empty() {
+                                result.push(ExecutionElement::Raw(Cow::Owned(text.into_bytes())));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Expression evaluation failed: {:?}", e);
+                    }
+                }
+            }
+            Element::Esi(tag) => match tag {
+                Tag::Assign { name, value } => {
+                    // Evaluate and store in context
+                    let evaluated_value = match expression::eval_expr(value, &mut self.ctx) {
+                        Ok(val) => val,
+                        Err(_) => expression::Value::Text("".into()),
+                    };
+                    self.ctx.set_variable(&name, None, evaluated_value);
+                }
+                Tag::Include {
+                    src,
+                    alt,
+                    continue_on_error,
+                } => {
+                    // Interpolate src using self.ctx
+                    let interpolated_src = try_evaluate_interpolated_string(&src, &mut self.ctx)?;
+
+                    // Build request
+                    let req = build_fragment_request(
+                        self.ctx.get_request().clone_without_body(),
+                        &interpolated_src,
+                        self.configuration.is_escaped_content,
+                    )?;
+
+                    // Dispatch immediately (don't wait!)
+                    match dispatch_fragment_request(req.clone_without_body()) {
+                        Ok(pending_content) => {
+                            let fragment = Fragment {
+                                request: req,
+                                alt: alt.map(|s| s.to_string()),
+                                continue_on_error,
+                                pending_content,
+                            };
+                            result.push(ExecutionElement::Include(Box::new(fragment)));
+                        }
+                        Err(err) => {
+                            if continue_on_error {
+                                // Try alt if available
+                                if let Some(alt_src) = alt {
+                                    let interpolated_alt =
+                                        try_evaluate_interpolated_string(&alt_src, &mut self.ctx)?;
+                                    let alt_req = build_fragment_request(
+                                        self.ctx.get_request().clone_without_body(),
+                                        &interpolated_alt,
+                                        self.configuration.is_escaped_content,
+                                    )?;
+                                    match dispatch_fragment_request(alt_req.clone_without_body()) {
+                                        Ok(alt_pending) => {
+                                            let alt_fragment = Fragment {
+                                                request: alt_req,
+                                                alt: None,
+                                                continue_on_error,
+                                                pending_content: alt_pending,
+                                            };
+                                            result.push(ExecutionElement::Include(Box::new(
+                                                alt_fragment,
+                                            )));
+                                        }
+                                        Err(_) => {
+                                            result.push(ExecutionElement::Raw(Cow::Borrowed(
+                                                b"<!-- fragment request failed -->",
+                                            )));
+                                        }
+                                    }
+                                } else {
+                                    result.push(ExecutionElement::Raw(Cow::Borrowed(
+                                        b"<!-- fragment request failed -->",
+                                    )));
+                                }
+                            } else {
+                                return Err(ESIError::ExpressionError(format!(
+                                    "Fragment request dispatch failed: {}",
+                                    err
+                                )));
+                            }
+                        }
+                    }
+                }
+                Tag::Choose {
+                    when_branches,
+                    otherwise_events,
+                } => {
+                    // Evaluate conditionals and dispatch only the chosen branch
+                    let mut elements = Vec::new();
+                    let mut chose_branch = false;
+
+                    for when_branch in when_branches {
+                        if let Some(match_name) = &when_branch.match_name {
+                            self.ctx.set_match_name(match_name);
+                        }
+                        let test_result = expression::eval_expr(when_branch.test, &mut self.ctx)?;
+                        if test_result.to_bool() {
+                            chose_branch = true;
+                            for elem in when_branch.content {
+                                elements
+                                    .extend(self.process_element(elem, dispatch_fragment_request)?);
+                            }
+                            break;
+                        }
+                    }
+
+                    if !chose_branch {
+                        for elem in otherwise_events {
+                            elements.extend(self.process_element(elem, dispatch_fragment_request)?);
+                        }
+                    }
+
+                    // Flatten the chosen elements into result
+                    result.extend(elements);
+                }
+                Tag::Try {
+                    attempt_events,
+                    except_events,
+                } => {
+                    // Dispatch all attempts
+                    let mut attempt_elements = Vec::new();
+                    for attempt_list in attempt_events {
+                        let mut attempt_exec = Vec::new();
+                        for elem in attempt_list {
+                            attempt_exec
+                                .extend(self.process_element(elem, dispatch_fragment_request)?);
+                        }
+                        attempt_elements.push(attempt_exec);
+                    }
+
+                    let mut except_exec = Vec::new();
+                    for elem in except_events {
+                        except_exec.extend(self.process_element(elem, dispatch_fragment_request)?);
+                    }
+
+                    result.push(ExecutionElement::Try {
+                        attempt_elements,
+                        except_elements: except_exec,
+                    });
+                }
+                Tag::Vars { .. }
+                | Tag::When { .. }
+                | Tag::Attempt(_)
+                | Tag::Except(_)
+                | Tag::Otherwise => {
+                    debug!("Unexpected standalone tag: {:?}", tag);
+                }
+            },
+        }
+
+        Ok(result)
+    }
+
+    /// Execute the queue of elements
+    fn execute_queue<'a>(
+        &mut self,
+        elements: Vec<ExecutionElement<'a>>,
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+        processor: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        for element in elements {
+            match element {
+                ExecutionElement::Raw(bytes) => {
+                    output_writer.write_all(&bytes)?;
+                }
+                ExecutionElement::Include(fragment) => {
+                    self.process_include(*fragment, output_writer, dispatcher, processor)?;
+                }
+                ExecutionElement::Try {
+                    attempt_elements,
+                    except_elements,
+                } => {
+                    let mut succeeded = false;
+                    for attempt in attempt_elements {
+                        let mut attempt_output = Vec::new();
+                        if self
+                            .execute_queue(attempt, &mut attempt_output, dispatcher, processor)
+                            .is_ok()
+                        {
+                            output_writer.write_all(&attempt_output)?;
+                            succeeded = true;
+                            break;
+                        }
+                    }
+                    if !succeeded {
+                        self.execute_queue(except_elements, output_writer, dispatcher, processor)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Process an esi:include tag by fetching the fragment and writing it to the output
+    fn process_include(
+        &mut self,
+        fragment: Fragment,
+        output_writer: &mut impl Write,
+        dispatch_fragment_request: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        // Deconstruct the fragment
+        let Fragment {
+            request,
+            alt,
+            continue_on_error,
+            pending_content,
+        } = fragment;
+
+        // Wait for the fragment response
+        let response = pending_content.wait()?;
+
+        // Apply process_fragment_response callback if provided
+        let mut req_for_processor = request.clone_without_body();
+        let final_response = if let Some(processor) = process_fragment_response {
+            processor(&mut req_for_processor, response)?
+        } else {
+            response
+        };
+
+        // Check if request was successful
+        if final_response.get_status().is_success() {
+            // Write the response body to output
+            let body_bytes = final_response.into_body_bytes();
+            let body_str = std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
+            output_writer.write_all(body_str.as_bytes())?;
+            Ok(())
+        } else {
+            // Response status is NOT success, either continue, fallback to alt, or fail
+            if let Some(alt_src) = alt {
+                debug!("Main request failed, trying alt");
+                let interpolated_alt = try_evaluate_interpolated_string(&alt_src, &mut self.ctx)?;
+
+                let alt_req = build_fragment_request(
+                    self.ctx.get_request().clone_without_body(),
+                    &interpolated_alt,
+                    self.configuration.is_escaped_content,
+                )?;
+
+                match dispatch_fragment_request(alt_req.clone_without_body()) {
+                    Ok(alt_pending) => {
+                        // Wait for alt fragment and process it
+                        let alt_response = alt_pending.wait()?;
+
+                        // Apply process_fragment_response callback if provided
+                        let mut alt_req_for_processor = alt_req.clone_without_body();
+                        let final_alt_response = if let Some(processor) = process_fragment_response
+                        {
+                            processor(&mut alt_req_for_processor, alt_response)?
+                        } else {
+                            alt_response
+                        };
+
+                        // Write the alt response body to output
+                        let body_bytes = final_alt_response.into_body_bytes();
+                        let body_str =
+                            std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
+                        output_writer.write_all(body_str.as_bytes())?;
+                        Ok(())
+                    }
+                    Err(_) => {
+                        if continue_on_error {
+                            // Both main and alt failed, but continue-on-error is set
+                            output_writer.write_all(b"<!-- fragment request failed -->")?;
+                            Ok(())
+                        } else {
+                            Err(ESIError::ExpressionError(
+                                "Both main and alt fragment requests failed".to_string(),
+                            ))
+                        }
+                    }
+                }
+            } else if continue_on_error {
+                // No alt, but continue on error
+                debug!("Main request failed, no alt, continuing due to continue_on_error");
+                output_writer.write_all(b"<!-- fragment request failed -->")?;
+                Ok(())
+            } else {
+                Err(ESIError::ExpressionError(format!(
+                    "Fragment request failed with status: {}",
+                    final_response.get_status()
+                )))
+            }
         }
     }
 }
