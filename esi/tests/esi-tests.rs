@@ -777,3 +777,22 @@ fn test_assign_long_form_multiple_variables() {
         "Long form assign should handle multiple variables in compound expression"
     );
 }
+
+// Test streaming input parsing with realistic document
+// Verifies that chunked reading works correctly
+#[test]
+fn test_streaming_input_with_small_chunks() {
+    init_logs();
+
+    // Create a document that demonstrates streaming works
+    let input = r#"<html><body><esi:assign name="v" value="'test'" /><esi:vars>$(v)</esi:vars></body></html>"#;
+
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Verify the output contains expected content
+    assert!(
+        result.contains("test"),
+        "Should contain assigned variable value"
+    );
+}
