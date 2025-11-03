@@ -63,8 +63,8 @@ enum QueuedElement {
     Content(Vec<u8>),
     /// A dispatched include waiting to be executed
     Include(Box<Fragment>),
-    /// A try block with attempts and except clause (currently handled inline, not queued)
-    #[allow(dead_code)]
+    /// A try block with attempts and except clause
+    /// All includes from all attempts have been dispatched in parallel
     Try {
         attempt_elements: Vec<Vec<QueuedElement>>,
         except_elements: Vec<QueuedElement>,
@@ -418,42 +418,217 @@ impl Processor {
                 attempt_events,
                 except_events,
             }) => {
-                // Process try/except: try each attempt in order, use except if all fail
-                let mut succeeded = false;
+                // Process try/except with parallel dispatch:
+                // Dispatch all includes from all attempts, then add try block to queue
+                let mut attempt_queues = Vec::new();
 
                 for attempt in attempt_events {
-                    // Process this attempt into a temporary buffer
-                    let mut attempt_buffer = Vec::new();
-                    let mut attempt_succeeded = true;
+                    let mut attempt_queue = Vec::new();
 
                     for elem in attempt {
-                        if self
-                            .process_element_streaming(
-                                elem.clone(),
-                                &mut attempt_buffer,
-                                dispatcher,
-                            )
-                            .is_err()
-                        {
-                            attempt_succeeded = false;
-                            break;
+                        // Process each element in the attempt, collecting queued items
+                        match elem {
+                            Element::Text(text) => {
+                                attempt_queue
+                                    .push(QueuedElement::Content(text.as_bytes().to_vec()));
+                            }
+                            Element::Html(html) => {
+                                attempt_queue
+                                    .push(QueuedElement::Content(html.as_bytes().to_vec()));
+                            }
+                            Element::Expr(expr) => {
+                                match expression::eval_expr(expr, &mut self.ctx) {
+                                    Ok(value) => {
+                                        if !matches!(value, expression::Value::Null) {
+                                            let text = value.to_string();
+                                            if !text.is_empty() {
+                                                attempt_queue.push(QueuedElement::Content(
+                                                    text.into_bytes(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!("Expression evaluation failed: {:?}", e);
+                                    }
+                                }
+                            }
+                            Element::Esi(Tag::Include {
+                                src,
+                                alt,
+                                continue_on_error,
+                            }) => {
+                                // Dispatch the include and add to attempt queue
+                                let interpolated_src =
+                                    try_evaluate_interpolated_string(&src, &mut self.ctx)?;
+                                let req = build_fragment_request(
+                                    self.ctx.get_request().clone_without_body(),
+                                    &interpolated_src,
+                                    self.configuration.is_escaped_content,
+                                )?;
+
+                                match dispatcher(req.clone_without_body()) {
+                                    Ok(pending_content) => {
+                                        let fragment = Fragment {
+                                            request: req,
+                                            alt: alt.map(|s| s.to_string()),
+                                            continue_on_error,
+                                            pending_content,
+                                        };
+                                        attempt_queue
+                                            .push(QueuedElement::Include(Box::new(fragment)));
+                                    }
+                                    Err(err) => {
+                                        if continue_on_error {
+                                            if let Some(alt_src) = alt {
+                                                self.dispatch_and_queue_include(
+                                                    &alt_src,
+                                                    None,
+                                                    continue_on_error,
+                                                    dispatcher,
+                                                )?;
+                                            } else {
+                                                attempt_queue.push(QueuedElement::Content(
+                                                    b"<!-- fragment request failed -->".to_vec(),
+                                                ));
+                                            }
+                                        } else {
+                                            return Err(ESIError::ExpressionError(format!(
+                                                "Fragment dispatch failed: {}",
+                                                err
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                            Element::Esi(Tag::Choose {
+                                when_branches,
+                                otherwise_events,
+                            }) => {
+                                // Evaluate and process chosen branch inline
+                                let mut chose_branch = false;
+                                for when_branch in when_branches {
+                                    if let Some(match_name) = &when_branch.match_name {
+                                        self.ctx.set_match_name(match_name);
+                                    }
+                                    let test_result =
+                                        expression::eval_expr(when_branch.test, &mut self.ctx)?;
+                                    if test_result.to_bool() {
+                                        chose_branch = true;
+                                        for elem in when_branch.content {
+                                            self.process_element_streaming(
+                                                elem,
+                                                output_writer,
+                                                dispatcher,
+                                            )?;
+                                        }
+                                        break;
+                                    }
+                                }
+                                if !chose_branch {
+                                    for elem in otherwise_events {
+                                        self.process_element_streaming(
+                                            elem,
+                                            output_writer,
+                                            dispatcher,
+                                        )?;
+                                    }
+                                }
+                            }
+                            Element::Esi(Tag::Try { .. }) => {
+                                // Nested try blocks - process recursively
+                                self.process_element_streaming(
+                                    elem.clone(),
+                                    output_writer,
+                                    dispatcher,
+                                )?;
+                            }
+                            _ => {}
                         }
                     }
 
-                    // If this attempt succeeded, write it out and we're done
-                    if attempt_succeeded {
-                        output_writer.write_all(&attempt_buffer)?;
-                        succeeded = true;
-                        break;
+                    attempt_queues.push(attempt_queue);
+                }
+
+                // Process except clause elements
+                let mut except_queue = Vec::new();
+                for elem in except_events {
+                    match elem {
+                        Element::Text(text) => {
+                            except_queue.push(QueuedElement::Content(text.as_bytes().to_vec()));
+                        }
+                        Element::Html(html) => {
+                            except_queue.push(QueuedElement::Content(html.as_bytes().to_vec()));
+                        }
+                        Element::Expr(expr) => match expression::eval_expr(expr, &mut self.ctx) {
+                            Ok(value) => {
+                                if !matches!(value, expression::Value::Null) {
+                                    let text = value.to_string();
+                                    if !text.is_empty() {
+                                        except_queue
+                                            .push(QueuedElement::Content(text.into_bytes()));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Expression evaluation failed: {:?}", e);
+                            }
+                        },
+                        Element::Esi(Tag::Include {
+                            src,
+                            alt,
+                            continue_on_error,
+                        }) => {
+                            let interpolated_src =
+                                try_evaluate_interpolated_string(&src, &mut self.ctx)?;
+                            let req = build_fragment_request(
+                                self.ctx.get_request().clone_without_body(),
+                                &interpolated_src,
+                                self.configuration.is_escaped_content,
+                            )?;
+
+                            match dispatcher(req.clone_without_body()) {
+                                Ok(pending_content) => {
+                                    let fragment = Fragment {
+                                        request: req,
+                                        alt: alt.map(|s| s.to_string()),
+                                        continue_on_error,
+                                        pending_content,
+                                    };
+                                    except_queue.push(QueuedElement::Include(Box::new(fragment)));
+                                }
+                                Err(err) => {
+                                    if continue_on_error {
+                                        if let Some(alt_src) = alt {
+                                            self.dispatch_and_queue_include(
+                                                &alt_src,
+                                                None,
+                                                continue_on_error,
+                                                dispatcher,
+                                            )?;
+                                        } else {
+                                            except_queue.push(QueuedElement::Content(
+                                                b"<!-- fragment request failed -->".to_vec(),
+                                            ));
+                                        }
+                                    } else {
+                                        return Err(ESIError::ExpressionError(format!(
+                                            "Fragment dispatch failed: {}",
+                                            err
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
 
-                // If all attempts failed, process the except clause
-                if !succeeded {
-                    for elem in except_events {
-                        self.process_element_streaming(elem.clone(), output_writer, dispatcher)?;
-                    }
-                }
+                // Add the try block to the queue with all attempts and except dispatched
+                self.queue.push_back(QueuedElement::Try {
+                    attempt_elements: attempt_queues,
+                    except_elements: except_queue,
+                });
             }
 
             _ => {} // Other standalone tags shouldn't appear
@@ -655,72 +830,13 @@ impl Processor {
                             except_elements,
                         } => {
                             // Process try block: try each attempt, use except if all fail
-                            let mut succeeded = false;
-
-                            for attempt in attempt_elements {
-                                let mut attempt_buffer = Vec::new();
-                                let mut attempt_succeeded = true;
-
-                                // Process this attempt
-                                for elem in attempt {
-                                    match elem {
-                                        QueuedElement::Content(bytes) => {
-                                            if attempt_buffer.write_all(&bytes).is_err() {
-                                                attempt_succeeded = false;
-                                                break;
-                                            }
-                                        }
-                                        QueuedElement::Include(fragment) => {
-                                            if self
-                                                .process_include_from_queue(
-                                                    *fragment,
-                                                    &mut attempt_buffer,
-                                                    dispatcher,
-                                                    processor,
-                                                )
-                                                .is_err()
-                                            {
-                                                attempt_succeeded = false;
-                                                break;
-                                            }
-                                        }
-                                        QueuedElement::Try { .. } => {
-                                            // Nested try blocks - not fully supported
-                                            attempt_succeeded = false;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // If attempt succeeded, write it out
-                                if attempt_succeeded {
-                                    output_writer.write_all(&attempt_buffer)?;
-                                    succeeded = true;
-                                    break;
-                                }
-                            }
-
-                            // If all attempts failed, process except
-                            if !succeeded {
-                                for elem in except_elements {
-                                    match elem {
-                                        QueuedElement::Content(bytes) => {
-                                            output_writer.write_all(&bytes)?;
-                                        }
-                                        QueuedElement::Include(fragment) => {
-                                            self.process_include_from_queue(
-                                                *fragment,
-                                                output_writer,
-                                                dispatcher,
-                                                processor,
-                                            )?;
-                                        }
-                                        QueuedElement::Try { .. } => {
-                                            // Nested try in except - not fully supported
-                                        }
-                                    }
-                                }
-                            }
+                            self.process_try_block(
+                                attempt_elements,
+                                except_elements,
+                                output_writer,
+                                dispatcher,
+                                processor,
+                            )?;
                         }
                         QueuedElement::Content(_) => {
                             unreachable!("Content should have been processed above");
@@ -780,6 +896,80 @@ impl Processor {
         }
 
         Ok(())
+    }
+
+    /// Process a try block recursively, handling nested try blocks naturally
+    fn process_try_block(
+        &mut self,
+        attempt_elements: Vec<Vec<QueuedElement>>,
+        except_elements: Vec<QueuedElement>,
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+        processor: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        let mut succeeded = false;
+
+        // Try each attempt in order
+        for attempt in attempt_elements {
+            match self.process_queued_elements(attempt, dispatcher, processor) {
+                Ok(buffer) => {
+                    // This attempt succeeded - write it out
+                    output_writer.write_all(&buffer)?;
+                    succeeded = true;
+                    break;
+                }
+                Err(_) => {
+                    // This attempt failed - try the next one
+                    continue;
+                }
+            }
+        }
+
+        // If all attempts failed, process except clause
+        if !succeeded {
+            let except_buffer =
+                self.process_queued_elements(except_elements, dispatcher, processor)?;
+            output_writer.write_all(&except_buffer)?;
+        }
+
+        Ok(())
+    }
+
+    /// Process a list of queued elements recursively, returning the output buffer
+    /// This naturally handles nested try blocks through recursion
+    fn process_queued_elements(
+        &mut self,
+        elements: Vec<QueuedElement>,
+        dispatcher: &FragmentRequestDispatcher,
+        processor: Option<&FragmentResponseProcessor>,
+    ) -> Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+
+        for elem in elements {
+            match elem {
+                QueuedElement::Content(bytes) => {
+                    buffer.write_all(&bytes)?;
+                }
+                QueuedElement::Include(fragment) => {
+                    self.process_include_from_queue(*fragment, &mut buffer, dispatcher, processor)?;
+                }
+                QueuedElement::Try {
+                    attempt_elements,
+                    except_elements,
+                } => {
+                    // Recursively process nested try block
+                    self.process_try_block(
+                        attempt_elements,
+                        except_elements,
+                        &mut buffer,
+                        dispatcher,
+                        processor,
+                    )?;
+                }
+            }
+        }
+
+        Ok(buffer)
     }
 
     /// Process an include from the queue (wait and write, handle alt)
