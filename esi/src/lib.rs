@@ -264,24 +264,27 @@ impl Processor {
             eprintln!("DEBUG: Parser remaining: {:?}", remaining);
         }
 
-        // Set up fragment request dispatcher. Use what's provided or use a default
-        let dispatch_fragment_request =
-            dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
+        // Set up fragment request dispatcher
+        let dispatcher = dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
 
-        // PHASE 1: Dispatch all includes
-        // Walk the AST, evaluate conditionals, and dispatch HTTP requests
-        // All dispatches happen before any wait() calls - this enables parallel fetching!
-        let execution_elements =
-            self.process_parsed_document(elements, dispatch_fragment_request)?;
-
-        // PHASE 2: Execute (wait for fragments and write output)
-        // Now that all HTTP requests are in flight, we wait for them as needed
-        self.execute_queue(
-            execution_elements,
-            output_writer,
-            dispatch_fragment_request,
-            process_fragment_response,
-        )?;
+        // STREAMING PROCESSING: Process each element and immediately execute if possible
+        // - Parse elements one at a time
+        // - For each element: dispatch if needed, execute if ready
+        // - This approach: dispatch → write → dispatch → write (streaming)
+        // - vs old approach: dispatch all → write all (batched)
+        
+        for element in elements {
+            // Dispatch this element (creates ExecutionElements with pending requests)
+            let execution_elements = self.process_parsed_document(vec![element], dispatcher)?;
+            
+            // Immediately execute these elements (wait and write)
+            self.execute_queue(
+                execution_elements,
+                output_writer,
+                dispatcher,
+                process_fragment_response,
+            )?;
+        }
 
         Ok(())
     }
