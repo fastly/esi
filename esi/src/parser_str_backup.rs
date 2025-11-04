@@ -1,11 +1,11 @@
-use bytes::Bytes;
 use nom::branch::alt;
-use nom::bytes::complete::{is_not, tag, tag_no_case, take_while1};
+use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_while1};
 use nom::combinator::{map, map_res, opt, peek, recognize, success, verify};
 use nom::error::Error;
 use nom::multi::{fold_many0, length_data, many0, many1, many_till, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
-use nom::IResult;
+use nom::{AsChar, IResult};
+use bytes::Bytes;
 
 use crate::parser_types::*;
 
@@ -35,48 +35,29 @@ pub fn parse_complete(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>
 }
 
 /// Parses a standalone ESI expression (for use in test attributes, etc.)
-/// Accepts str for convenience but works on bytes internally
+/// This works on &str since it's for small attribute values
 pub fn parse_expression(input: &str) -> IResult<&str, Expr, Error<&str>> {
-    let bytes = input.as_bytes();
-    match expr(bytes) {
-        Ok((remaining_bytes, expr)) => {
-            let consumed = bytes.len() - remaining_bytes.len();
-            Ok((&input[consumed..], expr))
-        }
-        Err(nom::Err::Error(e)) => Err(nom::Err::Error(Error::new(input, e.code))),
-        Err(nom::Err::Failure(e)) => Err(nom::Err::Failure(Error::new(input, e.code))),
-        Err(nom::Err::Incomplete(n)) => Err(nom::Err::Incomplete(n)),
-    }
+    expr_str(input)
 }
 
 /// Parses a string that may contain interpolated expressions like $(VAR)
-/// Accepts str for convenience but works on bytes internally
+/// This works on &str since it's for small attribute values  
 pub fn parse_interpolated_string(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
-    let bytes = input.as_bytes();
-    match fold_many0(
-        alt((interpolated_expression, interpolated_text)),
+    fold_many0(
+        alt((interpolated_expression_str, interpolated_text_str)),
         Vec::new,
         |mut acc: Vec<Element>, mut item| {
             acc.append(&mut item);
             acc
         },
-    )(bytes)
-    {
-        Ok((remaining_bytes, elements)) => {
-            let consumed = bytes.len() - remaining_bytes.len();
-            Ok((&input[consumed..], elements))
-        }
-        Err(nom::Err::Error(e)) => Err(nom::Err::Error(Error::new(input, e.code))),
-        Err(nom::Err::Failure(e)) => Err(nom::Err::Failure(Error::new(input, e.code))),
-        Err(nom::Err::Incomplete(n)) => Err(nom::Err::Incomplete(n)),
-    }
+    )(input)
 }
 
-fn element(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn element(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     alt((text, esi_tag, html))(input)
 }
 
-fn parse_interpolated(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn parse_interpolated(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     fold_many0(
         interpolated_element,
         Vec::new,
@@ -87,11 +68,11 @@ fn parse_interpolated(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>
     )(input)
 }
 
-fn interpolated_element(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn interpolated_element(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     alt((interpolated_text, interpolated_expression, esi_tag, html))(input)
 }
 
-fn esi_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_tag(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     alt((
         esi_assign,
         esi_include,
@@ -108,17 +89,17 @@ fn esi_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     ))(input)
 }
 
-fn esi_assign(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_assign(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     alt((esi_assign_short, esi_assign_long))(input)
 }
 
-fn parse_assign_attributes_short(attrs: Vec<(String, String)>) -> Vec<Element> {
+fn parse_assign_attributes_short(attrs: Vec<(&str, &str)>) -> Vec<Element> {
     let mut name = String::new();
     let mut value_str = String::new();
     for (key, val) in attrs {
-        match key.as_str() {
-            "name" => name = val,
-            "value" => value_str = val,
+        match key {
+            "name" => name = val.to_string(),
+            "value" => value_str = val.to_string(),
             _ => {}
         }
     }
@@ -136,11 +117,14 @@ fn parse_assign_attributes_short(attrs: Vec<(String, String)>) -> Vec<Element> {
     vec![Element::Esi(Tag::Assign { name, value })]
 }
 
-fn parse_assign_long(attrs: Vec<(String, String)>, content: Vec<Element>) -> Vec<Element> {
+fn parse_assign_long(
+    attrs: Vec<(&str, &str)>,
+    content: Vec<Element>,
+) -> Vec<Element> {
     let mut name = String::new();
     for (key, val) in attrs {
         if key == "name" {
-            name = val;
+            name = val.to_string();
         }
     }
 
@@ -176,80 +160,77 @@ fn parse_assign_long(attrs: Vec<(String, String)>, content: Vec<Element>) -> Vec
     vec![Element::Esi(Tag::Assign { name, value })]
 }
 
-fn esi_assign_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_assign_short(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         delimited(
-            tag(b"<esi:assign"),
+            tag("<esi:assign"),
             attributes,
-            preceded(multispace0_bytes, tag("/>")),
+            preceded(multispace0, tag("/>")),
         ),
         parse_assign_attributes_short,
     )(input)
 }
 
-fn esi_assign_long(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_assign_long(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         tuple((
             delimited(
-                tag(b"<esi:assign"),
+                tag("<esi:assign"),
                 attributes,
-                preceded(multispace0_bytes, tag(b">")),
+                preceded(multispace0, tag(">")),
             ),
             parse_interpolated,
-            tag(b"</esi:assign>"),
+            tag("</esi:assign>"),
         )),
         |(attrs, content, _)| parse_assign_long(attrs, content),
     )(input)
 }
-fn esi_except(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_except(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         delimited(
-            tag(b"<esi:except>"),
+            tag("<esi:except>"),
             parse_interpolated,
-            tag(b"</esi:except>"),
+            tag("</esi:except>"),
         ),
         |v| vec![Element::Esi(Tag::Except(v))],
     )(input)
 }
-fn esi_attempt(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_attempt(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         delimited(
-            tag(b"<esi:attempt>"),
+            tag("<esi:attempt>"),
             parse_interpolated,
-            tag(b"</esi:attempt>"),
+            tag("</esi:attempt>"),
         ),
         |v| vec![Element::Esi(Tag::Attempt(v))],
     )(input)
 }
-fn esi_try(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    map(
-        delimited(tag(b"<esi:try>"), parse, tag(b"</esi:try>")),
-        |v| {
-            let mut attempts = vec![];
-            let mut except = None;
-            for element in v {
-                match element {
-                    Element::Esi(Tag::Attempt(cs)) => attempts.push(cs),
-                    Element::Esi(Tag::Except(cs)) => {
-                        except = Some(cs);
-                    }
-                    _ => {} // Ignore content outside attempt/except blocks
+fn esi_try(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
+    map(delimited(tag("<esi:try>"), parse, tag("</esi:try>")), |v| {
+        let mut attempts = vec![];
+        let mut except = None;
+        for element in v {
+            match element {
+                Element::Esi(Tag::Attempt(cs)) => attempts.push(cs),
+                Element::Esi(Tag::Except(cs)) => {
+                    except = Some(cs);
                 }
+                _ => {} // Ignore content outside attempt/except blocks
             }
-            vec![Element::Esi(Tag::Try {
-                attempt_events: attempts,
-                except_events: except.unwrap_or_default(),
-            })]
-        },
-    )(input)
+        }
+        vec![Element::Esi(Tag::Try {
+            attempt_events: attempts,
+            except_events: except.unwrap_or_default(),
+        })]
+    })(input)
 }
 
-fn esi_otherwise(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_otherwise(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         tuple((
-            tag(b"<esi:otherwise>"),
+            tag("<esi:otherwise>"),
             parse_interpolated,
-            tag(b"</esi:otherwise>"),
+            tag("</esi:otherwise>"),
         )),
         |(_, content, _)| {
             // Return the Otherwise tag followed by its content elements (same as esi_when)
@@ -260,28 +241,28 @@ fn esi_otherwise(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     )(input)
 }
 
-fn esi_when(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_when(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         tuple((
             delimited(
-                tag(b"<esi:when"),
+                tag("<esi:when"),
                 attributes,
-                preceded(multispace0_bytes, alt((tag(b">"), tag("/>")))),
+                preceded(multispace0, alt((tag(">"), tag("/>")))),
             ),
             parse_interpolated,
-            tag(b"</esi:when>"),
+            tag("</esi:when>"),
         )),
         |(attrs, content, _)| {
             let test = attrs
                 .iter()
-                .find(|(key, _)| key == "test")
-                .map(|(_, val)| val.clone())
-                .unwrap_or_default();
+                .find(|(key, _)| *key == "test")
+                .map(|(_, val)| *val)
+                .unwrap_or("");
 
             let match_name = attrs
                 .iter()
-                .find(|(key, _)| key == "matchname")
-                .map(|(_, val)| val.clone());
+                .find(|(key, _)| *key == "matchname")
+                .map(|(_, val)| val.to_string());
 
             // Return the When tag followed by its content elements as a marker
             let mut result = vec![Element::Esi(Tag::When { test, match_name })];
@@ -291,9 +272,9 @@ fn esi_when(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     )(input)
 }
 
-fn esi_choose(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_choose(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
-        delimited(tag(b"<esi:choose>"), parse, tag(b"</esi:choose>")),
+        delimited(tag("<esi:choose>"), parse, tag("</esi:choose>")),
         |v| {
             let mut when_branches = vec![];
             let mut otherwise_events = Vec::new();
@@ -310,7 +291,7 @@ fn esi_choose(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
                         in_otherwise = false;
 
                         // Parse the test expression now, at parse time (not at eval time)
-                        let test_expr = match parse_expression(&test) {
+                        let test_expr = match parse_expression(test) {
                             Ok((_, expr)) => expr,
                             Err(_) => {
                                 // If parsing fails, create a simple false expression
@@ -362,13 +343,15 @@ fn esi_choose(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
 // (either the body of <esi:vars>...</esi:vars> or the name attribute of <esi:vars name="..."/>)
 // and returns the evaluated content directly as Vec<Element>. These elements (Text, Expr, Html, etc.)
 // are then flattened into the main element stream and processed normally by process_elements() in lib.rs.
-fn esi_vars(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_vars(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     alt((esi_vars_short, esi_vars_long))(input)
 }
 
-fn parse_vars_attributes(attrs: Vec<(String, String)>) -> Result<Vec<Element>, &'static str> {
-    if let Some((_k, v)) = attrs.iter().find(|(k, _v)| k == "name") {
-        if let Ok((_, expr)) = expression(v.as_bytes()) {
+fn parse_vars_attributes(
+    attrs: Vec<(&str, &str)>,
+) -> Result<Vec<Element>, &'static str> {
+    if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "name") {
+        if let Ok((_, expr)) = expression(v) {
             Ok(expr)
         } else {
             Err("failed to parse expression")
@@ -378,19 +361,19 @@ fn parse_vars_attributes(attrs: Vec<(String, String)>) -> Result<Vec<Element>, &
     }
 }
 
-fn esi_vars_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_vars_short(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map_res(
         delimited(
-            tag(b"<esi:vars"),
+            tag("<esi:vars"),
             attributes,
-            preceded(multispace0_bytes, tag("/>")), // Short form must be self-closing per ESI spec
+            preceded(multispace0, tag("/>")), // Short form must be self-closing per ESI spec
         ),
         parse_vars_attributes,
     )(input)
 }
 
 // Parser for ESI tags that can appear inside vars (everything except vars itself to avoid recursion)
-fn esi_tag_non_vars(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_tag_non_vars(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     alt((
         esi_assign,
         esi_include,
@@ -409,7 +392,7 @@ fn esi_tag_non_vars(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> 
 
 // Parser for content inside esi:vars - handles text, expressions, and most ESI tags (except nested vars)
 // NOTE: Supports nested variable expressions like $(VAR{$(other)}) as of the nom migration
-fn parse_vars_content(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn parse_vars_content(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     fold_many0(
         alt((
             interpolated_text,
@@ -425,60 +408,60 @@ fn parse_vars_content(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>
     )(input)
 }
 
-fn esi_vars_long(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_vars_long(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     // Use parse_vars_content instead of parse_interpolated to avoid infinite recursion
     map(
-        delimited(tag(b"<esi:vars>"), parse_vars_content, tag(b"</esi:vars>")),
+        delimited(tag("<esi:vars>"), parse_vars_content, tag("</esi:vars>")),
         |v| v,
     )(input)
 }
 
-fn esi_comment(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_comment(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         delimited(
-            tag(b"<esi:comment"),
+            tag("<esi:comment"),
             attributes,
-            preceded(multispace0_bytes, alt((tag(b">"), tag("/>")))),
+            preceded(multispace0, alt((tag(">"), tag("/>")))),
         ),
         |_| vec![],
     )(input)
 }
-fn esi_remove(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_remove(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
-        delimited(tag(b"<esi:remove>"), parse, tag(b"</esi:remove>")),
+        delimited(tag("<esi:remove>"), parse, tag("</esi:remove>")),
         |_| vec![],
     )(input)
 }
 
-fn esi_text(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_text(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         tuple((
-            tag(b"<esi:text>"),
+            tag("<esi:text>"),
             length_data(map(
-                peek(many_till(anychar_byte, tag(b"</esi:text>"))),
+                peek(many_till(anychar, tag("</esi:text>"))),
                 |(v, _)| v.len(),
             )),
-            tag(b"</esi:text>"),
+            tag("</esi:text>"),
         )),
-        |(_, v, _)| vec![Element::Text(Bytes::copy_from_slice(v))],
+        |(_, v, _)| vec![Element::Text(v)],
     )(input)
 }
-fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_include(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         delimited(
-            tag(b"<esi:include"),
+            tag("<esi:include"),
             attributes,
-            preceded(multispace0_bytes, alt((tag(b">"), tag("/>")))),
+            preceded(multispace0, alt((tag(">"), tag("/>")))),
         ),
         |attrs| {
-            let mut src = String::new();
+            let mut src = "";
             let mut alt = None;
             let mut continue_on_error = false;
             for (key, val) in attrs {
-                match key.as_str() {
+                match key {
                     "src" => src = val,
                     "alt" => alt = Some(val),
-                    "onerror" => continue_on_error = &val == "continue",
+                    "onerror" => continue_on_error = val == "continue",
                     _ => {}
                 }
             }
@@ -491,166 +474,126 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     )(input)
 }
 
-fn attributes(input: &[u8]) -> IResult<&[u8], Vec<(String, String)>, Error<&[u8]>> {
-    map(
-        many0(separated_pair(
-            preceded(multispace1_bytes, alpha1_bytes),
-            byte_char(b'='),
-            htmlstring,
-        )),
-        |pairs| {
-            pairs
-                .into_iter()
-                .map(|(k, v)| {
-                    (
-                        String::from_utf8_lossy(k).to_string(),
-                        String::from_utf8_lossy(v).to_string(),
-                    )
-                })
-                .collect()
-        },
-    )(input)
+fn attributes(input: &str) -> IResult<&str, Vec<(&str, &str)>, Error<&str>> {
+    many0(separated_pair(
+        preceded(multispace1, alpha1),
+        char('='),
+        htmlstring,
+    ))(input)
 }
 
-fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    delimited(byte_char(b'"'), is_not(&b"\""[..]), byte_char(b'"'))(input)
+fn htmlstring(input: &str) -> IResult<&str, &str, Error<&str>> {
+    delimited(char('"'), is_not("\""), char('"'))(input) // TODO: obviously wrong
 }
 
-fn html(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn html(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     alt((script, end_tag, start_tag))(input)
 }
 
-fn script(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn script(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         tuple((
             recognize(verify(
-                delimited(tag_no_case(b"<script"), attributes, byte_char(b'>')),
-                |attrs: &Vec<(String, String)>| !attrs.iter().any(|(k, _)| k == "src"),
+                delimited(tag_no_case("<script"), attributes, char('>')),
+                |attrs: &Vec<(&str, &str)>| !attrs.iter().any(|(k, _)| k == &"src"),
             )),
             length_data(map(
-                peek(many_till(anychar_byte, tag_no_case(b"</script"))),
+                peek(many_till(anychar, tag_no_case("</script"))),
                 |(v, _)| v.len(),
             )),
             recognize(delimited(
-                tag_no_case(b"</script"),
-                alt((is_not(&b">"[..]), success(&b""[..]))),
-                byte_char(b'>'),
+                tag_no_case("</script"),
+                alt((is_not(">"), success(""))),
+                char('>'),
             )),
         )),
         |(start, script, end)| {
             vec![
-                Element::Html(Bytes::copy_from_slice(start)),
-                Element::Text(Bytes::copy_from_slice(script)),
-                Element::Html(Bytes::copy_from_slice(end)),
+                Element::Html(start),
+                Element::Text(script),
+                Element::Html(end),
             ]
         },
     )(input)
 }
 
-fn end_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn end_tag(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         verify(
-            recognize(delimited(tag(b"</"), is_not(&b">"[..]), byte_char(b'>'))),
-            |s: &[u8]| !s.starts_with(b"</esi:"),
+            recognize(delimited(tag("</"), is_not(">"), char('>'))),
+            |s: &str| !s.starts_with("</esi:"),
         ),
-        |s: &[u8]| vec![Element::Html(Bytes::copy_from_slice(s))],
+        |s: &str| vec![Element::Html(s)],
     )(input)
 }
 
-fn start_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn start_tag(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(
         verify(
-            recognize(delimited(
-                byte_char(b'<'),
-                is_not(&b">"[..]),
-                byte_char(b'>'),
-            )),
-            |s: &[u8]| !s.starts_with(b"</") && !s.starts_with(b"<esi:"),
+            recognize(delimited(char('<'), is_not(">"), char('>'))),
+            |s: &str| !s.starts_with("</") && !s.starts_with("<esi:"),
         ),
-        |s: &[u8]| vec![Element::Html(Bytes::copy_from_slice(s))],
+        |s: &str| vec![Element::Html(s)],
     )(input)
 }
-fn text(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    map(recognize(many1(is_not(&b"<"[..]))), |s: &[u8]| {
-        vec![Element::Text(Bytes::copy_from_slice(s))]
+fn text(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
+    map(recognize(many1(is_not("<"))), |s: &str| {
+        vec![Element::Text(s)]
     })(input)
 }
-fn interpolated_text(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    map(recognize(many1(is_not(&b"<$"[..]))), |s: &[u8]| {
-        vec![Element::Text(Bytes::copy_from_slice(s))]
+fn interpolated_text(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
+    map(recognize(many1(is_not("<$"))), |s: &str| {
+        vec![Element::Text(s)]
     })(input)
 }
 
-fn is_alphanumeric_or_underscore(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_'
+fn is_alphanumeric_or_underscore(c: char) -> bool {
+    c.is_alphanum() || c == '_'
 }
 
-fn is_lower_alphanumeric_or_underscore(c: u8) -> bool {
-    c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_'
+fn is_lower_alphanumeric_or_underscore(c: char) -> bool {
+    c.is_ascii_lowercase() || c.is_numeric() || c == '_'
 }
 
-fn fn_name(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
-    map(
-        preceded(
-            byte_char(b'$'),
-            take_while1(is_lower_alphanumeric_or_underscore),
-        ),
-        |s: &[u8]| String::from_utf8_lossy(s).into_owned(),
-    )(input)
+fn fn_name(input: &str) -> IResult<&str, &str, Error<&str>> {
+    preceded(char('$'), take_while1(is_lower_alphanumeric_or_underscore))(input)
 }
 
-fn var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn var_name(input: &str) -> IResult<&str, Expr, Error<&str>> {
     map(
         tuple((
             take_while1(is_alphanumeric_or_underscore),
-            opt(delimited(byte_char(b'{'), var_key_expr, byte_char(b'}'))),
-            opt(preceded(byte_char(b'|'), fn_nested_argument)),
+            opt(delimited(char('{'), var_key_expr, char('}'))),
+            opt(preceded(char('|'), fn_nested_argument)),
         )),
-        |(name, key, default): (&[u8], _, _)| {
-            Expr::Variable(
-                String::from_utf8_lossy(name).into_owned(),
-                key.map(Box::new),
-                default.map(Box::new),
-            )
-        },
+        |(name, key, default)| Expr::Variable(name, key.map(Box::new), default.map(Box::new)),
     )(input)
 }
 
-fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
-    map(
-        take_while_byte(|c| c != b'$' && c != b'{' && c != b'}' && c != b',' && c != b'"'),
-        |s: &[u8]| String::from_utf8_lossy(s).into_owned(),
-    )(input)
+fn not_dollar_or_curlies(input: &str) -> IResult<&str, &str, Error<&str>> {
+    take_till(|c: char| "${},\"".contains(c))(input)
 }
 
 // TODO: handle escaping
-fn single_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
-    map(
-        delimited(
-            byte_char(b'\''),
-            take_while_byte(|c| c != b'\'' && c < 128),
-            byte_char(b'\''),
-        ),
-        |s: &[u8]| String::from_utf8_lossy(s).into_owned(),
+fn single_quoted_string(input: &str) -> IResult<&str, &str, Error<&str>> {
+    delimited(
+        char('\''),
+        take_till(|c: char| c == '\'' || !c.is_ascii()),
+        char('\''),
     )(input)
 }
-fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
-    map(
-        delimited(
-            tag(b"'''"),
-            length_data(map(peek(many_till(anychar_byte, tag(b"'''"))), |(v, _)| {
-                v.len()
-            })),
-            tag(b"'''"),
-        ),
-        |s: &[u8]| String::from_utf8_lossy(s).into_owned(),
+fn triple_quoted_string(input: &str) -> IResult<&str, &str, Error<&str>> {
+    delimited(
+        tag("'''"),
+        length_data(map(peek(many_till(anychar, tag("'''"))), |(v, _)| v.len())),
+        tag("'''"),
     )(input)
 }
 
-fn string(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn string(input: &str) -> IResult<&str, Expr, Error<&str>> {
     map(
         alt((single_quoted_string, triple_quoted_string)),
-        |string: String| {
+        |string| {
             if string.is_empty() {
                 Expr::String(None)
             } else {
@@ -660,7 +603,7 @@ fn string(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     )(input)
 }
 
-fn var_key(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
+fn var_key(input: &str) -> IResult<&str, &str, Error<&str>> {
     alt((
         single_quoted_string,
         triple_quoted_string,
@@ -669,18 +612,18 @@ fn var_key(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
 }
 
 // Parse subscript key - can be a string or a nested variable expression
-fn var_key_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn var_key_expr(input: &str) -> IResult<&str, Expr, Error<&str>> {
     alt((
         // Try to parse as a variable first (e.g., $(keyVar))
         variable,
         // Otherwise parse as a string
-        map(var_key, |s: String| Expr::String(Some(s))),
+        map(var_key, |s| Expr::String(Some(s))),
     ))(input)
 }
 
-fn fn_argument(input: &[u8]) -> IResult<&[u8], Vec<Expr>, Error<&[u8]>> {
+fn fn_argument(input: &str) -> IResult<&str, Vec<Expr>, Error<&str>> {
     let (input, mut parsed) = separated_list0(
-        tuple((multispace0_bytes, byte_char(b','), multispace0_bytes)),
+        tuple((multispace0, char(','), multispace0)),
         fn_nested_argument,
     )(input)?;
 
@@ -691,34 +634,33 @@ fn fn_argument(input: &[u8]) -> IResult<&[u8], Vec<Expr>, Error<&[u8]>> {
     Ok((input, parsed))
 }
 
-fn fn_nested_argument(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn fn_nested_argument(input: &str) -> IResult<&str, Expr, Error<&str>> {
     alt((call, variable, string, integer, bareword))(input)
 }
 
-fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn integer(input: &str) -> IResult<&str, Expr, Error<&str>> {
     map_res(
         recognize(tuple((
-            opt(byte_char(b'-')),
-            take_while1(|c: u8| c.is_ascii_digit()),
+            opt(char('-')),
+            take_while1(|c: char| c.is_ascii_digit()),
         ))),
-        |s: &[u8]| String::from_utf8_lossy(s).parse::<i32>().map(Expr::Integer),
+        |s: &str| s.parse::<i32>().map(Expr::Integer),
     )(input)
 }
 
-fn bareword(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    map(
-        take_while1(is_alphanumeric_or_underscore),
-        |name: &[u8]| Expr::Variable(String::from_utf8_lossy(name).into_owned(), None, None),
-    )(input)
+fn bareword(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    map(take_while1(is_alphanumeric_or_underscore), |name: &str| {
+        Expr::Variable(name, None, None)
+    })(input)
 }
 
-fn call(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn call(input: &str) -> IResult<&str, Expr, Error<&str>> {
     let (input, parsed) = tuple((
         fn_name,
         delimited(
-            terminated(byte_char(b'('), multispace0_bytes),
+            terminated(char('('), multispace0),
             fn_argument,
-            preceded(multispace0_bytes, byte_char(b')')),
+            preceded(multispace0, char(')')),
         ),
     ))(input)?;
 
@@ -727,42 +669,42 @@ fn call(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     Ok((input, Expr::Call(name, args)))
 }
 
-fn variable(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    delimited(tag(b"$("), var_name, byte_char(b')'))(input)
+fn variable(input: &str) -> IResult<&str, Expr, Error<&str>> {
+    delimited(tag("$("), var_name, char(')'))(input)
 }
 
-fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
+fn operator(input: &str) -> IResult<&str, Operator, Error<&str>> {
     alt((
         // Try longer operators first
-        map(tag(b"matches_i"), |_| Operator::MatchesInsensitive),
-        map(tag(b"matches"), |_| Operator::Matches),
-        map(tag(b"=="), |_| Operator::Equals),
-        map(tag(b"!="), |_| Operator::NotEquals),
-        map(tag(b"<="), |_| Operator::LessThanOrEqual),
-        map(tag(b">="), |_| Operator::GreaterThanOrEqual),
-        map(tag(b"<"), |_| Operator::LessThan),
-        map(tag(b">"), |_| Operator::GreaterThan),
-        map(tag(b"&&"), |_| Operator::And),
-        map(tag(b"||"), |_| Operator::Or),
+        map(tag("matches_i"), |_| Operator::MatchesInsensitive),
+        map(tag("matches"), |_| Operator::Matches),
+        map(tag("=="), |_| Operator::Equals),
+        map(tag("!="), |_| Operator::NotEquals),
+        map(tag("<="), |_| Operator::LessThanOrEqual),
+        map(tag(">="), |_| Operator::GreaterThanOrEqual),
+        map(tag("<"), |_| Operator::LessThan),
+        map(tag(">"), |_| Operator::GreaterThan),
+        map(tag("&&"), |_| Operator::And),
+        map(tag("||"), |_| Operator::Or),
     ))(input)
 }
 
-fn interpolated_expression(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn interpolated_expression(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(alt((call, variable)), |expr| vec![Element::Expr(expr)])(input)
 }
 
-fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn primary_expr(input: &str) -> IResult<&str, Expr, Error<&str>> {
     alt((
         // Parse negation: !expr
         map(
-            preceded(byte_char(b'!'), preceded(multispace0_bytes, primary_expr)),
+            preceded(char('!'), preceded(multispace0, primary_expr)),
             |expr| Expr::Not(Box::new(expr)),
         ),
         // Parse grouped expression: (expr)
         delimited(
-            byte_char(b'('),
-            delimited(multispace0_bytes, expr, multispace0_bytes),
-            byte_char(b')'),
+            char('('),
+            delimited(multispace0, expr, multispace0),
+            char(')'),
         ),
         // Parse basic expressions
         call,
@@ -772,13 +714,11 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     ))(input)
 }
 
-fn expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn expr(input: &str) -> IResult<&str, Expr, Error<&str>> {
     let (rest, exp) = primary_expr(input)?;
 
-    if let Ok((rest, (operator, right_exp))) = tuple((
-        delimited(multispace0_bytes, operator, multispace0_bytes),
-        expr,
-    ))(rest)
+    if let Ok((rest, (operator, right_exp))) =
+        tuple((delimited(multispace0, operator, multispace0), expr))(rest)
     {
         Ok((
             rest,
@@ -792,7 +732,7 @@ fn expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
         Ok((rest, exp))
     }
 }
-fn expression(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn expression(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
     map(expr, |x| vec![Element::Expr(x)])(input)
 }
 
@@ -802,7 +742,7 @@ mod tests {
 
     #[test]
     fn test_new_parse() {
-        let input = br#"
+        let input = r#"
 <a>foo</a>
 <bar />
 baz
@@ -845,10 +785,7 @@ exception!
             Ok((rest, _)) => {
                 // Just test to make sure it parsed the whole thing
                 if !rest.is_empty() {
-                    panic!(
-                        "Failed to parse completely. Remaining: {:?}",
-                        String::from_utf8_lossy(rest)
-                    );
+                    panic!("Failed to parse completely. Remaining: '{}'", rest);
                 }
             }
             Err(e) => {
@@ -858,61 +795,43 @@ exception!
     }
     #[test]
     fn test_new_parse_script() {
-        let (rest, x) = script(b"<sCripT> less < more </scRIpt>").unwrap();
+        let (rest, x) = script("<sCripT> less < more </scRIpt>").unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
             [
-                Element::Html(Bytes::from_static(b"<sCripT>")),
-                Element::Text(Bytes::from_static(b" less < more ")),
-                Element::Html(Bytes::from_static(b"</scRIpt>"))
+                Element::Html("<sCripT>"),
+                Element::Text(" less < more "),
+                Element::Html("</scRIpt>")
             ]
         );
     }
     #[test]
     fn test_new_parse_script_with_src() {
-        let (rest, x) = parse(b"<sCripT src=\"whatever\">").unwrap();
+        let (rest, x) = parse("<sCripT src=\"whatever\">").unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(
-            x,
-            [Element::Html(Bytes::from_static(
-                b"<sCripT src=\"whatever\">"
-            ))]
-        );
+        assert_eq!(x, [Element::Html("<sCripT src=\"whatever\">")]);
     }
     #[test]
     fn test_new_parse_esi_vars_short() {
-        let (rest, x) = esi_tag(br#"<esi:vars name="$(hello)"/>"#).unwrap();
+        let (rest, x) = esi_tag(r#"<esi:vars name="$(hello)"/>"#).unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(
-            x,
-            [Element::Expr(Expr::Variable(
-                "hello".to_string(),
-                None,
-                None
-            )),]
-        );
+        assert_eq!(x, [Element::Expr(Expr::Variable("hello", None, None)),]);
     }
     #[test]
     fn test_new_parse_esi_vars_long() {
         // Nested <esi:vars> tags are not supported to prevent infinite recursion
         // The inner <esi:vars> tags should be treated as plain text/HTML
-        let (rest, x) = parse(br#"<esi:vars>hello<br></esi:vars>"#).unwrap();
+        let (rest, x) = parse(r#"<esi:vars>hello<br></esi:vars>"#).unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(
-            x,
-            [
-                Element::Text(Bytes::from_static(b"hello")),
-                Element::Html(Bytes::from_static(b"<br>")),
-            ]
-        );
+        assert_eq!(x, [Element::Text("hello"), Element::Html("<br>"),]);
     }
 
     #[test]
     fn test_nested_vars_not_supported() {
         // This test documents that nested <esi:vars> are explicitly NOT supported
         // The inner <esi:vars> tag will be treated as text
-        let input = br#"<esi:vars>outer<esi:vars>inner</esi:vars></esi:vars>"#;
+        let input = r#"<esi:vars>outer<esi:vars>inner</esi:vars></esi:vars>"#;
         let result = parse(input);
 
         // The parser should either:
@@ -927,25 +846,16 @@ exception!
                     eprintln!("Parsed elements: {:?}", elements);
                     // We expect the text "outer<esi:vars>inner" to be captured somehow
                     assert!(
-                        elements.iter().any(|c| {
-                            if let Element::Text(t) = c {
-                                let needle = b"inner";
-                                t.windows(needle.len()).any(|w| w == needle)
-                            } else {
-                                false
-                            }
-                        }),
+                        elements
+                            .iter()
+                            .any(|c| matches!(c, Element::Text(t) if t.contains("inner"))),
                         "Inner <esi:vars> content should be present as text"
                     );
                 } else {
                     // Parser stopped early - this is acceptable behavior
-                    eprintln!(
-                        "Parser stopped with remaining: {:?}",
-                        String::from_utf8_lossy(rest)
-                    );
-                    let needle = b"<esi:vars>";
+                    eprintln!("Parser stopped with remaining: {:?}", rest);
                     assert!(
-                        rest.windows(needle.len()).any(|w| w == needle),
+                        rest.contains("<esi:vars>"),
                         "Remaining should include the problematic nested vars"
                     );
                 }
@@ -959,19 +869,16 @@ exception!
     #[test]
     fn test_new_parse_complex_expr() {
         let (rest, x) =
-            parse(br#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#).unwrap();
+            parse(r#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
             [Element::Expr(Expr::Comparison {
-                left: Box::new(Expr::Call(
-                    "call".to_string(),
-                    vec![Expr::String(Some("hello".to_string()))]
-                )),
+                left: Box::new(Expr::Call("call", vec![Expr::String(Some("hello"))])),
                 operator: Operator::Matches,
                 right: Box::new(Expr::Variable(
-                    "var".to_string(),
-                    Some(Box::new(Expr::String(Some("key".to_string())))),
+                    "var",
+                    Some(Box::new(Expr::String(Some("key")))),
                     None
                 ))
             })]
@@ -980,7 +887,7 @@ exception!
 
     #[test]
     fn test_vars_with_content() {
-        let input = br#"<esi:vars>
+        let input = r#"<esi:vars>
             $(QUERY_STRING{param})
         </esi:vars>"#;
         let result = esi_vars_long(input);
@@ -993,15 +900,15 @@ exception!
         assert_eq!(
             rest.len(),
             0,
-            "Parser should consume all input. Remaining: '{:?}'",
-            String::from_utf8_lossy(rest)
+            "Parser should consume all input. Remaining: '{}'",
+            rest
         );
     }
 
     #[test]
     fn test_exact_failing_input() {
         // This is the exact input from the failing test
-        let input = br#"
+        let input = r#"
         <esi:assign name="keyVar" value="'param'" />
         <esi:vars>
             $(QUERY_STRING{param})
@@ -1010,18 +917,18 @@ exception!
     "#;
         let (rest, elements) = parse(input).unwrap();
         eprintln!("Chunks: {:?}", elements);
-        eprintln!("Remaining: {:?}", String::from_utf8_lossy(rest));
+        eprintln!("Remaining: {:?}", rest);
         assert_eq!(
             rest.len(),
             0,
-            "Parser should consume all input. Remaining: '{:?}'",
-            String::from_utf8_lossy(rest)
+            "Parser should consume all input. Remaining: '{}'",
+            rest
         );
     }
 
     #[test]
     fn test_esi_vars_directly() {
-        let input = br#"<esi:vars>
+        let input = r#"<esi:vars>
             $(QUERY_STRING{param})
             $(QUERY_STRING{$(keyVar)})
         </esi:vars>"#;
@@ -1033,13 +940,10 @@ exception!
 
     #[test]
     fn test_esi_tag_on_vars() {
-        let input = br#"<esi:vars>
+        let input = r#"<esi:vars>
             $(QUERY_STRING{param})
         </esi:vars>"#;
-        eprintln!(
-            "Testing esi_tag on input: {:?}",
-            String::from_utf8_lossy(input)
-        );
+        eprintln!("Testing esi_tag on input: {:?}", input);
         let result = esi_tag(input);
         eprintln!("Result: {:?}", result);
         assert!(result.is_ok(), "esi_tag should parse: {:?}", result.err());
@@ -1049,33 +953,33 @@ exception!
     fn test_assign_then_vars() {
         // Test simple case without nested variables (which aren't supported yet)
         let input =
-            br#"<esi:assign name="key" value="'val'" /><esi:vars>$(QUERY_STRING{param})</esi:vars>"#;
+            r#"<esi:assign name="key" value="'val'" /><esi:vars>$(QUERY_STRING{param})</esi:vars>"#;
         let (rest, _elements) = parse(input).unwrap();
         assert_eq!(rest.len(), 0);
     }
 
     #[test]
     fn test_new_parse_plain_text() {
-        let (rest, x) = parse(b"hello\nthere").unwrap();
+        let (rest, x) = parse("hello\nthere").unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(x, [Element::Text(Bytes::from_static(b"hello\nthere"))]);
+        assert_eq!(x, [Element::Text("hello\nthere")]);
     }
     #[test]
     fn test_new_parse_interpolated() {
-        let (rest, x) = parse(b"hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>").unwrap();
+        let (rest, x) = parse("hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>").unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
             [
-                Element::Text(Bytes::from_static(b"hello $(foo)")),
-                Element::Text(Bytes::from_static(b"goodbye ")),
-                Element::Expr(Expr::Variable("foo".to_string(), None, None)),
+                Element::Text("hello $(foo)"),
+                Element::Text("goodbye "),
+                Element::Expr(Expr::Variable("foo", None, None)),
             ]
         );
     }
     #[test]
     fn test_new_parse_examples() {
-        let (rest, _) = parse(include_bytes!(
+        let (rest, _) = parse(include_str!(
             "../../examples/esi_vars_example/src/index.html"
         ))
         .unwrap();
@@ -1085,7 +989,7 @@ exception!
 
     #[test]
     fn test_parse_equality_operators() {
-        let input = br#"$(foo) == 'bar'"#;
+        let input = r#"$(foo) == 'bar'"#;
         let (rest, result) = expr(input).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(
@@ -1096,7 +1000,7 @@ exception!
             }
         ));
 
-        let input2 = br#"$(foo) != 'bar'"#;
+        let input2 = r#"$(foo) != 'bar'"#;
         let (rest, result) = expr(input2).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(
@@ -1110,7 +1014,7 @@ exception!
 
     #[test]
     fn test_parse_comparison_operators() {
-        let input = br#"$(count) < 10"#;
+        let input = r#"$(count) < 10"#;
         let (rest, result) = expr(input).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(
@@ -1121,7 +1025,7 @@ exception!
             }
         ));
 
-        let input2 = br#"$(count) >= 5"#;
+        let input2 = r#"$(count) >= 5"#;
         let (rest, result) = expr(input2).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(
@@ -1136,7 +1040,7 @@ exception!
     #[test]
     fn test_parse_logical_operators() {
         // With parentheses to enforce correct precedence
-        let input = br#"($(foo) == 'bar') && ($(baz) == 'qux')"#;
+        let input = r#"($(foo) == 'bar') && ($(baz) == 'qux')"#;
         let (rest, result) = expr(input).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(
@@ -1147,7 +1051,7 @@ exception!
             }
         ));
 
-        let input2 = br#"($(foo) == 'bar') || ($(baz) == 'qux')"#;
+        let input2 = r#"($(foo) == 'bar') || ($(baz) == 'qux')"#;
         let (rest, result) = expr(input2).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(
@@ -1161,13 +1065,13 @@ exception!
 
     #[test]
     fn test_parse_negation() {
-        let input = br#"!$(flag)"#;
+        let input = r#"!$(flag)"#;
         let (rest, result) = expr(input).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(result, Expr::Not(_)));
 
         // Test negation with comparison
-        let input2 = br#"!($(foo) == 'bar')"#;
+        let input2 = r#"!($(foo) == 'bar')"#;
         let (rest, result) = expr(input2).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(result, Expr::Not(_)));
@@ -1175,7 +1079,7 @@ exception!
 
     #[test]
     fn test_parse_grouped_expressions() {
-        let input = br#"($(foo) == 'bar')"#;
+        let input = r#"($(foo) == 'bar')"#;
         let (rest, result) = expr(input).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(
@@ -1185,62 +1089,5 @@ exception!
                 ..
             }
         ));
-    }
-}
-
-// ============================================================================
-// Byte parsing helpers
-// ============================================================================
-
-fn byte_char(c: u8) -> impl Fn(&[u8]) -> IResult<&[u8], u8, Error<&[u8]>> {
-    move |input: &[u8]| {
-        if input.is_empty() {
-            Err(nom::Err::Error(Error::new(
-                input,
-                nom::error::ErrorKind::Eof,
-            )))
-        } else if input[0] == c {
-            Ok((&input[1..], c))
-        } else {
-            Err(nom::Err::Error(Error::new(
-                input,
-                nom::error::ErrorKind::Char,
-            )))
-        }
-    }
-}
-
-fn multispace0_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    take_while_byte(|c: u8| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r')(input)
-}
-
-fn multispace1_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    take_while1(|c: u8| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r')(input)
-}
-
-fn alpha1_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    take_while1(|c: u8| (c as char).is_ascii_alphabetic())(input)
-}
-
-fn take_while_byte(
-    f: impl Fn(u8) -> bool,
-) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    move |input: &[u8]| {
-        let mut i = 0;
-        while i < input.len() && f(input[i]) {
-            i += 1;
-        }
-        Ok((&input[i..], &input[..i]))
-    }
-}
-
-fn anychar_byte(input: &[u8]) -> IResult<&[u8], u8, Error<&[u8]>> {
-    if input.is_empty() {
-        Err(nom::Err::Error(Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )))
-    } else {
-        Ok((&input[1..], input[0]))
     }
 }

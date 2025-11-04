@@ -336,10 +336,10 @@ impl Processor {
             // Try to parse what we have in the buffer
             let parse_result = if eof {
                 // At EOF, use parse_complete to handle final buffer
-                parser::parse_complete(&buffer)
+                parser::parse_complete(buffer.as_bytes())
             } else {
                 // Not at EOF, use streaming parse
-                parser::parse(&buffer)
+                parser::parse(buffer.as_bytes())
             };
 
             match parse_result {
@@ -369,11 +369,11 @@ impl Processor {
                         if eof {
                             // At EOF with unparsed data - this is trailing content
                             // that couldn't be parsed. Output it as-is.
-                            output_writer.write_all(remaining.as_bytes())?;
+                            output_writer.write_all(remaining)?;
                             break;
                         } else {
                             // Keep remainder for next chunk
-                            buffer = remaining.to_string();
+                            buffer = String::from_utf8_lossy(remaining).into_owned();
                         }
                     }
                 }
@@ -422,11 +422,10 @@ impl Processor {
                 // Non-blocking content
                 if self.queue.is_empty() {
                     // Not blocked - write immediately
-                    output_writer.write_all(text.as_bytes())?;
+                    output_writer.write_all(&text)?;
                 } else {
                     // Blocked - queue it
-                    self.queue
-                        .push_back(QueuedElement::Content(text.as_bytes().to_vec()));
+                    self.queue.push_back(QueuedElement::Content(text.to_vec()));
                 }
             }
 
@@ -452,7 +451,7 @@ impl Processor {
                 // Non-blocking - just update context
                 let val = expression::eval_expr(value, &mut self.ctx)
                     .unwrap_or(expression::Value::Text("".into()));
-                self.ctx.set_variable(name, None, val);
+                self.ctx.set_variable(&name, None, val);
             }
 
             Element::Esi(Tag::Vars { name }) => {
@@ -468,7 +467,12 @@ impl Processor {
                 continue_on_error,
             }) => {
                 // BLOCKING - dispatch and queue
-                self.dispatch_and_queue_include(src, alt, continue_on_error, dispatcher)?;
+                self.dispatch_and_queue_include(
+                    &src,
+                    alt.as_deref(),
+                    continue_on_error,
+                    dispatcher,
+                )?;
             }
 
             Element::Esi(Tag::Choose {
@@ -519,12 +523,10 @@ impl Processor {
                         // Process each element in the attempt, collecting queued items
                         match elem {
                             Element::Text(text) => {
-                                attempt_queue
-                                    .push(QueuedElement::Content(text.as_bytes().to_vec()));
+                                attempt_queue.push(QueuedElement::Content(text.to_vec()));
                             }
                             Element::Html(html) => {
-                                attempt_queue
-                                    .push(QueuedElement::Content(html.as_bytes().to_vec()));
+                                attempt_queue.push(QueuedElement::Content(html.to_vec()));
                             }
                             Element::Expr(expr) => {
                                 match expression::eval_expr(expr, &mut self.ctx) {
@@ -551,7 +553,7 @@ impl Processor {
                                 // Dispatch the include and add to attempt queue
                                 let queued_element = self.dispatch_include_to_element(
                                     &src,
-                                    alt,
+                                    alt.as_deref(),
                                     continue_on_error,
                                     dispatcher,
                                 )?;
@@ -611,10 +613,10 @@ impl Processor {
                 for elem in except_events {
                     match elem {
                         Element::Text(text) => {
-                            except_queue.push(QueuedElement::Content(text.as_bytes().to_vec()));
+                            except_queue.push(QueuedElement::Content(text.to_vec()));
                         }
                         Element::Html(html) => {
-                            except_queue.push(QueuedElement::Content(html.as_bytes().to_vec()));
+                            except_queue.push(QueuedElement::Content(html.to_vec()));
                         }
                         Element::Expr(expr) => match expression::eval_expr(expr, &mut self.ctx) {
                             Ok(value) => {
@@ -638,7 +640,7 @@ impl Processor {
                             // Dispatch the include and add to except queue
                             let queued_element = self.dispatch_include_to_element(
                                 &src,
-                                alt,
+                                alt.as_deref(),
                                 continue_on_error,
                                 dispatcher,
                             )?;
@@ -1162,7 +1164,7 @@ where
     for element in elements {
         match element {
             parser_types::Element::Text(text) => {
-                segment_handler(text.to_string())?;
+                segment_handler(String::from_utf8_lossy(&text).into_owned())?;
             }
             parser_types::Element::Expr(expr) => {
                 // Evaluate the expression using eval_expr

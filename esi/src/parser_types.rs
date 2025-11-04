@@ -1,65 +1,67 @@
+use bytes::Bytes;
+
 /// Represents a single when branch in a choose block
 #[derive(Debug, PartialEq, Clone)]
-pub struct WhenBranch<'a> {
-    pub test: Expr<'a>,
+pub struct WhenBranch {
+    pub test: Expr,
     pub match_name: Option<String>,
-    pub content: Vec<Element<'a>>,
+    pub content: Vec<Element>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Tag<'a> {
+pub enum Tag {
     Include {
-        src: &'a str,
-        alt: Option<&'a str>,
+        src: String,
+        alt: Option<String>,
         continue_on_error: bool,
     },
     Try {
-        attempt_events: Vec<Vec<Element<'a>>>,
-        except_events: Vec<Element<'a>>,
+        attempt_events: Vec<Vec<Element>>,
+        except_events: Vec<Element>,
     },
     Assign {
-        name: &'a str,
-        value: Expr<'a>,
+        name: String,
+        value: Expr,
     },
     Vars {
         name: Option<String>,
     },
     When {
-        test: &'a str,
+        test: String,
         match_name: Option<String>,
     },
     Choose {
-        when_branches: Vec<WhenBranch<'a>>,
-        otherwise_events: Vec<Element<'a>>,
+        when_branches: Vec<WhenBranch>,
+        otherwise_events: Vec<Element>,
     },
-    Attempt(Vec<Element<'a>>),
-    Except(Vec<Element<'a>>),
+    Attempt(Vec<Element>),
+    Except(Vec<Element>),
     Otherwise,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Element<'a> {
-    Esi(Tag<'a>),
-    Expr(Expr<'a>),
-    Html(&'a str),
-    Text(&'a str),
+pub enum Element {
+    Esi(Tag),
+    Expr(Expr),
+    Html(Bytes),
+    Text(Bytes),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expr<'a> {
+pub enum Expr {
     Integer(i32),
-    String(Option<&'a str>),
-    Variable(&'a str, Option<Box<Expr<'a>>>, Option<Box<Expr<'a>>>),
+    String(Option<String>),
+    Variable(String, Option<Box<Expr>>, Option<Box<Expr>>),
     Comparison {
-        left: Box<Expr<'a>>,
+        left: Box<Expr>,
         operator: Operator,
-        right: Box<Expr<'a>>,
+        right: Box<Expr>,
     },
-    Call(&'a str, Vec<Expr<'a>>),
-    Not(Box<Expr<'a>>),
+    Call(String, Vec<Expr>),
+    Not(Box<Expr>),
     /// Represents a compound expression with interpolated text and expressions
     /// Used for cases like: <esi:assign name="x">prefix$(VAR)suffix</esi:assign>
-    Interpolated(Vec<Element<'a>>),
+    Interpolated(Vec<Element>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

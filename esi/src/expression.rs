@@ -33,7 +33,7 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
                 None
             };
 
-            let value = ctx.get_variable(name, evaluated_key.as_deref());
+            let value = ctx.get_variable(&name, evaluated_key.as_deref());
 
             // If value is Null and we have a default, evaluate and use the default
             if matches!(value, Value::Null) {
@@ -139,7 +139,7 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
             for arg in args {
                 values.push(eval_expr(arg, ctx)?);
             }
-            call_dispatch(func_name, &values)
+            call_dispatch(&func_name, &values)
         }
         parser_types::Expr::Not(expr) => {
             let inner_value = eval_expr(*expr, ctx)?;
@@ -151,8 +151,12 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
             let mut result = String::new();
             for element in elements {
                 match element {
-                    parser_types::Element::Text(text) => result.push_str(text),
-                    parser_types::Element::Html(html) => result.push_str(html),
+                    parser_types::Element::Text(text) => {
+                        result.push_str(&String::from_utf8_lossy(&text));
+                    }
+                    parser_types::Element::Html(html) => {
+                        result.push_str(&String::from_utf8_lossy(&html));
+                    }
                     parser_types::Element::Expr(expr) => {
                         let value = eval_expr(expr, ctx)?;
                         result.push_str(&value.to_string());
