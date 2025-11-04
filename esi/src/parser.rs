@@ -9,11 +9,28 @@ use nom::{AsChar, IResult};
 
 use crate::parser_types::*;
 
+/// Parse with streaming combinators - returns Incomplete if needs more data
 pub fn parse(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
     fold_many0(element, Vec::new, |mut acc: Vec<Element>, mut item| {
         acc.append(&mut item);
         acc
     })(input)
+}
+
+/// Parse at EOF - treats remaining input as complete (no more data coming)
+/// Returns all parsed elements and any remaining unparsed text
+pub fn parse_complete(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
+    // Try to parse as much as possible, but if parser returns Incomplete,
+    // we treat it as reaching a natural boundary
+    match parse(input) {
+        Ok(result) => Ok(result),
+        Err(nom::Err::Incomplete(_)) => {
+            // Parser wants more data but we're at EOF
+            // Return empty vec and leave input unconsumed (caller will output as-is)
+            Ok((input, vec![]))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Parses a standalone ESI expression (for use in test attributes, etc.)

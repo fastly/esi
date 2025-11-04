@@ -300,64 +300,24 @@ impl Processor {
         let mut buffer = String::new();
         let mut read_buf = vec![0u8; CHUNK_SIZE];
         let mut eof = false;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: usize = 10000;
 
         loop {
-            // Try to parse what we have in the buffer
-            match parser::parse(&buffer) {
-                Ok((remaining, elements)) => {
-                    // Successfully parsed some elements
-                    if !elements.is_empty() {
-                        // Process parsed elements
-                        for element in elements {
-                            self.process_element_streaming(element, output_writer, dispatcher)?;
-
-                            // After each element, check if any queued includes are ready (non-blocking poll)
-                            self.process_ready_queue_items(
-                                output_writer,
-                                dispatcher,
-                                process_fragment_response,
-                            )?;
-                        }
-                    }
-
-                    // Keep the unparsed remainder for next iteration
-                    if remaining.is_empty() && eof {
-                        // All done - parsed everything and reached EOF
-                        break;
-                    } else if remaining.is_empty() && !eof {
-                        // Parsed everything in buffer, clear it and read more
-                        buffer.clear();
-                    } else {
-                        // Have unparsed remainder - keep it for next chunk
-                        buffer = remaining.to_string();
-                    }
-                }
-                Err(nom::Err::Incomplete(_)) => {
-                    // With complete parsers, Incomplete should not happen
-                    // But if it does, it means we need more data
-                    if eof {
-                        // EOF with incomplete parse - this is an error
-                        return Err(ESIError::ExpressionError(
-                            "Incomplete parse at EOF".to_string(),
-                        ));
-                    }
-                    // Fall through to read more data
-                }
-                Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
-                    // Parse error - try to read more data first in case it helps
-                    if eof {
-                        // Already at EOF, this is a real error
-                        return Err(ESIError::ExpressionError(format!("Parser error: {:?}", e)));
-                    }
-                    // Fall through to read more data - might help complete the parse
-                }
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                return Err(ESIError::ExpressionError(format!(
+                    "Infinite loop detected after {} iterations, buffer len: {}, eof: {}",
+                    iterations,
+                    buffer.len(),
+                    eof
+                )));
             }
-
-            // Read more data from input
+            // Read more data if we haven't hit EOF yet
             if !eof {
                 match src_document.read(&mut read_buf) {
                     Ok(0) => {
-                        // EOF reached
+                        // EOF reached - parser can now make final decisions
                         eof = true;
                     }
                     Ok(n) => {
@@ -371,37 +331,72 @@ impl Processor {
                         return Err(ESIError::WriterError(e));
                     }
                 }
-            } else if buffer.is_empty() {
-                // EOF and buffer is empty - we're done
-                break;
-            } else {
-                // EOF but we still have unparsed data in buffer
-                // Try one more parse attempt
-                match parser::parse(&buffer) {
-                    Ok((remaining, elements)) => {
-                        // Process any final elements
-                        for element in elements {
-                            self.process_element_streaming(element, output_writer, dispatcher)?;
-                            self.process_ready_queue_items(
-                                output_writer,
-                                dispatcher,
-                                process_fragment_response,
-                            )?;
-                        }
+            }
 
-                        if !remaining.is_empty() {
-                            debug!(
-                                "Parser did not consume all input at EOF. Remaining: '{}'",
-                                remaining.chars().take(100).collect::<String>()
-                            );
+            // Try to parse what we have in the buffer
+            let parse_result = if eof {
+                // At EOF, use parse_complete to handle final buffer
+                parser::parse_complete(&buffer)
+            } else {
+                // Not at EOF, use streaming parse
+                parser::parse(&buffer)
+            };
+
+            match parse_result {
+                Ok((remaining, elements)) => {
+                    // Successfully parsed some elements
+                    for element in elements {
+                        self.process_element_streaming(element, output_writer, dispatcher)?;
+                        // After each element, check if any queued includes are ready (non-blocking poll)
+                        self.process_ready_queue_items(
+                            output_writer,
+                            dispatcher,
+                            process_fragment_response,
+                        )?;
+                    }
+
+                    // Keep the unparsed remainder for next iteration
+                    if remaining.is_empty() {
+                        if eof {
+                            // All done - parsed everything and reached EOF
+                            break;
+                        } else {
+                            // Parsed everything in buffer, clear it and continue reading
+                            buffer.clear();
+                        }
+                    } else {
+                        // Have unparsed remainder
+                        if eof {
+                            // At EOF with unparsed data - this is trailing content
+                            // that couldn't be parsed. Output it as-is.
+                            output_writer.write_all(remaining.as_bytes())?;
+                            break;
+                        } else {
+                            // Keep remainder for next chunk
+                            buffer = remaining.to_string();
+                        }
+                    }
+                }
+                Err(nom::Err::Incomplete(_)) => {
+                    // Streaming parser needs more data
+                    if eof {
+                        // At EOF but parser wants more data - output unparsed buffer as-is
+                        if !buffer.is_empty() {
+                            output_writer.write_all(buffer.as_bytes())?;
                         }
                         break;
                     }
-                    Err(e) => {
-                        return Err(ESIError::ExpressionError(format!(
-                            "Parser error at EOF: {:?}",
-                            e
-                        )));
+                    // Not at EOF - loop will read more data
+                }
+                Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+                    // Parse error
+                    if eof {
+                        // At EOF with parse error - this is a real error
+                        return Err(ESIError::ExpressionError(format!("Parser error: {:?}", e)));
+                    } else {
+                        // Not at EOF - maybe more data will help, output what we have and continue
+                        output_writer.write_all(buffer.as_bytes())?;
+                        buffer.clear();
                     }
                 }
             }
