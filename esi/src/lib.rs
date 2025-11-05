@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 
 pub use crate::error::{ExecutionError as ESIError, Result};
-pub use crate::parser::parse;
+pub use crate::parser::{parse, parse_complete};
 
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;
@@ -334,11 +334,12 @@ impl Processor {
             }
 
             // Try to parse what we have in the buffer
+            // Use streaming parser unless we're at EOF, then use complete parser
             let parse_result = if eof {
-                // At EOF, use parse_complete to handle final buffer
+                // At EOF - use complete parser which handles Incomplete by treating remainder as text
                 parser::parse_complete(buffer.as_bytes())
             } else {
-                // Not at EOF, use streaming parse
+                // Still streaming - use streaming parser
                 parser::parse(buffer.as_bytes())
             };
 
@@ -367,9 +368,8 @@ impl Processor {
                     } else {
                         // Have unparsed remainder
                         if eof {
-                            // At EOF with unparsed data - this is trailing content
-                            // that couldn't be parsed. Output it as-is.
-                            output_writer.write_all(remaining)?;
+                            // At EOF with unparsed data - already handled by parse_complete
+                            // which treats remainder as Text elements
                             break;
                         } else {
                             // Keep remainder for next chunk
@@ -380,7 +380,8 @@ impl Processor {
                 Err(nom::Err::Incomplete(_)) => {
                     // Streaming parser needs more data
                     if eof {
-                        // At EOF but parser wants more data - output unparsed buffer as-is
+                        // At EOF but parser wants more data - this shouldn't happen
+                        // with parse_complete, but handle it just in case
                         if !buffer.is_empty() {
                             output_writer.write_all(buffer.as_bytes())?;
                         }

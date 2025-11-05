@@ -1,12 +1,12 @@
 // Parser tests for nom-based ESI parser
 // These tests verify that the parser correctly handles ESI tags and produces the expected AST
 
-use esi::parse;
+use esi::parse_complete;
 
 #[test]
 fn test_parse_basic_include() {
     let input = br#"<html><body><esi:include src="https://example.com/hello"/></body></html>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -26,7 +26,7 @@ fn test_parse_basic_include() {
 #[test]
 fn test_parse_include_with_alt_and_onerror() {
     let input = br#"<esi:include src="abc" alt="def" onerror="continue"/>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -49,7 +49,7 @@ fn test_parse_include_with_alt_and_onerror() {
 #[test]
 fn test_parse_open_include() {
     let input = br#"<esi:include src="abc" alt="def" onerror="continue"></esi:include>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -66,7 +66,7 @@ fn test_parse_open_include() {
 #[test]
 fn test_parse_include_with_onerror() {
     let input = br#"<esi:include src="/_fragments/content.html" onerror="continue"/>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -93,7 +93,7 @@ fn test_parse_try_with_attempt_and_except() {
     </esi:except>
 </esi:try>"#;
 
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Find the Try tag
@@ -150,7 +150,7 @@ fn test_parse_nested_try() {
     </esi:except>
 </esi:try>"#;
 
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Find outer Try tag
@@ -198,7 +198,7 @@ fn test_parse_nested_try() {
 #[test]
 fn test_parse_assign() {
     let input = br#"<esi:assign name="foo" value="bar"/>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -224,7 +224,7 @@ fn test_parse_assign() {
 #[test]
 fn test_parse_assign_short_with_integer() {
     let input = br#"<esi:assign name="count" value="123"/>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -244,7 +244,7 @@ fn test_parse_assign_short_with_integer() {
 #[test]
 fn test_parse_assign_short_with_variable() {
     let input = br#"<esi:assign name="copy" value="$(HTTP_HOST)"/>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -264,7 +264,7 @@ fn test_parse_assign_short_with_variable() {
 #[test]
 fn test_parse_assign_short_with_quoted_string() {
     let input = br#"<esi:assign name="text" value="'hello world'"/>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -286,7 +286,7 @@ fn test_parse_assign_long_form() {
     let input = br#"<esi:assign name="message">
         'This is a long form assign'
     </esi:assign>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -306,7 +306,7 @@ fn test_parse_assign_long_form() {
 #[test]
 fn test_parse_assign_long_with_variable() {
     let input = br#"<esi:assign name="host">$(HTTP_HOST)</esi:assign>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -326,7 +326,7 @@ fn test_parse_assign_long_with_variable() {
 #[test]
 fn test_parse_assign_with_function() {
     let input = br#"<esi:assign name="result" value="$url_encode('hello world')"/>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -348,7 +348,7 @@ fn test_parse_assign_with_function() {
 fn test_parse_assign_long_with_interpolation() {
     // Test compound expression with mixed text and variable
     let input = br#"<esi:assign name="message">Hello $(name)!</esi:assign>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -405,7 +405,7 @@ fn test_parse_assign_long_with_interpolation() {
 fn test_parse_assign_long_with_multiple_variables() {
     // Test compound expression with multiple variables
     let input = br#"<esi:assign name="full_name">$(first) $(last)</esi:assign>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -433,7 +433,7 @@ fn test_parse_assign_long_with_multiple_variables() {
 #[test]
 fn test_parse_vars_short_form() {
     let input = br#"<esi:vars name="$(foo)"/>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -460,7 +460,7 @@ fn test_parse_vars_short_form() {
 #[test]
 fn test_parse_vars_long_form() {
     let input = br#"<esi:vars>$(foo)</esi:vars>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -496,7 +496,7 @@ fn test_parse_choose_when_otherwise() {
     </esi:otherwise>
 </esi:choose>"#;
 
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
     assert_eq!(remaining, b"");
 
     let choose_found = elements.iter().any(|element| {
@@ -547,7 +547,7 @@ fn test_parse_choose_multiple_when() {
     </esi:otherwise>
 </esi:choose>"#;
 
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Verify we have multiple when branches using the new structure
@@ -587,7 +587,7 @@ fn test_parse_choose_multiple_when() {
 fn test_parse_remove() {
     let input =
         br#"<html><esi:remove>This should not appear</esi:remove><body>visible</body></html>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -623,7 +623,7 @@ fn test_parse_remove() {
 #[test]
 fn test_parse_comment() {
     let input = br#"<html><esi:comment text="This is a comment"/><body>visible</body></html>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -644,7 +644,7 @@ fn test_parse_comment() {
 #[test]
 fn test_parse_text_tag() {
     let input = br#"<esi:text>This <esi:include src="test"/> should appear as-is</esi:text>"#;
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -679,7 +679,7 @@ fn test_parse_mixed_content() {
     </body>
 </html>"#;
 
-    let (remaining, elements) = parse(input).expect("should parse");
+    let (remaining, elements) = parse_complete(input).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Should have HTML, expressions, ESI tags, and text
