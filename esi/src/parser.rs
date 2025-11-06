@@ -198,42 +198,37 @@ pub fn parse_expression(input: &str) -> IResult<&str, Expr, Error<&str>> {
 }
 
 /// Parses a string that may contain interpolated expressions like $(VAR)
-/// Accepts str for convenience but works on bytes internally
-pub fn parse_interpolated_string(input: &str) -> IResult<&str, Vec<Element>, Error<&str>> {
+/// ZERO-COPY: Accepts &Bytes and returns Bytes slices that reference the original
+pub fn parse_interpolated_string(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     // NOTE: This function parses complete strings (like attribute values), not streaming input
     // So we need to manually accumulate results and handle Incomplete as EOF
-    let bytes = input.as_bytes();
+    let bytes = input.as_ref();
     let mut result = Vec::new();
     let mut remaining = bytes;
 
     loop {
-        match alt((interpolated_expression, interpolated_text_copy))(remaining) {
+        match alt((interpolated_expression, |i| interpolated_text(input, i)))(remaining) {
             Ok((rest, mut elements)) => {
                 result.append(&mut elements);
                 if rest.is_empty() {
                     // Parsed everything
-                    return Ok(("", result));
+                    return Ok((b"", result));
                 }
                 remaining = rest;
             }
             Err(nom::Err::Incomplete(_)) => {
                 // Streaming parser needs more data, but we have complete input
-                // If we haven't consumed anything yet and have input, treat it all as text
+                // If we haven't consumed anything yet and have input, treat it all as text - ZERO COPY!
                 if result.is_empty() && !remaining.is_empty() {
-                    result.push(Element::Text(Bytes::copy_from_slice(remaining)));
-                    return Ok(("", result));
+                    result.push(Element::Text(slice_as_bytes(input, remaining)));
+                    return Ok((b"", result));
                 }
                 // Otherwise we've parsed what we can
-                let consumed = bytes.len() - remaining.len();
-                return Ok((&input[consumed..], result));
+                return Ok((remaining, result));
             }
             Err(e) => {
                 // Real parse error - propagate it
-                return match e {
-                    nom::Err::Error(err) => Err(nom::Err::Error(Error::new(input, err.code))),
-                    nom::Err::Failure(err) => Err(nom::Err::Failure(Error::new(input, err.code))),
-                    nom::Err::Incomplete(n) => Err(nom::Err::Incomplete(n)),
-                };
+                return Err(e);
             }
         }
     }
@@ -283,12 +278,12 @@ fn esi_tag<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     alt((
-        |i| esi_assign(i),  // No raw content, doesn't need zero-copy
+        |i| esi_assign(original, i),
         |i| esi_include(i), // No raw content
         |i| esi_vars(original, i),
         |i| esi_comment(i), // No content returned
         |i| esi_remove(original, i),
-        |i| esi_text(i), // MUST COPY - also used in parse_interpolated path
+        |i| esi_text(original, i),
         |i| esi_choose(original, i),
         |i| esi_try(original, i),
         |i| esi_when(original, i),
@@ -298,8 +293,11 @@ fn esi_tag<'a>(
     ))(input)
 }
 
-fn esi_assign(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    alt((esi_assign_short, esi_assign_long))(input)
+fn esi_assign<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    alt((esi_assign_short, |i| esi_assign_long(original, i)))(input)
 }
 
 fn parse_assign_attributes_short(attrs: Vec<(String, String)>) -> Vec<Element> {
@@ -377,7 +375,10 @@ fn esi_assign_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> 
     )(input)
 }
 
-fn esi_assign_long(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_assign_long<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     map(
         tuple((
             delimited(
@@ -389,9 +390,8 @@ fn esi_assign_long(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
             tag(b"</esi:assign>"),
         )),
         |(attrs, content_bytes, _)| {
-            // Parse the content with a temporary Bytes
-            let content_bytes_obj = Bytes::copy_from_slice(content_bytes);
-            let content = parse_interpolated(&content_bytes_obj, content_bytes)
+            // ZERO-COPY: Use original to create Bytes slice
+            let content = parse_interpolated(original, content_bytes)
                 .map(|(_, elements)| elements)
                 .unwrap_or_default();
             parse_assign_long(attrs, content)
@@ -645,12 +645,12 @@ fn esi_tag_non_vars<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     alt((
-        esi_assign,
+        |i| esi_assign(original, i),
         esi_include,
         // esi_vars,  // Excluded to prevent infinite recursion
         esi_comment,
         |i| esi_remove(original, i),
-        esi_text,
+        |i| esi_text(original, i),
         |i| esi_choose(original, i),
         |i| esi_try(original, i),
         |i| esi_when(original, i),
@@ -715,7 +715,10 @@ fn esi_remove<'a>(
     Ok((input, vec![]))
 }
 
-fn esi_text(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_text<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     map(
         tuple((
             tag(b"<esi:text>"),
@@ -725,14 +728,8 @@ fn esi_text(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
             )),
             tag(b"</esi:text>"),
         )),
-        |(_, v, _)| vec![Element::Text(Bytes::copy_from_slice(v))], // MUST COPY - used in parse_interpolated
+        |(_, v, _)| vec![Element::Text(slice_as_bytes(original, v))],
     )(input)
-}
-
-/// Rename for clarity - esi_text_tag to avoid confusion with text parser
-#[inline]
-fn esi_text_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    esi_text(input)
 }
 fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(
@@ -766,7 +763,7 @@ fn attributes(input: &[u8]) -> IResult<&[u8], Vec<(String, String)>, Error<&[u8]
     map(
         many0(separated_pair(
             preceded(multispace1_bytes, alpha1_bytes),
-            byte_char(b'='),
+            tag(b"="),
             htmlstring,
         )),
         |pairs| {
@@ -779,7 +776,7 @@ fn attributes(input: &[u8]) -> IResult<&[u8], Vec<(String, String)>, Error<&[u8]
 }
 
 fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    delimited(byte_char(b'"'), is_not(&b"\""[..]), byte_char(b'"'))(input)
+    delimited(tag(b"\""), is_not(&b"\""[..]), tag(b"\""))(input)
 }
 
 // Used by parse_interpolated - zero-copy with original Bytes reference
@@ -789,13 +786,6 @@ fn interpolated_text<'a>(
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     map(recognize(many1(is_not(&b"<$"[..]))), |s: &[u8]| {
         vec![Element::Text(slice_as_bytes(original, s))]
-    })(input)
-}
-
-// Used by parse_interpolated_string - must copy because no Bytes reference available
-fn interpolated_text_copy(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    map(recognize(many1(is_not(&b"<$"[..]))), |s: &[u8]| {
-        vec![Element::Text(Bytes::copy_from_slice(s))]
     })(input)
 }
 
@@ -818,7 +808,7 @@ fn script<'a>(
     map(
         tuple((
             recognize(verify(
-                delimited(tag_no_case(b"<script"), attributes, byte_char(b'>')),
+                delimited(tag_no_case(b"<script"), attributes, tag(b">")),
                 |attrs: &Vec<(String, String)>| !attrs.iter().any(|(k, _)| k == "src"),
             )),
             length_data(map(
@@ -828,7 +818,7 @@ fn script<'a>(
             recognize(delimited(
                 tag_no_case(b"</script"),
                 alt((is_not(&b">"[..]), success(&b""[..]))),
-                byte_char(b'>'),
+                tag(b">"),
             )),
         )),
         |(start, script, end)| {
@@ -849,7 +839,7 @@ fn end_tag<'a>(
     let (_, _) = peek(not(tag(b"</esi:")))(input)?;
 
     map(
-        recognize(delimited(tag(b"</"), is_not(&b">"[..]), byte_char(b'>'))),
+        recognize(delimited(tag(b"</"), is_not(&b">"[..]), tag(b">"))),
         |s: &[u8]| vec![Element::Html(slice_as_bytes(original, s))],
     )(input)
 }
@@ -862,11 +852,7 @@ fn start_tag<'a>(
     let (_, _) = peek(not(alt((tag(b"</"), tag(b"<esi:")))))(input)?;
 
     map(
-        recognize(delimited(
-            byte_char(b'<'),
-            is_not(&b">"[..]),
-            byte_char(b'>'),
-        )),
+        recognize(delimited(tag(b"<"), is_not(&b">"[..]), tag(b">"))),
         |s: &[u8]| vec![Element::Html(slice_as_bytes(original, s))],
     )(input)
 }
@@ -887,10 +873,7 @@ fn is_lower_alphanumeric_or_underscore(c: u8) -> bool {
 
 fn fn_name(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        preceded(
-            byte_char(b'$'),
-            take_while1(is_lower_alphanumeric_or_underscore),
-        ),
+        preceded(tag(b"$"), take_while1(is_lower_alphanumeric_or_underscore)),
         bytes_to_string,
     )(input)
 }
@@ -899,8 +882,8 @@ fn var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map(
         tuple((
             take_while1(is_alphanumeric_or_underscore),
-            opt(delimited(byte_char(b'{'), var_key_expr, byte_char(b'}'))),
-            opt(preceded(byte_char(b'|'), fn_nested_argument)),
+            opt(delimited(tag(b"{"), var_key_expr, tag(b"}"))),
+            opt(preceded(tag(b"|"), fn_nested_argument)),
         )),
         |(name, key, default): (&[u8], _, _)| {
             Expr::Variable(
@@ -923,9 +906,9 @@ fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
 fn single_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
         delimited(
-            byte_char(b'\''),
+            tag(b"'"),
             take_while_byte(|c| c != b'\'' && c < 128),
-            byte_char(b'\''),
+            tag(b"'"),
         ),
         bytes_to_string,
     )(input)
@@ -976,7 +959,7 @@ fn var_key_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn fn_argument(input: &[u8]) -> IResult<&[u8], Vec<Expr>, Error<&[u8]>> {
     let (input, mut parsed) = separated_list0(
-        tuple((multispace0_bytes, byte_char(b','), multispace0_bytes)),
+        tuple((multispace0_bytes, tag(b","), multispace0_bytes)),
         fn_nested_argument,
     )(input)?;
 
@@ -994,7 +977,7 @@ fn fn_nested_argument(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map_res(
         recognize(tuple((
-            opt(byte_char(b'-')),
+            opt(tag(b"-")),
             take_while1(|c: u8| c.is_ascii_digit()),
         ))),
         |s: &[u8]| String::from_utf8_lossy(s).parse::<i32>().map(Expr::Integer),
@@ -1012,9 +995,9 @@ fn call(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (input, parsed) = tuple((
         fn_name,
         delimited(
-            terminated(byte_char(b'('), multispace0_bytes),
+            terminated(tag(b"("), multispace0_bytes),
             fn_argument,
-            preceded(multispace0_bytes, byte_char(b')')),
+            preceded(multispace0_bytes, tag(b")")),
         ),
     ))(input)?;
 
@@ -1024,7 +1007,7 @@ fn call(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 }
 
 fn variable(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    delimited(tag(b"$("), var_name, byte_char(b')'))(input)
+    delimited(tag(b"$("), var_name, tag(b")"))(input)
 }
 
 fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
@@ -1051,14 +1034,14 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     alt((
         // Parse negation: !expr
         map(
-            preceded(byte_char(b'!'), preceded(multispace0_bytes, primary_expr)),
+            preceded(tag(b"!"), preceded(multispace0_bytes, primary_expr)),
             |expr| Expr::Not(Box::new(expr)),
         ),
         // Parse grouped expression: (expr)
         delimited(
-            byte_char(b'('),
+            tag(b"("),
             delimited(multispace0_bytes, expr, multispace0_bytes),
-            byte_char(b')'),
+            tag(b")"),
         ),
         // Parse basic expressions
         call,
@@ -1472,24 +1455,6 @@ exception!
 // ============================================================================
 // Byte parsing helpers
 // ============================================================================
-
-fn byte_char(c: u8) -> impl Fn(&[u8]) -> IResult<&[u8], u8, Error<&[u8]>> {
-    move |input: &[u8]| {
-        if input.is_empty() {
-            // STREAMING: need more data, not an error
-            Err(nom::Err::Incomplete(nom::Needed::Size(
-                core::num::NonZeroUsize::new(1).unwrap(),
-            )))
-        } else if input[0] == c {
-            Ok((&input[1..], c))
-        } else {
-            Err(nom::Err::Error(Error::new(
-                input,
-                nom::error::ErrorKind::Char,
-            )))
-        }
-    }
-}
 
 fn multispace0_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     take_while_byte(is_whitespace_byte)(input)

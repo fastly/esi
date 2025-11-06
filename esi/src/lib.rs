@@ -8,7 +8,7 @@ mod parser;
 pub mod parser_types;
 
 use crate::expression::EvalContext;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use fastly::http::request::{PendingRequest, PollResult};
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Request, Response};
@@ -1158,7 +1158,9 @@ where
     F: FnMut(String) -> Result<()>,
 {
     // Parse the input string with interpolated expressions using nom parser
-    let elements = match crate::parser::parse_interpolated_string(input) {
+    // Convert input to Bytes for zero-copy parsing
+    let input_bytes = Bytes::from(input.to_string());
+    let elements = match crate::parser::parse_interpolated_string(&input_bytes) {
         Ok((_, elements)) => elements,
         Err(_) => {
             // If parsing fails, treat the whole input as text
