@@ -11,78 +11,63 @@ use nom::IResult;
 
 use crate::parser_types::*;
 
-/// Parse input bytes into ESI elements using TRUE STREAMING parsers
-/// Returns Incomplete when more data is needed - this is proper streaming behavior
-/// lib.rs must handle Incomplete by reading more data into the buffer
-/// For tests with complete input, use parse_complete() instead
-pub fn parse(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    // Manually parse elements in a loop to accumulate results
-    // Can't use fold_many0 because it loses accumulated results when returning Incomplete
+/// Helper for parsing loops that accumulate results
+/// Handles the common pattern of calling a parser in a loop and accumulating elements
+enum IncompleteStrategy {
+    /// Return Incomplete if no elements parsed yet, otherwise return accumulated results
+    Streaming,
+    /// Always propagate Incomplete (for delimited content)
+    AlwaysIncomplete,
+    /// Treat Incomplete as EOF, convert remaining bytes to Text
+    TreatAsEof,
+}
+
+fn parse_loop<'a, F>(
+    input: &'a [u8],
+    mut parser: F,
+    incomplete_strategy: IncompleteStrategy,
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>
+where
+    F: FnMut(&'a [u8]) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>,
+{
     let mut result = Vec::new();
     let mut remaining = input;
 
     loop {
-        match element(remaining) {
+        match parser(remaining) {
             Ok((rest, mut elements)) => {
                 result.append(&mut elements);
-                remaining = rest;
 
                 // If we consumed nothing, break to avoid infinite loop
                 if rest.len() == remaining.len() {
-                    break;
-                }
-            }
-            Err(nom::Err::Incomplete(needed)) => {
-                // Streaming parser needs more data - return what we've accumulated so far
-                // along with the Incomplete error so caller knows to read more
-                if result.is_empty() {
-                    // Haven't parsed anything yet - propagate Incomplete
-                    return Err(nom::Err::Incomplete(needed));
-                } else {
-                    // Return what we've parsed so far
-                    return Ok((remaining, result));
-                }
-            }
-            Err(e) => {
-                // Real parse error - return it
-                if result.is_empty() {
-                    return Err(e);
-                } else {
-                    // Return what we've accumulated
-                    return Ok((remaining, result));
-                }
-            }
-        }
-    }
-
-    Ok((remaining, result))
-}
-
-/// Parse delimited content (content between opening/closing tags)
-/// Similar to parse_complete but stops when parse() wants more data,
-/// returning what was successfully parsed. This prevents data corruption
-/// from incomplete tags being treated as complete.
-fn parse_delimited(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    let mut result = Vec::new();
-    let mut remaining = input;
-
-    loop {
-        match parse(remaining) {
-            Ok((rest, mut elements)) => {
-                result.append(&mut elements);
-                if rest.is_empty() || rest.len() == remaining.len() {
-                    // No more input or made no progress
                     return Ok((rest, result));
                 }
                 remaining = rest;
             }
             Err(nom::Err::Incomplete(needed)) => {
-                // STREAMING: When we hit incomplete data, we MUST propagate Incomplete.
-                // We cannot return Ok with partial results because delimited() would then
-                // try to match the closing tag on the unconsumed input, which will fail.
-                // In streaming mode, we don't know if the incomplete data is the closing
-                // tag or more content, so we must always ask for more data.
-                return Err(nom::Err::Incomplete(needed));
+                return match incomplete_strategy {
+                    IncompleteStrategy::Streaming => {
+                        // Return accumulated results or propagate Incomplete
+                        if result.is_empty() {
+                            Err(nom::Err::Incomplete(needed))
+                        } else {
+                            Ok((remaining, result))
+                        }
+                    }
+                    IncompleteStrategy::AlwaysIncomplete => {
+                        // Always propagate Incomplete (for delimited content)
+                        Err(nom::Err::Incomplete(needed))
+                    }
+                    IncompleteStrategy::TreatAsEof => {
+                        // Treat remaining bytes as text
+                        if !remaining.is_empty() {
+                            result.push(Element::Text(Bytes::copy_from_slice(remaining)));
+                            Ok((&remaining[remaining.len()..], result))
+                        } else {
+                            Ok((remaining, result))
+                        }
+                    }
+                };
             }
             Err(e) => {
                 // Real parse error
@@ -96,47 +81,49 @@ fn parse_delimited(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     }
 }
 
+/// Parse input bytes into ESI elements using TRUE STREAMING parsers
+/// Returns Incomplete when more data is needed - this is proper streaming behavior
+/// lib.rs must handle Incomplete by reading more data into the buffer
+/// For tests with complete input, use parse_complete() instead
+pub fn parse(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+    parse_loop(input, element, IncompleteStrategy::Streaming)
+}
+
+/// Parse delimited content (content between opening/closing tags)
+/// Similar to parse_complete but stops when parse() wants more data,
+/// returning what was successfully parsed. This prevents data corruption
+/// from incomplete tags being treated as complete.
+fn parse_delimited(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+    parse_loop(input, parse, IncompleteStrategy::AlwaysIncomplete)
+}
+
 /// Wrapper for complete input (tests) - treats Incomplete as "done parsing"
 /// Keeps calling parse() until we get Incomplete or error, accumulating results
 /// At EOF with Incomplete, treats remaining bytes as plain text
 pub fn parse_complete(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    let mut result = Vec::new();
-    let mut remaining = input;
-
-    loop {
-        match parse(remaining) {
-            Ok((rest, mut elements)) => {
-                result.append(&mut elements);
-                if rest.is_empty() || rest.len() == remaining.len() {
-                    // No more input or made no progress
-                    return Ok((rest, result));
-                }
-                remaining = rest;
-            }
-            Err(nom::Err::Incomplete(_)) => {
-                // Streaming parser wants more data, but we're at EOF
-                // If we have remaining bytes, treat them as plain text
-                if !remaining.is_empty() {
-                    result.push(Element::Text(Bytes::copy_from_slice(remaining)));
-                    return Ok((&remaining[remaining.len()..], result));
-                }
-                return Ok((remaining, result));
-            }
-            Err(e) => {
-                // Real parse error - propagate it
-                // Don't convert to text, let the caller decide how to handle
-                if result.is_empty() {
-                    return Err(e);
-                } else {
-                    // We've parsed some elements, return them along with remaining input
-                    return Ok((remaining, result));
-                }
-            }
-        }
-    }
+    parse_loop(input, parse, IncompleteStrategy::TreatAsEof)
 }
 
-/// Parses a standalone ESI expression (for use in test attributes, etc.)
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Check if byte is whitespace (space, tab, newline, carriage return)
+#[inline]
+const fn is_whitespace_byte(c: u8) -> bool {
+    c == b' ' || c == b'\t' || c == b'\n' || c == b'\r'
+}
+
+/// Convert bytes to String using lossy UTF-8 conversion
+#[inline]
+fn bytes_to_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+// ============================================================================
+// Expression Parsing
+// ============================================================================
+
 /// Accepts str for convenience but works on bytes internally
 pub fn parse_expression(input: &str) -> IResult<&str, Expr, Error<&str>> {
     // NOTE: This parses complete expression strings (like attribute values)
@@ -638,12 +625,7 @@ fn attributes(input: &[u8]) -> IResult<&[u8], Vec<(String, String)>, Error<&[u8]
         |pairs| {
             pairs
                 .into_iter()
-                .map(|(k, v)| {
-                    (
-                        String::from_utf8_lossy(k).to_string(),
-                        String::from_utf8_lossy(v).to_string(),
-                    )
-                })
+                .map(|(k, v)| (bytes_to_string(k), bytes_to_string(v)))
                 .collect()
         },
     )(input)
@@ -732,7 +714,7 @@ fn fn_name(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
             byte_char(b'$'),
             take_while1(is_lower_alphanumeric_or_underscore),
         ),
-        |s: &[u8]| String::from_utf8_lossy(s).into_owned(),
+        bytes_to_string,
     )(input)
 }
 
@@ -745,7 +727,7 @@ fn var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
         )),
         |(name, key, default): (&[u8], _, _)| {
             Expr::Variable(
-                String::from_utf8_lossy(name).into_owned(),
+                bytes_to_string(name),
                 key.map(Box::new),
                 default.map(Box::new),
             )
@@ -756,7 +738,7 @@ fn var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
         take_while_byte(|c| c != b'$' && c != b'{' && c != b'}' && c != b',' && c != b'"'),
-        |s: &[u8]| String::from_utf8_lossy(s).into_owned(),
+        bytes_to_string,
     )(input)
 }
 
@@ -768,7 +750,7 @@ fn single_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
             take_while_byte(|c| c != b'\'' && c < 128),
             byte_char(b'\''),
         ),
-        |s: &[u8]| String::from_utf8_lossy(s).into_owned(),
+        bytes_to_string,
     )(input)
 }
 fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
@@ -780,7 +762,7 @@ fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
             })),
             tag(b"'''"),
         ),
-        |s: &[u8]| String::from_utf8_lossy(s).into_owned(),
+        bytes_to_string,
     )(input)
 }
 
@@ -845,7 +827,7 @@ fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 fn bareword(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map(
         take_while1(is_alphanumeric_or_underscore),
-        |name: &[u8]| Expr::Variable(String::from_utf8_lossy(name).into_owned(), None, None),
+        |name: &[u8]| Expr::Variable(bytes_to_string(name), None, None),
     )(input)
 }
 
@@ -1277,11 +1259,11 @@ fn byte_char(c: u8) -> impl Fn(&[u8]) -> IResult<&[u8], u8, Error<&[u8]>> {
 }
 
 fn multispace0_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    take_while_byte(|c: u8| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r')(input)
+    take_while_byte(is_whitespace_byte)(input)
 }
 
 fn multispace1_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    take_while1(|c: u8| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r')(input)
+    take_while1(is_whitespace_byte)(input)
 }
 
 fn alpha1_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {

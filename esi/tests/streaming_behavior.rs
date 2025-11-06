@@ -632,12 +632,12 @@ fn test_incomplete_with_whitespace_and_newlines() {
 #[test]
 fn test_incomplete_html_and_script_tags() {
     // Test incomplete HTML tags and script tags
-    // 
+    //
     // Important distinctions:
     // - <script> tags REQUIRE closing tags - incomplete script returns Incomplete
     // - Other HTML tags like <div> are treated as complete (parsed as Text, not Html)
     // - Partial tags (missing >) always return Incomplete
-    
+
     let test_cases = vec![
         // Partial HTML opening tags (no closing >)
         ("<div", "Partial div tag"),
@@ -645,40 +645,78 @@ fn test_incomplete_html_and_script_tags() {
         ("<div class=", "Div with attribute equals"),
         ("<div class=\"", "Div with attribute value start"),
         ("<div class=\"container", "Div with partial attribute value"),
-        ("<div class=\"container\"", "Div with complete attribute, no >"),
-        
+        (
+            "<div class=\"container\"",
+            "Div with complete attribute, no >",
+        ),
         // Partial HTML closing tags (no closing >)
         ("</div", "Partial closing div tag"),
         ("</di", "Partial closing tag name"),
         ("</", "Closing tag start only"),
-        
         // Script tags - MUST have closing </script> tag
         ("<script", "Partial script opening tag"),
         ("<script>", "Script opening tag, REQUIRES closing"),
-        ("<script>console.log('test')", "Script with content, no closing tag"),
-        ("<script>console.log('test')</script", "Script with partial closing tag"),
-        ("<script>console.log('test')</scri", "Script with partial closing tag name"),
-        ("<script>console.log('test')</scr", "Script with partial closing tag"),
-        ("<script>console.log('test')</sc", "Script with partial closing tag"),
-        ("<script>console.log('test')</s", "Script with partial closing tag"),
-        ("<script>console.log('test')<", "Script with closing tag start"),
-        
+        (
+            "<script>console.log('test')",
+            "Script with content, no closing tag",
+        ),
+        (
+            "<script>console.log('test')</script",
+            "Script with partial closing tag",
+        ),
+        (
+            "<script>console.log('test')</scri",
+            "Script with partial closing tag name",
+        ),
+        (
+            "<script>console.log('test')</scr",
+            "Script with partial closing tag",
+        ),
+        (
+            "<script>console.log('test')</sc",
+            "Script with partial closing tag",
+        ),
+        (
+            "<script>console.log('test')</s",
+            "Script with partial closing tag",
+        ),
+        (
+            "<script>console.log('test')<",
+            "Script with closing tag start",
+        ),
         // Script tags with attributes
         ("<script type", "Script with partial attribute"),
         ("<script type=", "Script with attribute equals"),
         ("<script type=\"", "Script with attribute value start"),
-        ("<script type=\"text/javascript", "Script with partial attribute value"),
-        ("<script type=\"text/javascript\"", "Script with complete attribute, no >"),
-        ("<script type=\"text/javascript\">", "Script with attribute, REQUIRES closing"),
-        ("<script type=\"text/javascript\">code", "Script with attribute and partial content"),
-        
+        (
+            "<script type=\"text/javascript",
+            "Script with partial attribute value",
+        ),
+        (
+            "<script type=\"text/javascript\"",
+            "Script with complete attribute, no >",
+        ),
+        (
+            "<script type=\"text/javascript\">",
+            "Script with attribute, REQUIRES closing",
+        ),
+        (
+            "<script type=\"text/javascript\">code",
+            "Script with attribute and partial content",
+        ),
         // Self-closing HTML tags (no closing >)
         ("<br", "Partial br tag"),
         ("<br/", "Self-closing br, no >"),
         ("<img src", "Img with partial attribute"),
         ("<img src=\"", "Img with attribute value start"),
-        ("<img src=\"/path/to/image.jpg", "Img with partial attribute value"),
-        ("<img src=\"/path/to/image.jpg\"", "Img with complete attribute, no >"),
+        (
+            "<img src=\"/path/to/image.jpg",
+            "Img with partial attribute value",
+        ),
+        (
+            "<img src=\"/path/to/image.jpg\"",
+            "Img with complete attribute, no >",
+        ),
         ("<img src=\"/path/to/image.jpg\"/", "Img self-closing, no >"),
     ];
 
@@ -692,7 +730,7 @@ fn test_incomplete_html_and_script_tags() {
             result
         );
     }
-    
+
     // Note about non-script HTML tags:
     // Tags like "<div>" without closing are treated as complete and parsed as Text,
     // not as Html elements. This is correct behavior - the parser treats unknown
