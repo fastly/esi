@@ -8,6 +8,7 @@ mod parser;
 pub mod parser_types;
 
 use crate::expression::EvalContext;
+use bytes::{Buf, BytesMut};
 use fastly::http::request::{PendingRequest, PollResult};
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Request, Response};
@@ -297,7 +298,8 @@ impl Processor {
         // STREAMING INPUT PARSING:
         // Read chunks, parse incrementally, process elements as we parse them
         const CHUNK_SIZE: usize = 8192; // 8KB chunks
-        let mut buffer = String::new();
+                                        // Using BytesMut for zero-copy parsing
+        let mut buffer = BytesMut::with_capacity(CHUNK_SIZE);
         let mut read_buf = vec![0u8; CHUNK_SIZE];
         let mut eof = false;
         let mut iterations = 0;
@@ -321,11 +323,8 @@ impl Processor {
                         eof = true;
                     }
                     Ok(n) => {
-                        // Append new data to buffer
-                        let chunk = std::str::from_utf8(&read_buf[..n]).map_err(|e| {
-                            ESIError::ExpressionError(format!("Invalid UTF-8: {}", e))
-                        })?;
-                        buffer.push_str(chunk);
+                        // Append new data to buffer (zero-copy extend)
+                        buffer.extend_from_slice(&read_buf[..n]);
                     }
                     Err(e) => {
                         return Err(ESIError::WriterError(e));
@@ -333,14 +332,18 @@ impl Processor {
                 }
             }
 
+            // Freeze a view of the buffer for zero-copy parsing
+            // We clone here because freeze() consumes, but Bytes cloning is cheap (ref count)
+            let frozen = buffer.clone().freeze();
+
             // Try to parse what we have in the buffer
             // Use streaming parser unless we're at EOF, then use complete parser
             let parse_result = if eof {
                 // At EOF - use complete parser which handles Incomplete by treating remainder as text
-                parser::parse_complete(buffer.as_bytes())
+                parser::parse_complete(&frozen)
             } else {
                 // Still streaming - use streaming parser
-                parser::parse(buffer.as_bytes())
+                parser::parse(&frozen)
             };
 
             match parse_result {
@@ -356,6 +359,9 @@ impl Processor {
                         )?;
                     }
 
+                    // Calculate how many bytes were consumed
+                    let consumed = frozen.len() - remaining.len();
+
                     // Keep the unparsed remainder for next iteration
                     if remaining.is_empty() {
                         if eof {
@@ -368,12 +374,12 @@ impl Processor {
                     } else {
                         // Have unparsed remainder
                         if eof {
-                            // At EOF with unparsed data - already handled by parse_complete
+                            // At EOF with unparsed data - already handled by parse_complete_bytes
                             // which treats remainder as Text elements
                             break;
                         } else {
-                            // Keep remainder for next chunk
-                            buffer = String::from_utf8_lossy(remaining).into_owned();
+                            // Keep remainder for next chunk - advance past consumed bytes
+                            buffer.advance(consumed);
                         }
                     }
                 }
@@ -381,9 +387,9 @@ impl Processor {
                     // Streaming parser needs more data
                     if eof {
                         // At EOF but parser wants more data - this shouldn't happen
-                        // with parse_complete, but handle it just in case
+                        // with parse_complete_bytes, but handle it just in case
                         if !buffer.is_empty() {
-                            output_writer.write_all(buffer.as_bytes())?;
+                            output_writer.write_all(&buffer)?;
                         }
                         break;
                     }
@@ -396,7 +402,7 @@ impl Processor {
                         return Err(ESIError::ExpressionError(format!("Parser error: {:?}", e)));
                     } else {
                         // Not at EOF - maybe more data will help, output what we have and continue
-                        output_writer.write_all(buffer.as_bytes())?;
+                        output_writer.write_all(&buffer)?;
                         buffer.clear();
                     }
                 }

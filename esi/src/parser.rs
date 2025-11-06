@@ -11,6 +11,30 @@ use nom::IResult;
 
 use crate::parser_types::*;
 
+// ============================================================================
+// Zero-Copy Helpers
+// ============================================================================
+
+/// View a slice from nom parsing as a Bytes reference
+/// This enables zero-copy: we calculate the slice's offset within the original
+/// Bytes and return a new Bytes that references the same underlying data (just increments ref count)
+#[inline]
+fn slice_as_bytes(original: &Bytes, slice: &[u8]) -> Bytes {
+    // Calculate offset of slice within original Bytes
+    let original_ptr = original.as_ptr() as usize;
+    let slice_ptr = slice.as_ptr() as usize;
+
+    // Safety check: slice must be within original
+    debug_assert!(slice_ptr >= original_ptr);
+    debug_assert!(slice_ptr + slice.len() <= original_ptr + original.len());
+
+    let offset = slice_ptr - original_ptr;
+    let len = slice.len();
+
+    // Zero-copy slice - just increments ref count!
+    original.slice(offset..offset + len)
+}
+
 /// Helper for parsing loops that accumulate results
 /// Handles the common pattern of calling a parser in a loop and accumulating elements
 enum IncompleteStrategy {
@@ -22,19 +46,21 @@ enum IncompleteStrategy {
     TreatAsEof,
 }
 
+/// Zero-copy parse loop that threads Bytes through the parser chain
 fn parse_loop<'a, F>(
+    original: &Bytes,
     input: &'a [u8],
     mut parser: F,
     incomplete_strategy: IncompleteStrategy,
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>
 where
-    F: FnMut(&'a [u8]) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>,
+    F: FnMut(&Bytes, &'a [u8]) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>,
 {
     let mut result = Vec::new();
     let mut remaining = input;
 
     loop {
-        match parser(remaining) {
+        match parser(original, remaining) {
             Ok((rest, mut elements)) => {
                 result.append(&mut elements);
 
@@ -59,9 +85,9 @@ where
                         Err(nom::Err::Incomplete(needed))
                     }
                     IncompleteStrategy::TreatAsEof => {
-                        // Treat remaining bytes as text
+                        // Treat remaining bytes as text - ZERO COPY!
                         if !remaining.is_empty() {
-                            result.push(Element::Text(Bytes::copy_from_slice(remaining)));
+                            result.push(Element::Text(slice_as_bytes(original, remaining)));
                             Ok((&remaining[remaining.len()..], result))
                         } else {
                             Ok((remaining, result))
@@ -81,27 +107,46 @@ where
     }
 }
 
+// ============================================================================
+// Public APIs - Zero-Copy Streaming Parsers
+// ============================================================================
+
 /// Parse input bytes into ESI elements using TRUE STREAMING parsers
 /// Returns Incomplete when more data is needed - this is proper streaming behavior
 /// lib.rs must handle Incomplete by reading more data into the buffer
-/// For tests with complete input, use parse_complete() instead
-pub fn parse(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    parse_loop(input, element, IncompleteStrategy::Streaming)
+/// ZERO-COPY: Returns Bytes slices that reference the original buffer (no copying!)
+pub fn parse(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+    parse_loop(
+        input,
+        input.as_ref(),
+        element,
+        IncompleteStrategy::Streaming,
+    )
 }
 
 /// Parse delimited content (content between opening/closing tags)
-/// Similar to parse_complete but stops when parse() wants more data,
-/// returning what was successfully parsed. This prevents data corruption
-/// from incomplete tags being treated as complete.
-fn parse_delimited(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    parse_loop(input, parse, IncompleteStrategy::AlwaysIncomplete)
+/// Internal helper for parsing content within ESI tags
+fn parse_delimited<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    parse_loop(
+        original,
+        input,
+        element,
+        IncompleteStrategy::AlwaysIncomplete,
+    )
 }
 
 /// Wrapper for complete input (tests) - treats Incomplete as "done parsing"
-/// Keeps calling parse() until we get Incomplete or error, accumulating results
-/// At EOF with Incomplete, treats remaining bytes as plain text
-pub fn parse_complete(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    parse_loop(input, parse, IncompleteStrategy::TreatAsEof)
+/// ZERO-COPY: Returns Bytes slices that reference the original buffer (no copying!)
+pub fn parse_complete(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+    parse_loop(
+        input,
+        input.as_ref(),
+        element,
+        IncompleteStrategy::TreatAsEof,
+    )
 }
 
 // ============================================================================
@@ -194,8 +239,16 @@ pub fn parse_interpolated_string(input: &str) -> IResult<&str, Vec<Element>, Err
     }
 }
 
-fn element(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    alt((text, esi_tag, html))(input)
+/// Zero-copy element parser - dispatches to text/esi_tag/html
+fn element<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    alt((
+        |i| text(original, i),
+        |i| esi_tag(original, i),
+        |i| html(original, i),
+    ))(input)
 }
 
 fn parse_interpolated(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
@@ -210,23 +263,44 @@ fn parse_interpolated(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>
 }
 
 fn interpolated_element(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    alt((interpolated_text, interpolated_expression, esi_tag, html))(input)
+    alt((interpolated_text, interpolated_expression, esi_tag_old, html_old))(input)
 }
 
-fn esi_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_tag_old(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     alt((
         esi_assign,
         esi_include,
         esi_vars,
         esi_comment,
-        esi_remove,
+        esi_remove_old,
         esi_text,
-        esi_choose,
-        esi_try,
+        esi_choose_old,
+        esi_try_old,
         esi_when,
         esi_otherwise,
         esi_attempt,
         esi_except,
+    ))(input)
+}
+
+/// Zero-copy ESI tag parser
+fn esi_tag<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    alt((
+        |i| esi_assign(i), // No raw content, doesn't need zero-copy
+        |i| esi_include(i), // No raw content
+        |i| esi_vars(i), // No raw content
+        |i| esi_comment(i), // No content returned
+        |i| esi_remove(original, i),
+        |i| esi_text(i), // Uses length_data, already creates Bytes
+        |i| esi_choose(original, i),
+        |i| esi_try(original, i),
+        |i| esi_when(i), // No raw content
+        |i| esi_otherwise(i), // No raw content
+        |i| esi_attempt(i), // No raw content
+        |i| esi_except(i), // No raw content
     ))(input)
 }
 
@@ -343,9 +417,11 @@ fn esi_attempt(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         |v| vec![Element::Esi(Tag::Attempt(v))],
     )(input)
 }
-fn esi_try(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+
+// OLD version for parse_interpolated
+fn esi_try_old(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(
-        delimited(tag(b"<esi:try>"), parse_delimited, tag(b"</esi:try>")),
+        delimited(tag(b"<esi:try>"), parse_interpolated, tag(b"</esi:try>")),
         |v| {
             let mut attempts = vec![];
             let mut except = None;
@@ -364,6 +440,35 @@ fn esi_try(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
             })]
         },
     )(input)
+}
+
+/// Zero-copy esi:try parser
+fn esi_try<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    let (input, _) = tag(b"<esi:try>")(input)?;
+    let (input, v) = parse_delimited(original, input)?;
+    let (input, _) = tag(b"</esi:try>")(input)?;
+    
+    let mut attempts = vec![];
+    let mut except = None;
+    for element in v {
+        match element {
+            Element::Esi(Tag::Attempt(cs)) => attempts.push(cs),
+            Element::Esi(Tag::Except(cs)) => {
+                except = Some(cs);
+            }
+            _ => {} // Ignore content outside attempt/except blocks
+        }
+    }
+    Ok((
+        input,
+        vec![Element::Esi(Tag::Try {
+            attempt_events: attempts,
+            except_events: except.unwrap_or_default(),
+        })],
+    ))
 }
 
 fn esi_otherwise(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
@@ -415,9 +520,10 @@ fn esi_when(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
 
 // Removed - use parse_complete() directly for delimited content
 
-fn esi_choose(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+// OLD version for parse_interpolated
+fn esi_choose_old(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(
-        delimited(tag(b"<esi:choose>"), parse_delimited, tag(b"</esi:choose>")),
+        delimited(tag(b"<esi:choose>"), parse_interpolated, tag(b"</esi:choose>")),
         |v| {
             let mut when_branches = vec![];
             let mut otherwise_events = Vec::new();
@@ -482,6 +588,79 @@ fn esi_choose(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     )(input)
 }
 
+/// Zero-copy esi:choose parser
+fn esi_choose<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    let (input, _) = tag(b"<esi:choose>")(input)?;
+    let (input, v) = parse_delimited(original, input)?;
+    let (input, _) = tag(b"</esi:choose>")(input)?;
+    
+    let mut when_branches = vec![];
+    let mut otherwise_events = Vec::new();
+    let mut current_when: Option<WhenBranch> = None;
+    let mut in_otherwise = false;
+
+    for element in v {
+        match element {
+            Element::Esi(Tag::When { test, match_name }) => {
+                // Save any previous when
+                if let Some(when_branch) = current_when.take() {
+                    when_branches.push(when_branch);
+                }
+                in_otherwise = false;
+
+                // Parse the test expression now, at parse time (not at eval time)
+                let test_expr = match parse_expression(&test) {
+                    Ok((_, expr)) => expr,
+                    Err(_) => {
+                        // If parsing fails, create a simple false expression
+                        // This matches the behavior of treating parse failures gracefully
+                        Expr::Integer(0)
+                    }
+                };
+
+                // Start collecting for this new when
+                current_when = Some(WhenBranch {
+                    test: test_expr,
+                    match_name,
+                    content: Vec::new(),
+                });
+            }
+            Element::Esi(Tag::Otherwise) => {
+                // Save any pending when
+                if let Some(when_branch) = current_when.take() {
+                    when_branches.push(when_branch);
+                }
+                in_otherwise = true;
+            }
+            _ => {
+                // Accumulate content for the current when or otherwise
+                if in_otherwise {
+                    otherwise_events.push(element);
+                } else if let Some(ref mut when_branch) = current_when {
+                    when_branch.content.push(element);
+                }
+                // Content outside when/otherwise blocks is discarded (per ESI spec)
+            }
+        }
+    }
+
+    // Don't forget the last when if there is one
+    if let Some(when_branch) = current_when {
+        when_branches.push(when_branch);
+    }
+
+    Ok((
+        input,
+        vec![Element::Esi(Tag::Choose {
+            when_branches,
+            otherwise_events,
+        })],
+    ))
+}
+
 // Note: <esi:vars> does NOT create a Tag::Vars element. Instead, it parses the content
 // (either the body of <esi:vars>...</esi:vars> or the name attribute of <esi:vars name="..."/>)
 // and returns the evaluated content directly as Vec<Element>. These elements (Text, Expr, Html, etc.)
@@ -520,10 +699,10 @@ fn esi_tag_non_vars(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> 
         esi_include,
         // esi_vars,  // Excluded to prevent infinite recursion
         esi_comment,
-        esi_remove,
+        esi_remove_old,
         esi_text,
-        esi_choose,
-        esi_try,
+        esi_choose_old,
+        esi_try_old,
         esi_when,
         esi_otherwise,
         esi_attempt,
@@ -539,7 +718,7 @@ fn parse_vars_content(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>
             interpolated_text,
             interpolated_expression,
             esi_tag_non_vars,
-            html,
+            html_old,
         )),
         Vec::new,
         |mut acc: Vec<Element>, mut item| {
@@ -567,11 +746,24 @@ fn esi_comment(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         |_| vec![],
     )(input)
 }
-fn esi_remove(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+
+// OLD version for parse_interpolated
+fn esi_remove_old(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(
-        delimited(tag(b"<esi:remove>"), parse_delimited, tag(b"</esi:remove>")),
+        delimited(tag(b"<esi:remove>"), parse_interpolated, tag(b"</esi:remove>")),
         |_| vec![],
     )(input)
+}
+
+/// Zero-copy esi:remove parser
+fn esi_remove<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    let (input, _) = tag(b"<esi:remove>")(input)?;
+    let (input, _) = parse_delimited(original, input)?;
+    let (input, _) = tag(b"</esi:remove>")(input)?;
+    Ok((input, vec![]))
 }
 
 fn esi_text(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
@@ -586,6 +778,12 @@ fn esi_text(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         )),
         |(_, v, _)| vec![Element::Text(Bytes::copy_from_slice(v))],
     )(input)
+}
+
+/// Rename for clarity - esi_text_tag to avoid confusion with text parser
+#[inline]
+fn esi_text_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+    esi_text(input)
 }
 fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(
@@ -635,11 +833,12 @@ fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     delimited(byte_char(b'"'), is_not(&b"\""[..]), byte_char(b'"'))(input)
 }
 
-fn html(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    alt((script, end_tag, start_tag))(input)
+// OLD versions for parse_interpolated
+fn html_old(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+    alt((script_old, end_tag_old, start_tag_old))(input)
 }
 
-fn script(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn script_old(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(
         tuple((
             recognize(verify(
@@ -666,7 +865,7 @@ fn script(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     )(input)
 }
 
-fn end_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn end_tag_old(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(
         verify(
             recognize(delimited(tag(b"</"), is_not(&b">"[..]), byte_char(b'>'))),
@@ -676,7 +875,7 @@ fn end_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     )(input)
 }
 
-fn start_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn start_tag_old(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(
         verify(
             recognize(delimited(
@@ -689,14 +888,100 @@ fn start_tag(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         |s: &[u8]| vec![Element::Html(Bytes::copy_from_slice(s))],
     )(input)
 }
-fn text(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+
+fn text_old(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(recognize(many1(is_not(&b"<"[..]))), |s: &[u8]| {
         vec![Element::Text(Bytes::copy_from_slice(s))]
     })(input)
 }
+
 fn interpolated_text(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     map(recognize(many1(is_not(&b"<$"[..]))), |s: &[u8]| {
         vec![Element::Text(Bytes::copy_from_slice(s))]
+    })(input)
+}
+
+// ============================================================================
+// Zero-Copy HTML/Text Parsers
+// ============================================================================
+
+fn html<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    alt((
+        |i| script(original, i),
+        |i| end_tag(original, i),
+        |i| start_tag(original, i),
+    ))(input)
+}
+
+fn script<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    map(
+        tuple((
+            recognize(verify(
+                delimited(tag_no_case(b"<script"), attributes, byte_char(b'>')),
+                |attrs: &Vec<(String, String)>| !attrs.iter().any(|(k, _)| k == "src"),
+            )),
+            length_data(map(
+                peek(many_till(anychar_byte, tag_no_case(b"</script"))),
+                |(v, _)| v.len(),
+            )),
+            recognize(delimited(
+                tag_no_case(b"</script"),
+                alt((is_not(&b">"[..]), success(&b""[..]))),
+                byte_char(b'>'),
+            )),
+        )),
+        |(start, script, end)| {
+            vec![
+                Element::Html(slice_as_bytes(original, start)),
+                Element::Text(slice_as_bytes(original, script)),
+                Element::Html(slice_as_bytes(original, end)),
+            ]
+        },
+    )(input)
+}
+
+fn end_tag<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    map(
+        verify(
+            recognize(delimited(tag(b"</"), is_not(&b">"[..]), byte_char(b'>'))),
+            |s: &[u8]| !s.starts_with(b"</esi:"),
+        ),
+        |s: &[u8]| vec![Element::Html(slice_as_bytes(original, s))],
+    )(input)
+}
+
+fn start_tag<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    map(
+        verify(
+            recognize(delimited(
+                byte_char(b'<'),
+                is_not(&b">"[..]),
+                byte_char(b'>'),
+            )),
+            |s: &[u8]| !s.starts_with(b"</") && !s.starts_with(b"<esi:"),
+        ),
+        |s: &[u8]| vec![Element::Html(slice_as_bytes(original, s))],
+    )(input)
+}
+
+fn text<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    map(recognize(many1(is_not(&b"<"[..]))), |s: &[u8]| {
+        vec![Element::Text(slice_as_bytes(original, s))]
     })(input)
 }
 
@@ -959,7 +1244,8 @@ should not appear
 exception!
 </esi:except>
 </esi:try>"#;
-        let result = parse_complete(input);
+        let bytes = Bytes::from_static(input);
+        let result = parse_complete(&bytes);
         match result {
             Ok((rest, _)) => {
                 // Just test to make sure it parsed the whole thing
@@ -977,7 +1263,9 @@ exception!
     }
     #[test]
     fn test_new_parse_script() {
-        let (rest, x) = script(b"<sCripT> less < more </scRIpt>").unwrap();
+        let input = b"<sCripT> less < more </scRIpt>";
+        let bytes = Bytes::from_static(input);
+        let (rest, x) = script(&bytes, input).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -990,7 +1278,9 @@ exception!
     }
     #[test]
     fn test_new_parse_script_with_src() {
-        let (rest, x) = parse_complete(b"<sCripT src=\"whatever\">").unwrap();
+        let input = b"<sCripT src=\"whatever\">";
+        let bytes = Bytes::from_static(input);
+        let (rest, x) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -1001,7 +1291,9 @@ exception!
     }
     #[test]
     fn test_new_parse_esi_vars_short() {
-        let (rest, x) = esi_tag(br#"<esi:vars name="$(hello)"/>"#).unwrap();
+        let input = br#"<esi:vars name="$(hello)"/>"#;
+        let bytes = Bytes::from_static(input);
+        let (rest, x) = esi_tag(&bytes, input).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -1016,7 +1308,9 @@ exception!
     fn test_new_parse_esi_vars_long() {
         // Nested <esi:vars> tags are not supported to prevent infinite recursion
         // The inner <esi:vars> tags should be treated as plain text/HTML
-        let (rest, x) = parse_complete(br#"<esi:vars>hello<br></esi:vars>"#).unwrap();
+        let input = br#"<esi:vars>hello<br></esi:vars>"#;
+        let bytes = Bytes::from_static(input);
+        let (rest, x) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -1032,7 +1326,8 @@ exception!
         // This test documents that nested <esi:vars> are explicitly NOT supported
         // The inner <esi:vars> tag will be treated as text
         let input = br#"<esi:vars>outer<esi:vars>inner</esi:vars></esi:vars>"#;
-        let result = parse_complete(input);
+        let bytes = Bytes::from_static(input);
+        let result = parse_complete(&bytes);
 
         // The parser should either:
         // 1. Fail to parse completely (leaving remainder), OR
@@ -1077,8 +1372,9 @@ exception!
     }
     #[test]
     fn test_new_parse_complex_expr() {
-        let (rest, x) =
-            parse_complete(br#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#).unwrap();
+        let input = br#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#;
+        let bytes = Bytes::from_static(input);
+        let (rest, x) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -1127,7 +1423,8 @@ exception!
             $(QUERY_STRING{$(keyVar)})
         </esi:vars>
     "#;
-        let (rest, elements) = parse_complete(input).unwrap();
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         eprintln!("Chunks: {:?}", elements);
         eprintln!("Remaining: {:?}", String::from_utf8_lossy(rest));
         assert_eq!(
@@ -1159,7 +1456,8 @@ exception!
             "Testing esi_tag on input: {:?}",
             String::from_utf8_lossy(input)
         );
-        let result = esi_tag(input);
+        let bytes = Bytes::from_static(input);
+        let result = esi_tag(&bytes, input);
         eprintln!("Result: {:?}", result);
         assert!(result.is_ok(), "esi_tag should parse: {:?}", result.err());
     }
@@ -1169,19 +1467,24 @@ exception!
         // Test simple case without nested variables (which aren't supported yet)
         let input =
             br#"<esi:assign name="key" value="'val'" /><esi:vars>$(QUERY_STRING{param})</esi:vars>"#;
-        let (rest, _elements) = parse_complete(input).unwrap();
+        let bytes = Bytes::from_static(input);
+        let (rest, _elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
     }
 
     #[test]
     fn test_new_parse_plain_text() {
-        let (rest, x) = parse_complete(b"hello\nthere").unwrap();
+        let input = b"hello\nthere";
+        let bytes = Bytes::from_static(input);
+        let (rest, x) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(x, [Element::Text(Bytes::from_static(b"hello\nthere"))]);
     }
     #[test]
     fn test_new_parse_interpolated() {
-        let (rest, x) = parse_complete(b"hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>").unwrap();
+        let input = b"hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>";
+        let bytes = Bytes::from_static(input);
+        let (rest, x) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -1194,10 +1497,9 @@ exception!
     }
     #[test]
     fn test_new_parse_examples() {
-        let (rest, _) = parse_complete(include_bytes!(
-            "../../examples/esi_vars_example/src/index.html"
-        ))
-        .unwrap();
+        let input = include_bytes!("../../examples/esi_vars_example/src/index.html");
+        let bytes = Bytes::from_static(input);
+        let (rest, _) = parse_complete(&bytes).unwrap();
         // just make sure it parsed the whole thing
         assert_eq!(rest.len(), 0);
     }
