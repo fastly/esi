@@ -68,7 +68,8 @@ enum QueuedElement {
     /// All includes from all attempts have been dispatched in parallel
     Try {
         attempt_elements: Vec<Vec<QueuedElement>>,
-        except_elements: Vec<QueuedElement>},
+        except_elements: Vec<QueuedElement>,
+    },
 }
 
 impl PendingFragmentContent {
@@ -444,8 +445,7 @@ impl Processor {
                             if self.queue.is_empty() {
                                 output_writer.write_all(&bytes)?;
                             } else {
-                                self.queue
-                                    .push_back(QueuedElement::Content(bytes));
+                                self.queue.push_back(QueuedElement::Content(bytes));
                             }
                         }
                     }
@@ -473,12 +473,7 @@ impl Processor {
                 continue_on_error,
             }) => {
                 // BLOCKING - dispatch and queue
-                self.dispatch_and_queue_include(
-                    &src,
-                    alt.as_ref(),
-                    continue_on_error,
-                    dispatcher,
-                )?;
+                self.dispatch_and_queue_include(&src, alt.as_ref(), continue_on_error, dispatcher)?;
             }
 
             Element::Esi(Tag::Choose {
@@ -540,9 +535,7 @@ impl Processor {
                                         if !matches!(value, expression::Value::Null) {
                                             let bytes = value.to_bytes();
                                             if !bytes.is_empty() {
-                                                attempt_queue.push(QueuedElement::Content(
-                                                    bytes,
-                                                ));
+                                                attempt_queue.push(QueuedElement::Content(bytes));
                                             }
                                         }
                                     }
@@ -629,8 +622,7 @@ impl Processor {
                                 if !matches!(value, expression::Value::Null) {
                                     let bytes = value.to_bytes();
                                     if !bytes.is_empty() {
-                                        except_queue
-                                            .push(QueuedElement::Content(bytes));
+                                        except_queue.push(QueuedElement::Content(bytes));
                                     }
                                 }
                             }
@@ -731,14 +723,14 @@ impl Processor {
                             };
                             Ok(QueuedElement::Include(Box::new(alt_fragment)))
                         }
-                        Err(_) => Ok(QueuedElement::Content(
-                            Bytes::from_static(b"<!-- fragment request failed -->"),
-                        )),
+                        Err(_) => Ok(QueuedElement::Content(Bytes::from_static(
+                            b"<!-- fragment request failed -->",
+                        ))),
                     }
                 } else {
-                    Ok(QueuedElement::Content(
-                        Bytes::from_static(b"<!-- fragment request failed -->"),
-                    ))
+                    Ok(QueuedElement::Content(Bytes::from_static(
+                        b"<!-- fragment request failed -->",
+                    )))
                 }
             }
             Err(e) => Err(ESIError::ExpressionError(format!(
@@ -1103,7 +1095,7 @@ fn build_fragment_request(mut request: Request, url: &Bytes, is_escaped: bool) -
     // Convert Bytes to str for URL parsing
     let url_str = std::str::from_utf8(url)
         .map_err(|_| ExecutionError::ExpressionError("Invalid UTF-8 in URL".to_string()))?;
-    
+
     let escaped_url = if is_escaped {
         html_escape::decode_html_entities(url_str).into_owned()
     } else {

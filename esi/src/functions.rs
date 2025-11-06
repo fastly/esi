@@ -23,7 +23,8 @@ pub fn html_encode(args: &[Value]) -> Result<Value> {
         ));
     }
 
-    let encoded = html_escape::encode_double_quoted_attribute(args[0].to_string().as_str()).to_string();
+    let encoded =
+        html_escape::encode_double_quoted_attribute(args[0].to_string().as_str()).to_string();
     Ok(Value::Text(encoded.into()))
 }
 
