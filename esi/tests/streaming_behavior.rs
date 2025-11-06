@@ -162,7 +162,7 @@ fn test_delimited_with_parse_complete_middle() {
     // Note: This test can't work with the new &Bytes API since nom combinators
     // require &[u8] as input type. The important behavior (parse_delimited for
     // delimited content) is tested elsewhere.
-    
+
     // The test was meant to demonstrate parse_complete behavior with delimited()
     // but our API now properly uses parse_delimited() internally for this purpose.
 }
@@ -267,8 +267,15 @@ fn test_parse_complete_on_actually_complete_input() {
 
     match result {
         Ok((remaining, elements)) => {
-            assert!(remaining.len() == 0, "Complete input should be fully consumed, but {} bytes remain", remaining.len());
-            assert!(elements.len() >= 1, "Should have parsed at least one element");
+            assert!(
+                remaining.len() == 0,
+                "Complete input should be fully consumed, but {} bytes remain",
+                remaining.len()
+            );
+            assert!(
+                elements.len() >= 1,
+                "Should have parsed at least one element"
+            );
         }
         Err(e) => {
             panic!("Should parse complete input successfully: {:?}", e);
