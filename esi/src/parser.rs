@@ -376,17 +376,10 @@ fn esi_assign_long<'a>(
                 attributes,
                 preceded(multispace0_bytes, tag(b">")),
             ),
-            recognize(many_till(anychar_byte, tag(b"</esi:assign>"))),
+            |i| parse_interpolated(original, i),
             tag(b"</esi:assign>"),
         )),
-        |(attrs, content_bytes, _)| {
-            // Parse the content using the original Bytes reference
-            // content_bytes is a slice of input, which is itself a slice of original
-            let content = parse_interpolated(original, content_bytes)
-                .map(|(_, elements)| elements)
-                .unwrap_or_default();
-            parse_assign_long(attrs, content)
-        },
+        |(attrs, content, _)| parse_assign_long(attrs, content),
     )(input)
 }
 
@@ -395,16 +388,12 @@ fn esi_except<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     map(
-        tuple((
+        delimited(
             tag(b"<esi:except>"),
-            recognize(many_till(anychar_byte, tag(b"</esi:except>"))),
-        )),
-        |(_, content_bytes)| {
-            let v = parse_interpolated(original, content_bytes)
-                .map(|(_, elements)| elements)
-                .unwrap_or_default();
-            vec![Element::Esi(Tag::Except(v))]
-        },
+            |i| parse_interpolated(original, i),
+            tag(b"</esi:except>"),
+        ),
+        |v| vec![Element::Esi(Tag::Except(v))],
     )(input)
 }
 
@@ -413,16 +402,12 @@ fn esi_attempt<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     map(
-        tuple((
+        delimited(
             tag(b"<esi:attempt>"),
-            recognize(many_till(anychar_byte, tag(b"</esi:attempt>"))),
-        )),
-        |(_, content_bytes)| {
-            let v = parse_interpolated(original, content_bytes)
-                .map(|(_, elements)| elements)
-                .unwrap_or_default();
-            vec![Element::Esi(Tag::Attempt(v))]
-        },
+            |i| parse_interpolated(original, i),
+            tag(b"</esi:attempt>"),
+        ),
+        |v| vec![Element::Esi(Tag::Attempt(v))],
     )(input)
 }
 
@@ -460,14 +445,12 @@ fn esi_otherwise<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     map(
-        tuple((
+        delimited(
             tag(b"<esi:otherwise>"),
-            recognize(many_till(anychar_byte, tag(b"</esi:otherwise>"))),
-        )),
-        |(_, content_bytes)| {
-            let content = parse_interpolated(original, content_bytes)
-                .map(|(_, elements)| elements)
-                .unwrap_or_default();
+            |i| parse_interpolated(original, i),
+            tag(b"</esi:otherwise>"),
+        ),
+        |content| {
             // Return the Otherwise tag followed by its content elements
             let mut result = vec![Element::Esi(Tag::Otherwise)];
             result.extend(content);
@@ -487,9 +470,10 @@ fn esi_when<'a>(
                 attributes,
                 preceded(multispace0_bytes, alt((tag(b">"), tag(b"/>")))),
             ),
-            recognize(many_till(anychar_byte, tag(b"</esi:when>"))),
+            |i| parse_interpolated(original, i),
+            tag(b"</esi:when>"),
         )),
-        |(attrs, content_bytes)| {
+        |(attrs, content, _)| {
             let test = attrs
                 .iter()
                 .find(|(key, _)| key == "test")
@@ -500,10 +484,6 @@ fn esi_when<'a>(
                 .iter()
                 .find(|(key, _)| key == "matchname")
                 .map(|(_, val)| val.clone());
-
-            let content = parse_interpolated(original, content_bytes)
-                .map(|(_, elements)| elements)
-                .unwrap_or_default();
 
             // Return the When tag followed by its content elements as a marker
             let mut result = vec![Element::Esi(Tag::When { test, match_name })];
