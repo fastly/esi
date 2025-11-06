@@ -50,7 +50,7 @@ pub struct Fragment {
     /// Metadata of the request
     pub(crate) request: Request,
     /// An optional alternate request to send if the original request fails
-    pub(crate) alt: Option<String>,
+    pub(crate) alt: Option<Bytes>,
     /// Whether to continue on error
     pub(crate) continue_on_error: bool,
     /// The pending fragment response, which can be polled to retrieve the content
@@ -61,15 +61,14 @@ pub struct Fragment {
 /// Elements that need to be executed in order
 enum QueuedElement {
     /// Raw content ready to write (text/html/evaluated expressions)
-    Content(Vec<u8>),
+    Content(Bytes),
     /// A dispatched include waiting to be executed
     Include(Box<Fragment>),
     /// A try block with attempts and except clause
     /// All includes from all attempts have been dispatched in parallel
     Try {
         attempt_elements: Vec<Vec<QueuedElement>>,
-        except_elements: Vec<QueuedElement>,
-    },
+        except_elements: Vec<QueuedElement>},
 }
 
 impl PendingFragmentContent {
@@ -432,7 +431,7 @@ impl Processor {
                     output_writer.write_all(&text)?;
                 } else {
                     // Blocked - queue it
-                    self.queue.push_back(QueuedElement::Content(text.to_vec()));
+                    self.queue.push_back(QueuedElement::Content(text));
                 }
             }
 
@@ -440,13 +439,13 @@ impl Processor {
                 // Evaluate and treat as non-blocking content
                 match expression::eval_expr(expr, &mut self.ctx) {
                     Ok(val) if !matches!(val, expression::Value::Null) => {
-                        let text = val.to_string();
-                        if !text.is_empty() {
+                        let bytes = val.to_bytes();
+                        if !bytes.is_empty() {
                             if self.queue.is_empty() {
-                                output_writer.write_all(text.as_bytes())?;
+                                output_writer.write_all(&bytes)?;
                             } else {
                                 self.queue
-                                    .push_back(QueuedElement::Content(text.into_bytes()));
+                                    .push_back(QueuedElement::Content(bytes));
                             }
                         }
                     }
@@ -476,7 +475,7 @@ impl Processor {
                 // BLOCKING - dispatch and queue
                 self.dispatch_and_queue_include(
                     &src,
-                    alt.as_deref(),
+                    alt.as_ref(),
                     continue_on_error,
                     dispatcher,
                 )?;
@@ -530,19 +529,19 @@ impl Processor {
                         // Process each element in the attempt, collecting queued items
                         match elem {
                             Element::Text(text) => {
-                                attempt_queue.push(QueuedElement::Content(text.to_vec()));
+                                attempt_queue.push(QueuedElement::Content(text));
                             }
                             Element::Html(html) => {
-                                attempt_queue.push(QueuedElement::Content(html.to_vec()));
+                                attempt_queue.push(QueuedElement::Content(html));
                             }
                             Element::Expr(expr) => {
                                 match expression::eval_expr(expr, &mut self.ctx) {
                                     Ok(value) => {
                                         if !matches!(value, expression::Value::Null) {
-                                            let text = value.to_string();
-                                            if !text.is_empty() {
+                                            let bytes = value.to_bytes();
+                                            if !bytes.is_empty() {
                                                 attempt_queue.push(QueuedElement::Content(
-                                                    text.into_bytes(),
+                                                    bytes,
                                                 ));
                                             }
                                         }
@@ -560,7 +559,7 @@ impl Processor {
                                 // Dispatch the include and add to attempt queue
                                 let queued_element = self.dispatch_include_to_element(
                                     &src,
-                                    alt.as_deref(),
+                                    alt.as_ref(),
                                     continue_on_error,
                                     dispatcher,
                                 )?;
@@ -620,18 +619,18 @@ impl Processor {
                 for elem in except_events {
                     match elem {
                         Element::Text(text) => {
-                            except_queue.push(QueuedElement::Content(text.to_vec()));
+                            except_queue.push(QueuedElement::Content(text));
                         }
                         Element::Html(html) => {
-                            except_queue.push(QueuedElement::Content(html.to_vec()));
+                            except_queue.push(QueuedElement::Content(html));
                         }
                         Element::Expr(expr) => match expression::eval_expr(expr, &mut self.ctx) {
                             Ok(value) => {
                                 if !matches!(value, expression::Value::Null) {
-                                    let text = value.to_string();
-                                    if !text.is_empty() {
+                                    let bytes = value.to_bytes();
+                                    if !bytes.is_empty() {
                                         except_queue
-                                            .push(QueuedElement::Content(text.into_bytes()));
+                                            .push(QueuedElement::Content(bytes));
                                     }
                                 }
                             }
@@ -647,7 +646,7 @@ impl Processor {
                             // Dispatch the include and add to except queue
                             let queued_element = self.dispatch_include_to_element(
                                 &src,
-                                alt.as_deref(),
+                                alt.as_ref(),
                                 continue_on_error,
                                 dispatcher,
                             )?;
@@ -673,8 +672,8 @@ impl Processor {
     /// Dispatch an include and add to queue
     fn dispatch_and_queue_include(
         &mut self,
-        src: &str,
-        alt: Option<&str>,
+        src: &Bytes,
+        alt: Option<&Bytes>,
         continue_on_error: bool,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<()> {
@@ -688,8 +687,8 @@ impl Processor {
     /// This is the single source of truth for include dispatching logic
     fn dispatch_include_to_element(
         &mut self,
-        src: &str,
-        alt: Option<&str>,
+        src: &Bytes,
+        alt: Option<&Bytes>,
         continue_on_error: bool,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<QueuedElement> {
@@ -705,7 +704,7 @@ impl Processor {
             Ok(pending) => {
                 let fragment = Fragment {
                     request: req,
-                    alt: alt.map(|s| s.to_string()),
+                    alt: alt.map(|s| s.clone()),
                     continue_on_error,
                     pending_content: pending,
                 };
@@ -733,12 +732,12 @@ impl Processor {
                             Ok(QueuedElement::Include(Box::new(alt_fragment)))
                         }
                         Err(_) => Ok(QueuedElement::Content(
-                            b"<!-- fragment request failed -->".to_vec(),
+                            Bytes::from_static(b"<!-- fragment request failed -->"),
                         )),
                     }
                 } else {
                     Ok(QueuedElement::Content(
-                        b"<!-- fragment request failed -->".to_vec(),
+                        Bytes::from_static(b"<!-- fragment request failed -->"),
                     ))
                 }
             }
@@ -1037,8 +1036,8 @@ impl Processor {
         // Check if successful
         if final_response.get_status().is_success() {
             let body_bytes = final_response.into_body_bytes();
-            let body_str = std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
-            output_writer.write_all(body_str.as_bytes())?;
+            // Write Bytes directly - no UTF-8 conversion needed!
+            output_writer.write_all(&body_bytes)?;
             Ok(())
         } else if let Some(alt_src) = alt {
             // Try alt
@@ -1061,9 +1060,8 @@ impl Processor {
                     };
 
                     let body_bytes = final_alt.into_body_bytes();
-                    let body_str =
-                        std::str::from_utf8(&body_bytes).unwrap_or("<!-- invalid utf8 -->");
-                    output_writer.write_all(body_str.as_bytes())?;
+                    // Write Bytes directly - no UTF-8 conversion needed!
+                    output_writer.write_all(&body_bytes)?;
                     Ok(())
                 }
                 Err(_) if continue_on_error => {
@@ -1101,11 +1099,15 @@ fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
 // Helper function to build a fragment request from a URL
 // For HTML content the URL is unescaped if it's escaped (default).
 // It can be disabled in the processor configuration for a non-HTML content.
-fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> Result<Request> {
+fn build_fragment_request(mut request: Request, url: &Bytes, is_escaped: bool) -> Result<Request> {
+    // Convert Bytes to str for URL parsing
+    let url_str = std::str::from_utf8(url)
+        .map_err(|_| ExecutionError::ExpressionError("Invalid UTF-8 in URL".to_string()))?;
+    
     let escaped_url = if is_escaped {
-        html_escape::decode_html_entities(url).into_owned()
+        html_escape::decode_html_entities(url_str).into_owned()
     } else {
-        url.to_string()
+        url_str.to_string()
     };
 
     if escaped_url.starts_with('/') {
@@ -1136,13 +1138,14 @@ fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> 
     Ok(request)
 }
 
-/// Processes a string containing interpolated expressions using a character-based approach
+/// Processes Bytes containing interpolated expressions
 ///
-/// This function evaluates expressions like $(`HTTP_HOST``) in text content and
+/// This function evaluates expressions like $(HTTP_HOST) in text content and
 /// provides the processed segments to the caller through a callback function.
+/// ZERO-COPY: Works directly with Bytes references.
 ///
 /// # Arguments
-/// * `input` - The input string containing potential interpolated expressions
+/// * `input` - The input Bytes containing potential interpolated expressions
 /// * `ctx` - Evaluation context containing variables and state
 /// * `segment_handler` - A function that handles each segment (raw text or evaluated expression)
 ///
@@ -1150,21 +1153,19 @@ fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> 
 /// * `Result<()>` - Success or error during processing
 ///
 pub fn process_interpolated_chars<F>(
-    input: &str,
+    input: &Bytes,
     ctx: &mut EvalContext,
     mut segment_handler: F,
 ) -> Result<()>
 where
-    F: FnMut(String) -> Result<()>,
+    F: FnMut(Bytes) -> Result<()>,
 {
-    // Parse the input string with interpolated expressions using nom parser
-    // Convert input to Bytes for zero-copy parsing
-    let input_bytes = Bytes::from(input.to_string());
-    let elements = match crate::parser::parse_interpolated_string(&input_bytes) {
+    // Parse the input with interpolated expressions using nom parser
+    let elements = match crate::parser::parse_interpolated_string(input) {
         Ok((_, elements)) => elements,
         Err(_) => {
             // If parsing fails, treat the whole input as text
-            segment_handler(input.to_string())?;
+            segment_handler(input.clone())?;
             return Ok(());
         }
     };
@@ -1173,12 +1174,12 @@ where
     for element in elements {
         match element {
             parser_types::Element::Text(text) => {
-                segment_handler(String::from_utf8_lossy(&text).into_owned())?;
+                segment_handler(text)?;
             }
             parser_types::Element::Expr(expr) => {
                 // Evaluate the expression using eval_expr
                 match crate::expression::eval_expr(expr, ctx) {
-                    Ok(value) => segment_handler(value.to_string())?,
+                    Ok(value) => segment_handler(value.to_bytes())?,
                     Err(e) => {
                         // Log the error but continue processing (same behavior as old code)
                         debug!("Error while evaluating interpolated expression: {e}");
@@ -1194,29 +1195,30 @@ where
     Ok(())
 }
 
-/// Evaluates all interpolated expressions in a string and returns the complete result
+/// Evaluates all interpolated expressions and returns the complete result as Bytes
 ///
 /// This is a convenience wrapper around `process_interpolated_chars` that collects
-/// all output into a single string.
+/// all output into a single Bytes buffer.
+/// ZERO-COPY: Returns Bytes that may reference the original buffer.
 ///
 /// # Arguments
-/// * `input` - The input string containing potential interpolated expressions
+/// * `input` - The input Bytes containing potential interpolated expressions
 /// * `ctx` - Evaluation context containing variables and state
 ///
 /// # Returns
-/// * `Result<String>` - The fully processed string with all expressions evaluated
+/// * `Result<Bytes>` - The fully processed content with all expressions evaluated
 ///
 /// # Errors
 /// Returns error if expression evaluation fails
 ///
-pub fn try_evaluate_interpolated_string(input: &str, ctx: &mut EvalContext) -> Result<String> {
-    let mut result = String::new();
+pub fn try_evaluate_interpolated_string(input: &Bytes, ctx: &mut EvalContext) -> Result<Bytes> {
+    let mut result = BytesMut::new();
 
     process_interpolated_chars(input, ctx, |segment| {
-        result.push_str(&segment);
+        result.extend_from_slice(&segment);
         Ok(())
     })?;
 
-    Ok(result)
+    Ok(result.freeze())
 }
 // Helper Functions

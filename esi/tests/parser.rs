@@ -16,7 +16,7 @@ fn test_parse_basic_include() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error }
-        ) if *src == "https://example.com/hello" && alt.is_none() && !continue_on_error)
+        ) if src.as_ref() == b"https://example.com/hello" && alt.is_none() && !continue_on_error)
     });
 
     assert!(
@@ -36,7 +36,7 @@ fn test_parse_include_with_alt_and_onerror() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error }
-        ) if *src == "abc" && alt.as_deref() == Some("def") && *continue_on_error)
+        ) if src.as_ref() == b"abc" && alt.as_ref().map(|a| a.as_ref()) == Some(&b"def"[..]) && *continue_on_error)
     });
 
     assert!(
@@ -77,7 +77,7 @@ fn test_parse_include_with_onerror() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error }
-        ) if *src == "/_fragments/content.html" && alt.is_none() && *continue_on_error)
+        ) if src.as_ref() == b"/_fragments/content.html" && alt.is_none() && *continue_on_error)
     });
 
     assert!(include_found, "Should find Include with onerror=continue");
@@ -113,7 +113,7 @@ fn test_parse_try_with_attempt_and_except() {
                 attempt_elements.iter().any(|c| {
                     matches!(c, esi::parser_types::Element::Esi(
                         esi::parser_types::Tag::Include { src, .. }
-                    ) if *src == "/abc")
+                    ) if src.as_ref() == b"/abc")
                 })
             });
 
@@ -121,7 +121,7 @@ fn test_parse_try_with_attempt_and_except() {
             let except_has_xyz = except_events.iter().any(|c| {
                 matches!(c, esi::parser_types::Element::Esi(
                     esi::parser_types::Tag::Include { src, .. }
-                ) if *src == "/xyz")
+                ) if src.as_ref() == b"/xyz")
             });
 
             attempt_has_abc && except_has_xyz
@@ -171,7 +171,7 @@ fn test_parse_nested_try() {
                 attempt_elements.iter().any(|c| {
                     matches!(c, esi::parser_types::Element::Esi(
                         esi::parser_types::Tag::Include { src, .. }
-                    ) if *src == "/abc")
+                    ) if src.as_ref() == b"/abc")
                 })
             });
 
@@ -189,7 +189,7 @@ fn test_parse_nested_try() {
             let has_xyz = except_events.iter().any(|c| {
                 matches!(c, esi::parser_types::Element::Esi(
                     esi::parser_types::Tag::Include { src, .. }
-                ) if *src == "/xyz")
+                ) if src.as_ref() == b"/xyz")
             });
 
             has_abc && has_nested_try && has_xyz

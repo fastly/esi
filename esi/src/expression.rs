@@ -1,8 +1,8 @@
+use bytes::Bytes;
 use fastly::http::Method;
 use fastly::Request;
 use log::debug;
 use regex::RegexBuilder;
-use std::borrow::Cow;
 use std::{collections::HashMap, fmt::Display};
 
 use crate::{functions, parser_types, ExecutionError, Result};
@@ -22,8 +22,8 @@ use crate::{functions, parser_types, ExecutionError, Result};
 pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Value> {
     match expr {
         parser_types::Expr::Integer(i) => Ok(Value::Integer(i)),
-        parser_types::Expr::String(Some(s)) => Ok(Value::Text(Cow::Owned(s.to_string()))),
-        parser_types::Expr::String(None) => Ok(Value::Text(Cow::Owned(String::new()))),
+        parser_types::Expr::String(Some(s)) => Ok(Value::Text(Bytes::from(s))),
+        parser_types::Expr::String(None) => Ok(Value::Text(Bytes::new())),
         parser_types::Expr::Variable(name, key, default) => {
             // Evaluate the key expression if present
             let evaluated_key = if let Some(key_expr) = key {
@@ -66,7 +66,7 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
                     if let Some(captures) = re.captures(&test) {
                         for (i, cap) in captures.iter().enumerate() {
                             let capval = cap.map_or(Value::Null, |s| {
-                                Value::Text(Cow::Owned(s.as_str().into()))
+                                Value::Text(Bytes::from(s.as_str().to_string()))
                             });
                             ctx.set_variable(&ctx.match_name.clone(), Some(&i.to_string()), capval);
                         }
@@ -152,10 +152,10 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
             for element in elements {
                 match element {
                     parser_types::Element::Text(text) => {
-                        result.push_str(&String::from_utf8_lossy(&text));
+                        result.push_str(&String::from_utf8_lossy(text.as_ref()));
                     }
                     parser_types::Element::Html(html) => {
-                        result.push_str(&String::from_utf8_lossy(&html));
+                        result.push_str(&String::from_utf8_lossy(html.as_ref()));
                     }
                     parser_types::Element::Expr(expr) => {
                         let value = eval_expr(expr, ctx)?;
@@ -167,7 +167,7 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
                     }
                 }
             }
-            Ok(Value::Text(Cow::Owned(result)))
+            Ok(Value::Text(Bytes::from(result)))
         }
     }
 }
@@ -214,11 +214,11 @@ impl EvalContext {
             "QUERY_STRING" => self.request.get_query_str().map_or(Value::Null, |query| {
                 debug!("Query string: {query}");
                 subkey.map_or_else(
-                    || Value::Text(Cow::Owned(query.to_string())),
+                    || Value::Text(Bytes::from(query.to_string())),
                     |field| {
                         self.request
                             .get_query_parameter(field)
-                            .map_or(Value::Null, |v| Value::Text(Cow::Owned(v.to_string())))
+                            .map_or(Value::Null, |v| Value::Text(Bytes::from(v.to_string())))
                     },
                 )
             }),
@@ -293,7 +293,7 @@ fn format_key(key: &str, subkey: Option<&str>) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Integer(i32),
-    Text(Cow<'static, str>),
+    Text(Bytes),
     Boolean(bool),
     Null,
 }
@@ -302,49 +302,66 @@ impl Value {
     pub(crate) fn to_bool(&self) -> bool {
         match self {
             &Self::Integer(n) => !matches!(n, 0),
-            Self::Text(s) => !matches!(s, s if s == &String::new()),
+            Self::Text(s) => !s.is_empty(),
             Self::Boolean(b) => *b,
             &Self::Null => false,
+        }
+    }
+
+    /// Convert Value to Bytes - zero-copy for Text variant
+    pub(crate) fn to_bytes(&self) -> Bytes {
+        match self {
+            Self::Integer(i) => Bytes::from(i.to_string()),
+            Self::Text(b) => b.clone(), // Cheap refcount increment
+            Self::Boolean(b) => {
+                if *b {
+                    Bytes::from_static(b"true")
+                } else {
+                    Bytes::from_static(b"false")
+                }
+            }
+            Self::Null => Bytes::new(),
+        }
+    }
+
+    /// Convert Value to string for display/processing
+    pub(crate) fn to_string(&self) -> String {
+        match self {
+            Self::Integer(i) => i.to_string(),
+            Self::Text(b) => String::from_utf8_lossy(b.as_ref()).into_owned(),
+            Self::Boolean(b) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            Self::Null => String::new(), // Empty string, not "null"
         }
     }
 }
 
 impl From<String> for Value {
     fn from(s: String) -> Self {
-        Self::Text(Cow::Owned(s)) // Convert `String` to `Cow::Owned`
+        Self::Text(Bytes::from(s))
     }
 }
 
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
-        Self::Text(Cow::Owned(s.to_owned())) // Convert `&str` to owned String
+        Self::Text(Bytes::copy_from_slice(s.as_bytes()))
     }
 }
 
-impl AsRef<str> for Value {
-    fn as_ref(&self) -> &str {
-        match *self {
-            Self::Text(ref text) => text.as_ref(),
-            _ => panic!("Value is not a Text variant"),
-        }
+impl From<Bytes> for Value {
+    fn from(b: Bytes) -> Self {
+        Self::Text(b)
     }
 }
 
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Integer(i) => write!(f, "{i}"),
-            Self::Text(s) => write!(f, "{s}"),
-            Self::Boolean(b) => write!(
-                f,
-                "{}",
-                match b {
-                    true => "true",
-                    false => "false",
-                }
-            ),
-            Self::Null => write!(f, "null"),
-        }
+        write!(f, "{}", self.to_string())
     }
 }
 
@@ -635,7 +652,7 @@ mod tests {
         assert_eq!(Value::Integer(0).to_string(), "0");
         assert_eq!(Value::Text("".into()).to_string(), "");
         assert_eq!(Value::Text("hello".into()).to_string(), "hello");
-        assert_eq!(Value::Null.to_string(), "null");
+        assert_eq!(Value::Null.to_string(), ""); // Null converts to empty string
 
         Ok(())
     }

@@ -19,20 +19,10 @@ use crate::parser_types::*;
 /// This enables zero-copy: we calculate the slice's offset within the original
 /// Bytes and return a new Bytes that references the same underlying data (just increments ref count)
 #[inline]
-fn slice_as_bytes(original: &Bytes, slice: &[u8]) -> Bytes {
-    // Calculate offset of slice within original Bytes
-    let original_ptr = original.as_ptr() as usize;
-    let slice_ptr = slice.as_ptr() as usize;
-
-    // Safety check: slice must be within original
-    debug_assert!(slice_ptr >= original_ptr);
-    debug_assert!(slice_ptr + slice.len() <= original_ptr + original.len());
-
-    let offset = slice_ptr - original_ptr;
-    let len = slice.len();
-
-    // Zero-copy slice - just increments ref count!
-    original.slice(offset..offset + len)
+fn slice_as_bytes(_original: &Bytes, slice: &[u8]) -> Bytes {
+    // For now, just copy the slice to avoid WASM pointer arithmetic issues
+    // TODO: Optimize this back to zero-copy once we figure out the WASM issue
+    Bytes::copy_from_slice(slice)
 }
 
 /// Helper for parsing loops that accumulate results
@@ -344,7 +334,7 @@ fn parse_assign_long(attrs: Vec<(String, String)>, content: Vec<Element>) -> Vec
             expr.clone()
         } else if let Element::Text(text) = &content[0] {
             // Try to parse the text as an expression
-            let text_str = String::from_utf8_lossy(text).to_string();
+            let text_str = String::from_utf8_lossy(text.as_ref()).to_string();
             match parse_expression(&text_str) {
                 Ok((_, expr)) => expr,
                 Err(_) => Expr::String(Some(text_str)),
@@ -390,7 +380,8 @@ fn esi_assign_long<'a>(
             tag(b"</esi:assign>"),
         )),
         |(attrs, content_bytes, _)| {
-            // ZERO-COPY: Use original to create Bytes slice
+            // Parse the content using the original Bytes reference
+            // content_bytes is a slice of input, which is itself a slice of original
             let content = parse_interpolated(original, content_bytes)
                 .map(|(_, elements)| elements)
                 .unwrap_or_default();
@@ -409,7 +400,6 @@ fn esi_except<'a>(
             recognize(many_till(anychar_byte, tag(b"</esi:except>"))),
         )),
         |(_, content_bytes)| {
-            // ZERO-COPY: Use original to create Bytes slice
             let v = parse_interpolated(original, content_bytes)
                 .map(|(_, elements)| elements)
                 .unwrap_or_default();
@@ -428,7 +418,6 @@ fn esi_attempt<'a>(
             recognize(many_till(anychar_byte, tag(b"</esi:attempt>"))),
         )),
         |(_, content_bytes)| {
-            // ZERO-COPY: Use original to create Bytes slice
             let v = parse_interpolated(original, content_bytes)
                 .map(|(_, elements)| elements)
                 .unwrap_or_default();
@@ -476,7 +465,6 @@ fn esi_otherwise<'a>(
             recognize(many_till(anychar_byte, tag(b"</esi:otherwise>"))),
         )),
         |(_, content_bytes)| {
-            // ZERO-COPY: Use original to create Bytes slice
             let content = parse_interpolated(original, content_bytes)
                 .map(|(_, elements)| elements)
                 .unwrap_or_default();
@@ -513,7 +501,6 @@ fn esi_when<'a>(
                 .find(|(key, _)| key == "matchname")
                 .map(|(_, val)| val.clone());
 
-            // ZERO-COPY: Use original to create Bytes slice
             let content = parse_interpolated(original, content_bytes)
                 .map(|(_, elements)| elements)
                 .unwrap_or_default();
@@ -739,13 +726,13 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
             preceded(multispace0_bytes, alt((tag(b">"), tag("/>")))),
         ),
         |attrs| {
-            let mut src = String::new();
+            let mut src = Bytes::new();
             let mut alt = None;
             let mut continue_on_error = false;
             for (key, val) in attrs {
                 match key.as_str() {
-                    "src" => src = val,
-                    "alt" => alt = Some(val),
+                    "src" => src = Bytes::from(val),
+                    "alt" => alt = Some(Bytes::from(val)),
                     "onerror" => continue_on_error = &val == "continue",
                     _ => {}
                 }

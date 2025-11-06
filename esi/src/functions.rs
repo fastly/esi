@@ -23,7 +23,7 @@ pub fn html_encode(args: &[Value]) -> Result<Value> {
         ));
     }
 
-    let encoded = html_escape::encode_double_quoted_attribute(&args[0]).to_string();
+    let encoded = html_escape::encode_double_quoted_attribute(args[0].to_string().as_str()).to_string();
     Ok(Value::Text(encoded.into()))
 }
 
@@ -49,6 +49,11 @@ pub fn replace(args: &[Value]) -> Result<Value> {
         ));
     };
 
+    // Convert Bytes to strings for replacement
+    let haystack_str = String::from_utf8_lossy(haystack.as_ref());
+    let needle_str = String::from_utf8_lossy(needle.as_ref());
+    let replacement_str = String::from_utf8_lossy(replacement.as_ref());
+
     // count is optional, default to usize::MAX
     let count = match args.get(3) {
         Some(Value::Integer(count)) => {
@@ -64,8 +69,8 @@ pub fn replace(args: &[Value]) -> Result<Value> {
         None => usize::MAX,
     };
     Ok(Value::Text(
-        haystack
-            .replacen(needle.as_ref(), replacement, count)
+        haystack_str
+            .replacen(needle_str.as_ref(), replacement_str.as_ref(), count)
             .into(),
     ))
 }

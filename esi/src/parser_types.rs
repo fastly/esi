@@ -11,8 +11,8 @@ pub struct WhenBranch {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Tag {
     Include {
-        src: String,
-        alt: Option<String>,
+        src: Bytes,
+        alt: Option<Bytes>,
         continue_on_error: bool,
     },
     Try {
