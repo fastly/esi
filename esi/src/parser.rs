@@ -1370,20 +1370,51 @@ exception!
 
     #[test]
     fn test_parse_equality_operators() {
-        // NOTE: Disabled with streaming parsers - see test_parse_comparison_operators
+        let input = b"$(foo) == 'bar'";
+        let (rest, result) = expr(input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::Equals,
+                ..
+            }
+        ));
+
+        let input2 = b"$(foo) != 'bar'";
+        let (rest, result) = expr(input2).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::NotEquals,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn test_parse_comparison_operators() {
-        // NOTE: These tests are disabled with streaming parsers
-        // Streaming expr() doesn't know when input is complete, so it may stop early
-        // The important tests are the integration tests using parse_complete()
-        // which test the full parsing pipeline
+        // Test via parsing complete ESI documents with esi:when test attributes
+        // which internally use parse_expression() for complete input handling
 
-        // let input = br#"$(count) < 10"#;
-        // let input2 = br#"$(count) >= 5"#;
-        // With streaming parsers, expr() may return early (e.g., just the variable)
-        // because it doesn't know if more operators are coming
+        let input1 = b"<esi:choose><esi:when test=\"$(count) < 10\">yes</esi:when></esi:choose>";
+        let bytes1 = Bytes::from_static(input1);
+        let result1 = parse_complete(&bytes1);
+        assert!(
+            result1.is_ok(),
+            "Should parse < operator: {:?}",
+            result1.err()
+        );
+
+        let input2 = b"<esi:choose><esi:when test=\"$(count) >= 5\">yes</esi:when></esi:choose>";
+        let bytes2 = Bytes::from_static(input2);
+        let result2 = parse_complete(&bytes2);
+        assert!(
+            result2.is_ok(),
+            "Should parse >= operator: {:?}",
+            result2.err()
+        );
     }
 
     #[test]
