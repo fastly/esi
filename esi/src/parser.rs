@@ -2,10 +2,11 @@ use bytes::Bytes;
 use nom::branch::alt;
 // Using STREAMING parsers - they return Incomplete when they need more data
 // This enables TRUE bounded-memory streaming
-use nom::bytes::streaming::{is_not, tag, tag_no_case, take_while1};
+use nom::bytes::streaming::{is_not, tag, tag_no_case, take, take_until, take_while, take_while1};
+use nom::character::streaming::{alpha1, multispace0, multispace1};
 use nom::combinator::{map, map_res, not, opt, peek, recognize, success, verify};
 use nom::error::Error;
-use nom::multi::{fold_many0, length_data, many0, many1, many_till, separated_list0};
+use nom::multi::{fold_many0, many0, many1, many_till, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 
@@ -125,12 +126,6 @@ pub fn parse_complete(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-/// Check if byte is whitespace (space, tab, newline, carriage return)
-#[inline]
-const fn is_whitespace_byte(c: u8) -> bool {
-    c == b' ' || c == b'\t' || c == b'\n' || c == b'\r'
-}
 
 /// Convert bytes to String using lossy UTF-8 conversion
 #[inline]
@@ -342,7 +337,7 @@ fn esi_assign_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> 
         delimited(
             tag(b"<esi:assign"),
             attributes,
-            preceded(multispace0_bytes, tag("/>")),
+            preceded(multispace0, tag("/>")),
         ),
         parse_assign_attributes_short,
     )(input)
@@ -357,7 +352,7 @@ fn esi_assign_long<'a>(
             delimited(
                 tag(b"<esi:assign"),
                 attributes,
-                preceded(multispace0_bytes, tag(b">")),
+                preceded(multispace0, tag(b">")),
             ),
             |i| parse_interpolated(original, i),
             tag(b"</esi:assign>"),
@@ -451,7 +446,7 @@ fn esi_when<'a>(
             delimited(
                 tag(b"<esi:when"),
                 attributes,
-                preceded(multispace0_bytes, alt((tag(b">"), tag(b"/>")))),
+                preceded(multispace0, alt((tag(b">"), tag(b"/>")))),
             ),
             |i| parse_interpolated(original, i),
             tag(b"</esi:when>"),
@@ -583,7 +578,7 @@ fn esi_vars_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         delimited(
             tag(b"<esi:vars"),
             attributes,
-            preceded(multispace0_bytes, tag("/>")), // Short form must be self-closing per ESI spec
+            preceded(multispace0, tag("/>")), // Short form must be self-closing per ESI spec
         ),
         parse_vars_attributes,
     )(input)
@@ -648,7 +643,7 @@ fn esi_comment(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         delimited(
             tag(b"<esi:comment"),
             attributes,
-            preceded(multispace0_bytes, alt((tag(b">"), tag("/>")))),
+            preceded(multispace0, alt((tag(b">"), tag("/>")))),
         ),
         |_| vec![],
     )(input)
@@ -670,15 +665,12 @@ fn esi_text<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     map(
-        tuple((
+        delimited(
             tag(b"<esi:text>"),
-            length_data(map(
-                peek(many_till(anychar_byte, tag(b"</esi:text>"))),
-                |(v, _)| v.len(),
-            )),
+            take_until(b"</esi:text>".as_ref()),
             tag(b"</esi:text>"),
-        )),
-        |(_, v, _)| vec![Element::Text(slice_as_bytes(original, v))],
+        ),
+        |v| vec![Element::Text(slice_as_bytes(original, v))],
     )(input)
 }
 fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
@@ -686,7 +678,7 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         delimited(
             tag(b"<esi:include"),
             attributes,
-            preceded(multispace0_bytes, alt((tag(b">"), tag("/>")))),
+            preceded(multispace0, alt((tag(b">"), tag("/>")))),
         ),
         |attrs| {
             let mut src = Bytes::new();
@@ -712,7 +704,7 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
 fn attributes(input: &[u8]) -> IResult<&[u8], Vec<(String, String)>, Error<&[u8]>> {
     map(
         many0(separated_pair(
-            preceded(multispace1_bytes, alpha1_bytes),
+            preceded(multispace1, alpha1),
             tag(b"="),
             htmlstring,
         )),
@@ -761,10 +753,7 @@ fn script<'a>(
                 delimited(tag_no_case(b"<script"), attributes, tag(b">")),
                 |attrs: &Vec<(String, String)>| !attrs.iter().any(|(k, _)| k == "src"),
             )),
-            length_data(map(
-                peek(many_till(anychar_byte, tag_no_case(b"</script"))),
-                |(v, _)| v.len(),
-            )),
+            recognize(many_till(take(1usize), peek(tag_no_case(b"</script")))),
             recognize(delimited(
                 tag_no_case(b"</script"),
                 alt((is_not(&b">"[..]), success(&b""[..]))),
@@ -847,7 +836,7 @@ fn var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        take_while_byte(|c| c != b'$' && c != b'{' && c != b'}' && c != b',' && c != b'"'),
+        take_while(|c| c != b'$' && c != b'{' && c != b'}' && c != b',' && c != b'"'),
         bytes_to_string,
     )(input)
 }
@@ -855,23 +844,13 @@ fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
 // TODO: handle escaping
 fn single_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        delimited(
-            tag(b"'"),
-            take_while_byte(|c| c != b'\'' && c < 128),
-            tag(b"'"),
-        ),
+        delimited(tag(b"'"), take_while(|c| c != b'\''), tag(b"'")),
         bytes_to_string,
     )(input)
 }
 fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        delimited(
-            tag(b"'''"),
-            length_data(map(peek(many_till(anychar_byte, tag(b"'''"))), |(v, _)| {
-                v.len()
-            })),
-            tag(b"'''"),
-        ),
+        delimited(tag(b"'''"), take_until(b"'''".as_ref()), tag(b"'''")),
         bytes_to_string,
     )(input)
 }
@@ -909,7 +888,7 @@ fn var_key_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn fn_argument(input: &[u8]) -> IResult<&[u8], Vec<Expr>, Error<&[u8]>> {
     let (input, mut parsed) = separated_list0(
-        tuple((multispace0_bytes, tag(b","), multispace0_bytes)),
+        tuple((multispace0, tag(b","), multispace0)),
         fn_nested_argument,
     )(input)?;
 
@@ -945,9 +924,9 @@ fn call(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (input, parsed) = tuple((
         fn_name,
         delimited(
-            terminated(tag(b"("), multispace0_bytes),
+            terminated(tag(b"("), multispace0),
             fn_argument,
-            preceded(multispace0_bytes, tag(b")")),
+            preceded(multispace0, tag(b")")),
         ),
     ))(input)?;
 
@@ -984,13 +963,13 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     alt((
         // Parse negation: !expr
         map(
-            preceded(tag(b"!"), preceded(multispace0_bytes, primary_expr)),
+            preceded(tag(b"!"), preceded(multispace0, primary_expr)),
             |expr| Expr::Not(Box::new(expr)),
         ),
         // Parse grouped expression: (expr)
         delimited(
             tag(b"("),
-            delimited(multispace0_bytes, expr, multispace0_bytes),
+            delimited(multispace0, expr, multispace0),
             tag(b")"),
         ),
         // Parse basic expressions
@@ -1004,10 +983,8 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 fn expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (rest, exp) = primary_expr(input)?;
 
-    if let Ok((rest, (operator, right_exp))) = tuple((
-        delimited(multispace0_bytes, operator, multispace0_bytes),
-        expr,
-    ))(rest)
+    if let Ok((rest, (operator, right_exp))) =
+        tuple((delimited(multispace0, operator, multispace0), expr))(rest)
     {
         Ok((
             rest,
@@ -1469,44 +1446,5 @@ exception!
                 ..
             }
         ));
-    }
-}
-
-// ============================================================================
-// Byte parsing helpers
-// ============================================================================
-
-fn multispace0_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    take_while_byte(is_whitespace_byte)(input)
-}
-
-fn multispace1_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    take_while1(is_whitespace_byte)(input)
-}
-
-fn alpha1_bytes(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    take_while1(|c: u8| (c as char).is_ascii_alphabetic())(input)
-}
-
-fn take_while_byte(
-    f: impl Fn(u8) -> bool,
-) -> impl Fn(&[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    move |input: &[u8]| {
-        let mut i = 0;
-        while i < input.len() && f(input[i]) {
-            i += 1;
-        }
-        Ok((&input[i..], &input[..i]))
-    }
-}
-
-fn anychar_byte(input: &[u8]) -> IResult<&[u8], u8, Error<&[u8]>> {
-    if input.is_empty() {
-        // STREAMING: need more data, not an error
-        Err(nom::Err::Incomplete(nom::Needed::Size(
-            core::num::NonZeroUsize::new(1).unwrap(),
-        )))
-    } else {
-        Ok((&input[1..], input[0]))
     }
 }
