@@ -19,21 +19,31 @@ use crate::parser_types::*;
 /// This enables zero-copy: we calculate the slice's offset within the original
 /// Bytes and return a new Bytes that references the same underlying data (just increments ref count)
 #[inline]
-fn slice_as_bytes(_original: &Bytes, slice: &[u8]) -> Bytes {
-    // For now, just copy the slice to avoid WASM pointer arithmetic issues
-    // TODO: Optimize this back to zero-copy once we figure out the WASM issue
-    Bytes::copy_from_slice(slice)
+fn slice_as_bytes(original: &Bytes, slice: &[u8]) -> Bytes {
+    // Calculate the offset of the slice within the original Bytes
+    let original_ptr = original.as_ptr() as usize;
+    let slice_ptr = slice.as_ptr() as usize;
+
+    // Safety check: slice must be within original's memory range
+    debug_assert!(
+        slice_ptr >= original_ptr && slice_ptr + slice.len() <= original_ptr + original.len(),
+        "slice must be within original Bytes range"
+    );
+
+    let offset = slice_ptr - original_ptr;
+    let len = slice.len();
+
+    // Zero-copy: slice the original Bytes (just increments refcount)
+    original.slice(offset..offset + len)
 }
 
 /// Helper for parsing loops that accumulate results
 /// Handles the common pattern of calling a parser in a loop and accumulating elements
-enum IncompleteStrategy {
+enum ParsingMode {
     /// Return Incomplete if no elements parsed yet, otherwise return accumulated results
     Streaming,
-    /// Always propagate Incomplete (for delimited content)
-    AlwaysIncomplete,
     /// Treat Incomplete as EOF, convert remaining bytes to Text
-    TreatAsEof,
+    Complete,
 }
 
 /// Zero-copy parse loop that threads Bytes through the parser chain
@@ -41,7 +51,7 @@ fn parse_loop<'a, F>(
     original: &Bytes,
     input: &'a [u8],
     mut parser: F,
-    incomplete_strategy: IncompleteStrategy,
+    incomplete_strategy: ParsingMode,
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>
 where
     F: FnMut(&Bytes, &'a [u8]) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>,
@@ -62,7 +72,7 @@ where
             }
             Err(nom::Err::Incomplete(needed)) => {
                 return match incomplete_strategy {
-                    IncompleteStrategy::Streaming => {
+                    ParsingMode::Streaming => {
                         // Return accumulated results or propagate Incomplete
                         if result.is_empty() {
                             Err(nom::Err::Incomplete(needed))
@@ -70,11 +80,7 @@ where
                             Ok((remaining, result))
                         }
                     }
-                    IncompleteStrategy::AlwaysIncomplete => {
-                        // Always propagate Incomplete (for delimited content)
-                        Err(nom::Err::Incomplete(needed))
-                    }
-                    IncompleteStrategy::TreatAsEof => {
+                    ParsingMode::Complete => {
                         // Treat remaining bytes as text - ZERO COPY!
                         if !remaining.is_empty() {
                             result.push(Element::Text(slice_as_bytes(original, remaining)));
@@ -106,37 +112,14 @@ where
 /// lib.rs must handle Incomplete by reading more data into the buffer
 /// ZERO-COPY: Returns Bytes slices that reference the original buffer (no copying!)
 pub fn parse(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    parse_loop(
-        input,
-        input.as_ref(),
-        element,
-        IncompleteStrategy::Streaming,
-    )
+    parse_loop(input, input.as_ref(), element, ParsingMode::Streaming)
 }
 
-/// Parse delimited content (content between opening/closing tags)
-/// Internal helper for parsing content within ESI tags
-fn parse_delimited<'a>(
-    original: &Bytes,
-    input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    parse_loop(
-        original,
-        input,
-        element,
-        IncompleteStrategy::AlwaysIncomplete,
-    )
-}
-
+/// Parse complete document (treats Incomplete as EOF and converts to text)
 /// Wrapper for complete input (tests) - treats Incomplete as "done parsing"
 /// ZERO-COPY: Returns Bytes slices that reference the original buffer (no copying!)
 pub fn parse_complete(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    parse_loop(
-        input,
-        input.as_ref(),
-        element,
-        IncompleteStrategy::TreatAsEof,
-    )
+    parse_loop(input, input.as_ref(), element, ParsingMode::Complete)
 }
 
 // ============================================================================
@@ -1405,17 +1388,56 @@ exception!
 
     #[test]
     fn test_parse_logical_operators() {
-        // NOTE: Disabled with streaming parsers - see test_parse_comparison_operators
+        // With parentheses to enforce correct precedence
+        let input = b"($(foo) == 'bar') && ($(baz) == 'qux')";
+        let (rest, result) = expr(input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::And,
+                ..
+            }
+        ));
+
+        let input2 = b"($(foo) == 'bar') || ($(baz) == 'qux')";
+        let (rest, result) = expr(input2).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::Or,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn test_parse_negation() {
-        // NOTE: Disabled with streaming parsers - see test_parse_comparison_operators
+        let input = b"!$(flag)";
+        let (rest, result) = expr(input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(result, Expr::Not(_)));
+
+        // Test negation with comparison
+        let input2 = b"!($(foo) == 'bar')";
+        let (rest, result) = expr(input2).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(result, Expr::Not(_)));
     }
 
     #[test]
     fn test_parse_grouped_expressions() {
-        // NOTE: Disabled with streaming parsers - see test_parse_comparison_operators
+        let input = b"($(foo) == 'bar')";
+        let (rest, result) = expr(input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert!(matches!(
+            result,
+            Expr::Comparison {
+                operator: Operator::Equals,
+                ..
+            }
+        ));
     }
 }
 

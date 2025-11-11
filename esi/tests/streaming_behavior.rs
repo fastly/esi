@@ -157,14 +157,26 @@ fn test_delimited_propagates_incomplete() {
 }
 
 #[test]
-#[ignore] // This test uses nom combinators directly which doesn't work with &Bytes API
 fn test_delimited_with_parse_complete_middle() {
-    // Note: This test can't work with the new &Bytes API since nom combinators
-    // require &[u8] as input type. The important behavior (parse_delimited for
-    // delimited content) is tested elsewhere.
+    // This test validates that parse_complete inside delimited() will cause
+    // delimited() to return Incomplete when the closing tag is missing.
+    // While the original test used nom combinators directly, we can test
+    // the same concept by ensuring incomplete input returns Incomplete.
 
-    // The test was meant to demonstrate parse_complete behavior with delimited()
-    // but our API now properly uses parse_delimited() internally for this purpose.
+    use bytes::Bytes;
+
+    // Test case: incomplete closing tag
+    let input = Bytes::from_static(b"<esi:choose><esi:when test=\"true\">yes</esi:when>");
+    //                                                               ↑ Missing </esi:choose>
+
+    // parse() should return Incomplete because closing tag is missing
+    let result = parse(&input);
+
+    assert!(
+        matches!(result, Err(nom::Err::Incomplete(_))),
+        "Expected Incomplete from missing closing tag, got: {:?}",
+        result
+    );
 }
 
 #[test]

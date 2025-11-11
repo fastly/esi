@@ -349,6 +349,8 @@ impl From<String> for Value {
 
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
+        // Copy the string data into a Bytes buffer
+        // This is necessary because we can't guarantee the lifetime of &str
         Self::Text(Bytes::copy_from_slice(s.as_bytes()))
     }
 }
