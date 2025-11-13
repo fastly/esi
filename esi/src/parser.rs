@@ -3,7 +3,7 @@ use nom::branch::alt;
 // Using STREAMING parsers - they return Incomplete when they need more data
 // This enables TRUE bounded-memory streaming
 use nom::bytes::streaming::{
-    is_not, tag, tag_no_case, take, take_until, take_while, take_while1, take_while_m_n,
+    tag, tag_no_case, take, take_until, take_while, take_while1, take_while_m_n,
 };
 use nom::character::streaming::{alpha1, multispace0, multispace1};
 use nom::combinator::{map, map_res, not, opt, peek, recognize};
@@ -561,8 +561,8 @@ fn esi_vars_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     )(input)
 }
 
-// Parser for content inside esi:vars - handles text, expressions, and most ESI tags (except nested vars)
-// NOTE: Supports nested variable expressions like $(VAR{$(other)}) as of the nom migration
+// Parser for content inside esi:vars - handles text, expressions, and ESI tags
+// NOTE: Supports nested variable expressions like $(VAR{$(other)})
 fn esi_vars_content<'a>(
     original: &Bytes,
     input: &'a [u8],
@@ -673,7 +673,18 @@ fn attributes(input: &[u8]) -> IResult<&[u8], Vec<(String, String)>, Error<&[u8]
 }
 
 fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    delimited(tag(b"\""), is_not(&b"\""[..]), tag(b"\""))(input)
+    alt((
+        delimited(
+            double_quote,
+            take_while(|c| !is_double_quote(c)),
+            double_quote,
+        ),
+        delimited(
+            single_quote,
+            take_while(|c| !is_single_quote(c)),
+            single_quote,
+        ),
+    ))(input)
 }
 
 // Used by parse_interpolated - zero-copy with original Bytes reference
@@ -695,6 +706,8 @@ fn interpolated_text<'a>(
 fn closing_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     tag(b">")(input)
 }
+
+/// Helper to find and consume the closing self-closing tag characters '/>'
 #[inline]
 fn self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     tag(b"/>")(input)
@@ -704,6 +717,28 @@ fn self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 #[inline]
 fn opening_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     tag(b"<")(input)
+}
+
+/// Helper to find and consume the closing double quote character
+#[inline]
+fn double_quote(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    tag(b"\"")(input)
+}
+
+/// Helper to find and consume the closing single quote character
+#[inline]
+fn single_quote(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    tag(b"\'")(input)
+}
+
+#[inline]
+fn is_double_quote(b: u8) -> bool {
+    b == b'\"'
+}
+
+#[inline]
+fn is_single_quote(b: u8) -> bool {
+    b == b'\''
 }
 
 /// Check if byte can start an HTML/XML tag name (including special constructs like <!--, <!DOCTYPE, <![CDATA[)
@@ -1246,53 +1281,20 @@ exception!
     }
 
     #[test]
-    fn test_nested_vars_not_supported() {
-        // This test documents that nested <esi:vars> are explicitly NOT supported
-        // The inner <esi:vars> tag will be treated as text
+    fn test_nested_vars() {
+        // Nested <esi:vars> tags ARE supported - the inner vars tag is parsed recursively
         let input = br#"<esi:vars>outer<esi:vars>inner</esi:vars></esi:vars>"#;
         let bytes = Bytes::from_static(input);
-        let result = parse_complete(&bytes);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
 
-        // The parser should either:
-        // 1. Fail to parse completely (leaving remainder), OR
-        // 2. Parse the outer vars but treat inner vars as text
-        match result {
-            Ok((rest, elements)) => {
-                // If it parses, check that we either have remaining input
-                // or the inner <esi:vars> is treated as text
-                if rest.is_empty() {
-                    // Inner vars should be treated as text/HTML
-                    eprintln!("Parsed elements: {:?}", elements);
-                    // We expect the text "outer<esi:vars>inner" to be captured somehow
-                    assert!(
-                        elements.iter().any(|c| {
-                            if let Element::Text(t) = c {
-                                let needle = b"inner";
-                                t.windows(needle.len()).any(|w| w == needle)
-                            } else {
-                                false
-                            }
-                        }),
-                        "Inner <esi:vars> content should be present as text"
-                    );
-                } else {
-                    // Parser stopped early - this is acceptable behavior
-                    eprintln!(
-                        "Parser stopped with remaining: {:?}",
-                        String::from_utf8_lossy(rest)
-                    );
-                    let needle = b"<esi:vars>";
-                    assert!(
-                        rest.windows(needle.len()).any(|w| w == needle),
-                        "Remaining should include the problematic nested vars"
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("Parser error (expected): {:?}", e);
-                // Parsing error is also acceptable
-            }
-        }
+        assert_eq!(rest.len(), 0, "Should parse completely");
+        assert_eq!(
+            elements,
+            [
+                Element::Text(Bytes::from_static(b"outer")),
+                Element::Text(Bytes::from_static(b"inner")),
+            ]
+        );
     }
     #[test]
     fn test_new_parse_complex_expr() {
@@ -1526,5 +1528,33 @@ exception!
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_single_quoted_attributes() {
+        // Test single-quoted attributes
+        let input = b"<esi:include src='http://example.com/fragment' />";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0, "Should parse completely");
+        assert_eq!(elements.len(), 1);
+        if let Element::Esi(Tag::Include { src, .. }) = &elements[0] {
+            assert_eq!(src.as_ref(), b"http://example.com/fragment");
+        } else {
+            panic!("Expected Include tag");
+        }
+
+        // Test mixed quotes
+        let input2 = b"<esi:assign name='foo' value=\"bar\" />";
+        let bytes2 = Bytes::from_static(input2);
+        let (rest, elements) = parse_complete(&bytes2).unwrap();
+        assert_eq!(rest.len(), 0, "Should parse completely");
+        assert_eq!(elements.len(), 1);
+        if let Element::Esi(Tag::Assign { name, value }) = &elements[0] {
+            assert_eq!(name, "foo");
+            assert_eq!(value, &Expr::String(Some("bar".to_string())));
+        } else {
+            panic!("Expected Assign tag");
+        }
     }
 }
