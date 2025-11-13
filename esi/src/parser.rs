@@ -3,7 +3,7 @@ use nom::branch::alt;
 // Using STREAMING parsers - they return Incomplete when they need more data
 // This enables TRUE bounded-memory streaming
 use nom::bytes::streaming::{
-    tag, tag_no_case, take, take_until, take_while, take_while1, take_while_m_n,
+    tag, tag_no_case, take, take_till, take_until, take_while, take_while1, take_while_m_n,
 };
 use nom::character::streaming::{alpha1, multispace0, multispace1};
 use nom::combinator::{map, map_res, not, opt, peek, recognize};
@@ -245,7 +245,7 @@ fn esi_assign<'a>(
     alt((esi_assign_short, |i| esi_assign_long(original, i)))(input)
 }
 
-fn parse_assign_attributes_short(attrs: Vec<(String, String)>) -> Vec<Element> {
+fn assign_attributes_short(attrs: Vec<(String, String)>) -> Vec<Element> {
     let mut name = String::new();
     let mut value_str = String::new();
     for (key, val) in attrs {
@@ -269,7 +269,7 @@ fn parse_assign_attributes_short(attrs: Vec<(String, String)>) -> Vec<Element> {
     vec![Element::Esi(Tag::Assign { name, value })]
 }
 
-fn parse_assign_long(attrs: Vec<(String, String)>, content: Vec<Element>) -> Vec<Element> {
+fn assign_long(attrs: Vec<(String, String)>, content: Vec<Element>) -> Vec<Element> {
     let mut name = String::new();
     for (key, val) in attrs {
         if key == "name" {
@@ -316,7 +316,7 @@ fn esi_assign_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> 
             attributes,
             preceded(multispace0, self_closing),
         ),
-        parse_assign_attributes_short,
+        assign_attributes_short,
     )(input)
 }
 
@@ -334,7 +334,7 @@ fn esi_assign_long<'a>(
             |i| parse_interpolated(original, i),
             tag(b"</esi:assign>"),
         )),
-        |(attrs, content, _)| parse_assign_long(attrs, content),
+        |(attrs, content, _)| assign_long(attrs, content),
     )(input)
 }
 
@@ -448,9 +448,7 @@ fn esi_when<'a>(
     )(input)
 }
 
-// Removed - use parse_complete() directly for delimited content
-
-// Zero-copy version used by both esi_tag and esi_tag_old (via parse_interpolated)
+/// Zero-copy parser for <esi:choose>...</esi:choose>
 fn esi_choose<'a>(
     original: &Bytes,
     input: &'a [u8],
@@ -732,6 +730,11 @@ fn single_quote(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 }
 
 #[inline]
+fn is_closing_bracket(b: u8) -> bool {
+    b == b'>'
+}
+
+#[inline]
 fn is_double_quote(b: u8) -> bool {
     b == b'\"'
 }
@@ -807,10 +810,14 @@ fn tag_handler<'a>(
                 _ if name.eq_ignore_ascii_case(b"script") => html_script_tag(original, start),
 
                 // Regular HTML tag - continue parsing from where we left off
-                // (we've already consumed `<tagname`, just need to find `>`)
                 _ => {
-                    let (input, _) = take_until(b">".as_ref())(input)?;
+                    // we've already consumed `<tagname`, let's find `>`
+                    // Consume everything up to '>'
+                    let (input, _) = take_till(is_closing_bracket)(input)?;
+                    //  Consume the '>' itself
                     let (input, _) = closing_bracket(input)?;
+
+                    // Calculate the full tag from start (includes `<tagname...>`)
                     let full_tag = &start[..start.len() - input.len()];
 
                     Ok((
@@ -845,43 +852,35 @@ fn script_content(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 }
 
 /// script tag parser - input starts at <script
+/// Treats all script tags (inline and external) as HTML elements
 fn html_script_tag<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     let start = input;
-    let (input, _) = tag_no_case(b"<script")(input)?;
-    let (input, attrs) = attributes(input)?;
-    let (input, _) = closing_bracket(input)?;
-    let opening = &start[..start.len() - input.len()];
 
-    let has_src = attrs.iter().any(|(k, _)| k == "src");
+    // Parse opening tag
+    let (input, _) = recognize(delimited(
+        tag_no_case(b"<script"),
+        take_till(is_closing_bracket),
+        closing_bracket,
+    ))(input)?;
 
-    if has_src {
-        // External script - return just the opening tag as HTML
-        return Ok((
-            input,
-            vec![Element::Html(slice_as_bytes(original, opening))],
-        ));
-    }
+    // Parse content (if any) and closing tag (if any)
+    let (input, _) = opt(tuple((
+        script_content,
+        recognize(delimited(
+            tag_no_case(b"</script"),
+            multispace0,
+            closing_bracket,
+        )),
+    )))(input)?;
 
-    // Inline script - find closing </script> tag (case insensitive)
-    let (input, content) = script_content(input)?;
-
-    // Parse closing tag
-    let closing_start = input;
-    let (input, _) = tag_no_case(b"</script")(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, _) = closing_bracket(input)?;
-    let closing = &closing_start[..closing_start.len() - input.len()];
-
+    // Return entire script tag as single HTML element
+    let full_script = &start[..start.len() - input.len()];
     Ok((
         input,
-        vec![
-            Element::Html(slice_as_bytes(original, opening)),
-            Element::Text(slice_as_bytes(original, content)),
-            Element::Html(slice_as_bytes(original, closing)),
-        ],
+        vec![Element::Html(slice_as_bytes(original, full_script))],
     ))
 }
 
@@ -930,18 +929,18 @@ fn is_lower_alphanumeric_or_underscore(c: u8) -> bool {
     c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_'
 }
 
-fn fn_name(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
+fn esi_fn_name(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
         preceded(tag(b"$"), take_while1(is_lower_alphanumeric_or_underscore)),
         bytes_to_string,
     )(input)
 }
 
-fn var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn esi_var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map(
         tuple((
             take_while1(is_alphanumeric_or_underscore),
-            opt(delimited(tag(b"{"), var_key_expr, tag(b"}"))),
+            opt(delimited(tag(b"{"), esi_var_key_expr, tag(b"}"))),
             opt(preceded(tag(b"|"), fn_nested_argument)),
         )),
         |(name, key, default): (&[u8], _, _)| {
@@ -964,7 +963,11 @@ fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
 // TODO: handle escaping
 fn single_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        delimited(tag(b"'"), take_while(|c| c != b'\''), tag(b"'")),
+        delimited(
+            single_quote,
+            take_while(|c| !is_single_quote(c)),
+            single_quote,
+        ),
         bytes_to_string,
     )(input)
 }
@@ -996,11 +999,11 @@ fn var_key(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     ))(input)
 }
 
-// Parse subscript key - can be a string or a nested variable expression
-fn var_key_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+/// Parse subscript key - can be a string or a nested variable expression
+fn esi_var_key_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     alt((
         // Try to parse as a variable first (e.g., $(keyVar))
-        variable,
+        esi_variable,
         // Otherwise parse as a string
         map(var_key, |s: String| Expr::String(Some(s))),
     ))(input)
@@ -1020,7 +1023,7 @@ fn fn_argument(input: &[u8]) -> IResult<&[u8], Vec<Expr>, Error<&[u8]>> {
 }
 
 fn fn_nested_argument(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    alt((call, variable, string, integer, bareword))(input)
+    alt((esi_function, esi_variable, string, integer, bareword))(input)
 }
 
 fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
@@ -1040,9 +1043,9 @@ fn bareword(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     )(input)
 }
 
-fn call(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+fn esi_function(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (input, parsed) = tuple((
-        fn_name,
+        esi_fn_name,
         delimited(
             terminated(tag(b"("), multispace0),
             fn_argument,
@@ -1055,8 +1058,8 @@ fn call(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     Ok((input, Expr::Call(name, args)))
 }
 
-fn variable(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    delimited(tag(b"$("), var_name, tag(b")"))(input)
+fn esi_variable(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+    delimited(tag(b"$("), esi_var_name, tag(b")"))(input)
 }
 
 fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
@@ -1076,7 +1079,9 @@ fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
 }
 
 fn interpolated_expression(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    map(alt((call, variable)), |expr| vec![Element::Expr(expr)])(input)
+    map(alt((esi_function, esi_variable)), |expr| {
+        vec![Element::Expr(expr)]
+    })(input)
 }
 
 fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
@@ -1093,8 +1098,8 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
             tag(b")"),
         ),
         // Parse basic expressions
-        call,
-        variable,
+        esi_function,
+        esi_variable,
         integer,
         string,
     ))(input)
@@ -1164,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_parse() {
+    fn test_parse() {
         let input = br#"
 <a>foo</a>
 <bar />
@@ -1221,35 +1226,33 @@ exception!
         }
     }
     #[test]
-    fn test_new_parse_script() {
+    fn test_parse_script() {
         let input = b"<sCripT> less < more </scRIpt>";
         let bytes = Bytes::from_static(input);
         let (rest, x) = html_script_tag(&bytes, input).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
-            [
-                Element::Html(Bytes::from_static(b"<sCripT>")),
-                Element::Text(Bytes::from_static(b" less < more ")),
-                Element::Html(Bytes::from_static(b"</scRIpt>"))
-            ]
-        );
-    }
-    #[test]
-    fn test_new_parse_script_with_src() {
-        let input = b"<sCripT src=\"whatever\">";
-        let bytes = Bytes::from_static(input);
-        let (rest, x) = parse_complete(&bytes).unwrap();
-        assert_eq!(rest.len(), 0);
-        assert_eq!(
-            x,
             [Element::Html(Bytes::from_static(
-                b"<sCripT src=\"whatever\">"
+                b"<sCripT> less < more </scRIpt>"
             ))]
         );
     }
     #[test]
-    fn test_new_parse_esi_vars_short() {
+    fn test_parse_script_with_src() {
+        let input = b"<sCripT src=\"whatever\"></sCripT>";
+        let bytes = Bytes::from_static(input);
+        let (rest, x) = html_script_tag(&bytes, input).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(
+            x,
+            [Element::Html(Bytes::from_static(
+                b"<sCripT src=\"whatever\"></sCripT>"
+            ))]
+        );
+    }
+    #[test]
+    fn test_parse_esi_vars_short() {
         let input = br#"<esi:vars name="$(hello)"/>"#;
         let bytes = Bytes::from_static(input);
         let (rest, x) = esi_vars(&bytes, input).unwrap();
@@ -1264,7 +1267,7 @@ exception!
         );
     }
     #[test]
-    fn test_new_parse_esi_vars_long() {
+    fn test_parse_esi_vars_long() {
         // Nested <esi:vars> tags are not supported to prevent infinite recursion
         // The inner <esi:vars> tags should be treated as plain text/HTML
         let input = br#"<esi:vars>hello<br></esi:vars>"#;
@@ -1297,7 +1300,7 @@ exception!
         );
     }
     #[test]
-    fn test_new_parse_complex_expr() {
+    fn test_parse_complex_expr() {
         let input = br#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#;
         let bytes = Bytes::from_static(input);
         let (rest, x) = parse_complete(&bytes).unwrap();
@@ -1396,7 +1399,7 @@ exception!
     }
 
     #[test]
-    fn test_new_parse_plain_text() {
+    fn test_parse_plain_text() {
         let input = b"hello\nthere";
         let bytes = Bytes::from_static(input);
         let (rest, x) = parse_complete(&bytes).unwrap();
@@ -1404,7 +1407,7 @@ exception!
         assert_eq!(x, [Element::Text(Bytes::from_static(b"hello\nthere"))]);
     }
     #[test]
-    fn test_new_parse_interpolated() {
+    fn test_parse_interpolated() {
         let input = b"hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>";
         let bytes = Bytes::from_static(input);
         let (rest, x) = parse_complete(&bytes).unwrap();
@@ -1419,7 +1422,7 @@ exception!
         );
     }
     #[test]
-    fn test_new_parse_examples() {
+    fn test_parse_examples() {
         let input = include_bytes!("../../examples/esi_vars_example/src/index.html");
         let bytes = Bytes::from_static(input);
         let (rest, _) = parse_complete(&bytes).unwrap();
