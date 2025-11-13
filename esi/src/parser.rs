@@ -2,11 +2,13 @@ use bytes::Bytes;
 use nom::branch::alt;
 // Using STREAMING parsers - they return Incomplete when they need more data
 // This enables TRUE bounded-memory streaming
-use nom::bytes::streaming::{is_not, tag, tag_no_case, take, take_until, take_while, take_while1};
+use nom::bytes::streaming::{
+    is_not, tag, tag_no_case, take, take_until, take_while, take_while1, take_while_m_n,
+};
 use nom::character::streaming::{alpha1, multispace0, multispace1};
-use nom::combinator::{map, map_res, not, opt, peek, recognize, success, verify};
+use nom::combinator::{map, map_res, not, opt, peek, recognize};
 use nom::error::Error;
-use nom::multi::{fold_many0, many0, many1, many_till, separated_list0};
+use nom::multi::{fold_many0, many0, many_till, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 
@@ -202,16 +204,12 @@ pub fn parse_interpolated_string(input: &Bytes) -> IResult<&[u8], Vec<Element>, 
     }
 }
 
-/// Zero-copy element parser - dispatches to text/esi_tag/html
+/// Zero-copy element parser - dispatches to text or tag_dispatch
 fn element<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    alt((
-        |i| text(original, i),
-        |i| esi_tag(original, i),
-        |i| html(original, i),
-    ))(input)
+    alt((|i| text(original, i), |i| tag_handler(original, i)))(input)
 }
 
 fn parse_interpolated<'a>(
@@ -235,29 +233,8 @@ fn interpolated_element<'a>(
     alt((
         |i| interpolated_text(original, i),
         interpolated_expression,
-        |i| esi_tag(original, i),
-        |i| html(original, i),
-    ))(input)
-}
-
-/// Zero-copy ESI tag parser
-fn esi_tag<'a>(
-    original: &Bytes,
-    input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    alt((
-        |i| esi_assign(original, i),
-        |i| esi_include(i), // No raw content
-        |i| esi_vars(original, i),
-        |i| esi_comment(i), // No content returned
-        |i| esi_remove(original, i),
-        |i| esi_text(original, i),
-        |i| esi_choose(original, i),
-        |i| esi_try(original, i),
-        |i| esi_when(original, i),
-        |i| esi_otherwise(original, i),
-        |i| esi_attempt(original, i),
-        |i| esi_except(original, i),
+        // |i| esi_tag(original, i),
+        |i| tag_handler(original, i),
     ))(input)
 }
 
@@ -337,7 +314,7 @@ fn esi_assign_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> 
         delimited(
             tag(b"<esi:assign"),
             attributes,
-            preceded(multispace0, tag("/>")),
+            preceded(multispace0, self_closing),
         ),
         parse_assign_attributes_short,
     )(input)
@@ -352,7 +329,7 @@ fn esi_assign_long<'a>(
             delimited(
                 tag(b"<esi:assign"),
                 attributes,
-                preceded(multispace0, tag(b">")),
+                preceded(multispace0, closing_bracket),
             ),
             |i| parse_interpolated(original, i),
             tag(b"</esi:assign>"),
@@ -446,7 +423,7 @@ fn esi_when<'a>(
             delimited(
                 tag(b"<esi:when"),
                 attributes,
-                preceded(multispace0, alt((tag(b">"), tag(b"/>")))),
+                preceded(multispace0, alt((closing_bracket, self_closing))),
             ),
             |i| parse_interpolated(original, i),
             tag(b"</esi:when>"),
@@ -578,36 +555,15 @@ fn esi_vars_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         delimited(
             tag(b"<esi:vars"),
             attributes,
-            preceded(multispace0, tag("/>")), // Short form must be self-closing per ESI spec
+            preceded(multispace0, self_closing), // Short form must be self-closing per ESI spec
         ),
         parse_vars_attributes,
     )(input)
 }
 
-// Parser for ESI tags that can appear inside vars (everything except vars itself to avoid recursion)
-fn esi_tag_non_vars<'a>(
-    original: &Bytes,
-    input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    alt((
-        |i| esi_assign(original, i),
-        esi_include,
-        // esi_vars,  // Excluded to prevent infinite recursion
-        esi_comment,
-        |i| esi_remove(original, i),
-        |i| esi_text(original, i),
-        |i| esi_choose(original, i),
-        |i| esi_try(original, i),
-        |i| esi_when(original, i),
-        |i| esi_otherwise(original, i),
-        |i| esi_attempt(original, i),
-        |i| esi_except(original, i),
-    ))(input)
-}
-
 // Parser for content inside esi:vars - handles text, expressions, and most ESI tags (except nested vars)
 // NOTE: Supports nested variable expressions like $(VAR{$(other)}) as of the nom migration
-fn parse_vars_content<'a>(
+fn esi_vars_content<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
@@ -615,8 +571,7 @@ fn parse_vars_content<'a>(
         alt((
             |i| interpolated_text(original, i),
             interpolated_expression,
-            |i| esi_tag_non_vars(original, i),
-            |i| html(original, i),
+            |i| tag_handler(original, i),
         )),
         Vec::new,
         |mut acc: Vec<Element>, mut item| {
@@ -632,7 +587,7 @@ fn esi_vars_long<'a>(
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     // Use parse_vars_content instead of parse_interpolated to avoid infinite recursion
     let (input, _) = tag(b"<esi:vars>")(input)?;
-    let (input, elements) = parse_vars_content(original, input)?;
+    let (input, elements) = esi_vars_content(original, input)?;
     let (input, _) = tag(b"</esi:vars>")(input)?;
 
     Ok((input, elements))
@@ -643,7 +598,7 @@ fn esi_comment(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         delimited(
             tag(b"<esi:comment"),
             attributes,
-            preceded(multispace0, alt((tag(b">"), tag("/>")))),
+            preceded(multispace0, self_closing), // ESI comment must be self-closing per ESI spec
         ),
         |_| vec![],
     )(input)
@@ -678,7 +633,7 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
         delimited(
             tag(b"<esi:include"),
             attributes,
-            preceded(multispace0, alt((tag(b">"), tag("/>")))),
+            preceded(multispace0, alt((closing_bracket, self_closing))),
         ),
         |attrs| {
             let mut src = Bytes::new();
@@ -726,51 +681,180 @@ fn interpolated_text<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    map(recognize(many1(is_not(&b"<$"[..]))), |s: &[u8]| {
-        vec![Element::Text(slice_as_bytes(original, s))]
-    })(input)
+    map(
+        recognize(take_while1(|c| !is_opening_bracket(c) && !is_dollar(c))),
+        |s: &[u8]| vec![Element::Text(slice_as_bytes(original, s))],
+    )(input)
 }
 
 // ============================================================================
 // Zero-Copy HTML/Text Parsers
 // ============================================================================
+/// Helper to find and consume the closing '>' character
+#[inline]
+fn closing_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    tag(b">")(input)
+}
+#[inline]
+fn self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    tag(b"/>")(input)
+}
 
-fn html<'a>(original: &Bytes, input: &'a [u8]) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    alt((
-        |i| script(original, i),
-        |i| end_tag(original, i),
-        |i| start_tag(original, i),
+/// Helper to find and consume the opening '<' character
+#[inline]
+fn opening_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    tag(b"<")(input)
+}
+
+/// Check if byte can start an HTML/XML tag name (including special constructs like <!--, <!DOCTYPE, <![CDATA[)
+#[inline]
+fn is_tag_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'!'
+}
+
+/// Check if byte can continue an HTML/XML tag name
+#[inline]
+fn is_tag_cont(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'[')
+}
+
+/// Parse an HTML/XML-style tag name.
+/// Returns the subslice of the original input containing only the tag name.
+#[inline]
+fn tag_name(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    recognize(nom::sequence::pair(
+        take_while_m_n(1, 1, is_tag_start), // first letter
+        take_while(is_tag_cont),            // rest of name
     ))(input)
 }
 
-fn script<'a>(
+// ============================================================================
+// Unified Tag Dispatcher
+// ============================================================================
+
+/// Single dispatcher for ALL tags - ESI, HTML script, comments, regular HTML
+/// Parses tag name once, then dispatches to specific handlers
+fn tag_handler<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    alt((
+        // Try HTML comment first (special syntax `<!--`)
+        |i| html_comment_content(original, i),
+        // Try closing tag (starts with `</`)
+        |i| closing_tag(original, i),
+        // Try opening tags (parses tag name once, then dispatches)
+        |i| {
+            let start = i;
+
+            // Parse opening bracket and tag name ONCE
+            let (input, _) = opening_bracket(i)?;
+            let (input, name) = tag_name(input)?;
+
+            // Dispatch based on tag name without re-parsing
+            match name {
+                // ESI tags - pass start position to parse from <esi:tagname
+                b"esi:assign" => esi_assign(original, start),
+                b"esi:include" => esi_include(start),
+                b"esi:vars" => esi_vars(original, start),
+                b"esi:comment" => esi_comment(start),
+                b"esi:remove" => esi_remove(original, start),
+                b"esi:text" => esi_text(original, start),
+                b"esi:choose" => esi_choose(original, start),
+                b"esi:try" => esi_try(original, start),
+                b"esi:when" => esi_when(original, start),
+                b"esi:otherwise" => esi_otherwise(original, start),
+                b"esi:attempt" => esi_attempt(original, start),
+                b"esi:except" => esi_except(original, start),
+
+                // Special HTML tags - pass start to re-parse from beginning
+                // (script needs to check attributes, so easier to re-parse than continue)
+                _ if name.eq_ignore_ascii_case(b"script") => html_script_tag(original, start),
+
+                // Regular HTML tag - continue parsing from where we left off
+                // (we've already consumed `<tagname`, just need to find `>`)
+                _ => {
+                    let (input, _) = take_until(b">".as_ref())(input)?;
+                    let (input, _) = closing_bracket(input)?;
+                    let full_tag = &start[..start.len() - input.len()];
+
+                    Ok((
+                        input,
+                        vec![Element::Html(slice_as_bytes(original, full_tag))],
+                    ))
+                }
+            }
+        },
+    ))(input)
+}
+
+/// Parse HTML comment - input starts at <!--
+fn html_comment_content<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     map(
-        tuple((
-            recognize(verify(
-                delimited(tag_no_case(b"<script"), attributes, tag(b">")),
-                |attrs: &Vec<(String, String)>| !attrs.iter().any(|(k, _)| k == "src"),
-            )),
-            recognize(many_till(take(1usize), peek(tag_no_case(b"</script")))),
-            recognize(delimited(
-                tag_no_case(b"</script"),
-                alt((is_not(&b">"[..]), success(&b""[..]))),
-                tag(b">"),
-            )),
+        recognize(delimited(
+            tag(b"<!--"),
+            take_until(b"-->".as_ref()),
+            tag(b"-->"),
         )),
-        |(start, script, end)| {
-            vec![
-                Element::Html(slice_as_bytes(original, start)),
-                Element::Text(slice_as_bytes(original, script)),
-                Element::Html(slice_as_bytes(original, end)),
-            ]
-        },
+        |s: &[u8]| vec![Element::Html(slice_as_bytes(original, s))],
     )(input)
 }
 
-fn end_tag<'a>(
+/// Helper to find closing script tag, handling any content including other closing tags
+/// Looks for </script (case insensitive) and returns content before it  
+fn script_content(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    recognize(many_till(take(1usize), peek(tag_no_case(b"</script"))))(input)
+}
+
+/// script tag parser - input starts at <script
+fn html_script_tag<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+    let start = input;
+    let (input, _) = tag_no_case(b"<script")(input)?;
+    let (input, attrs) = attributes(input)?;
+    let (input, _) = closing_bracket(input)?;
+    let opening = &start[..start.len() - input.len()];
+
+    let has_src = attrs.iter().any(|(k, _)| k == "src");
+
+    if has_src {
+        // External script - return just the opening tag as HTML
+        return Ok((
+            input,
+            vec![Element::Html(slice_as_bytes(original, opening))],
+        ));
+    }
+
+    // Inline script - find closing </script> tag (case insensitive)
+    let (input, content) = script_content(input)?;
+
+    // Parse closing tag
+    let closing_start = input;
+    let (input, _) = tag_no_case(b"</script")(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = closing_bracket(input)?;
+    let closing = &closing_start[..closing_start.len() - input.len()];
+
+    Ok((
+        input,
+        vec![
+            Element::Html(slice_as_bytes(original, opening)),
+            Element::Text(slice_as_bytes(original, content)),
+            Element::Html(slice_as_bytes(original, closing)),
+        ],
+    ))
+}
+
+// ============================================================================
+// ESI Tag Parsers (continue from where tag_dispatch left off)
+// ============================================================================
+
+fn closing_tag<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
@@ -778,34 +862,35 @@ fn end_tag<'a>(
     let (_, _) = peek(not(tag(b"</esi:")))(input)?;
 
     map(
-        recognize(delimited(tag(b"</"), is_not(&b">"[..]), tag(b">"))),
-        |s: &[u8]| vec![Element::Html(slice_as_bytes(original, s))],
-    )(input)
-}
-
-fn start_tag<'a>(
-    original: &Bytes,
-    input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    // Reject ESI tags and closing tags before trying to parse
-    let (_, _) = peek(not(alt((tag(b"</"), tag(b"<esi:")))))(input)?;
-
-    map(
-        recognize(delimited(tag(b"<"), is_not(&b">"[..]), tag(b">"))),
+        recognize(tuple((tag(b"</"), tag_name, multispace0, closing_bracket))),
         |s: &[u8]| vec![Element::Html(slice_as_bytes(original, s))],
     )(input)
 }
 
 fn text<'a>(original: &Bytes, input: &'a [u8]) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    map(recognize(many1(is_not(&b"<"[..]))), |s: &[u8]| {
-        vec![Element::Text(slice_as_bytes(original, s))]
-    })(input)
+    map(
+        recognize(take_while1(|c| !is_opening_bracket(c))),
+        |s: &[u8]| vec![Element::Text(slice_as_bytes(original, s))],
+    )(input)
 }
 
+/// Check if byte is the opening bracket '<'
+#[inline]
+fn is_opening_bracket(b: u8) -> bool {
+    b == b'<'
+}
+
+/// Check if byte is a dollar sign '$'
+#[inline]
+fn is_dollar(b: u8) -> bool {
+    b == b'$'
+}
+#[inline]
 fn is_alphanumeric_or_underscore(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
 }
 
+#[inline]
 fn is_lower_alphanumeric_or_underscore(c: u8) -> bool {
     c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_'
 }
@@ -1055,7 +1140,7 @@ hello <br>
 </esi:vars>
 <sCripT src="whatever">
 <baz>
-<script> less < more </script>
+<script> less </fuckery more </script>
 <esi:remove>should not appear</esi:remove>
 <esi:comment text="also should not appear" />
 <esi:text> this <esi:vars>$(should)</esi> appear unchanged</esi:text>
@@ -1104,7 +1189,7 @@ exception!
     fn test_new_parse_script() {
         let input = b"<sCripT> less < more </scRIpt>";
         let bytes = Bytes::from_static(input);
-        let (rest, x) = script(&bytes, input).unwrap();
+        let (rest, x) = html_script_tag(&bytes, input).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -1132,7 +1217,7 @@ exception!
     fn test_new_parse_esi_vars_short() {
         let input = br#"<esi:vars name="$(hello)"/>"#;
         let bytes = Bytes::from_static(input);
-        let (rest, x) = esi_tag(&bytes, input).unwrap();
+        let (rest, x) = esi_vars(&bytes, input).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -1293,14 +1378,9 @@ exception!
         let input = br#"<esi:vars>
             $(QUERY_STRING{param})
         </esi:vars>"#;
-        eprintln!(
-            "Testing esi_tag on input: {:?}",
-            String::from_utf8_lossy(input)
-        );
         let bytes = Bytes::from_static(input);
-        let result = esi_tag(&bytes, input);
-        eprintln!("Result: {:?}", result);
-        assert!(result.is_ok(), "esi_tag should parse: {:?}", result.err());
+        let (rest, _result) = esi_vars(&bytes, input).unwrap();
+        assert_eq!(rest.len(), 0, "Parser should consume all input");
     }
 
     #[test]
