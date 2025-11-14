@@ -18,3 +18,8 @@ nom = "7.1.3"
 
 [dev-dependencies]
 env_logger = "^0.11"
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "parser_benchmarks"
+harness = false

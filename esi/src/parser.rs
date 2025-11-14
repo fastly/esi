@@ -1,5 +1,5 @@
 use nom::branch::alt;
-use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_while1};
+use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{alpha1, anychar, char, multispace0, multispace1};
 use nom::combinator::{map, map_res, opt, peek, recognize, success, verify};
 use nom::error::Error;
@@ -500,7 +500,14 @@ fn htmlstring(input: &str) -> IResult<&str, &str, Error<&str>> {
 }
 
 fn html(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
-    alt((script, end_tag, start_tag))(input)
+    alt((html_comment, script, end_tag, start_tag))(input)
+}
+
+fn html_comment(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
+    map(
+        recognize(delimited(tag("<!--"), take_until("-->"), tag("-->"))),
+        |s: &str| vec![Element::Html(s)],
+    )(input)
 }
 
 fn script(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
@@ -1102,5 +1109,32 @@ exception!
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_html_comment() {
+        let input = "<!-- this is a comment -->";
+        let result = html_comment(input);
+        assert!(result.is_ok(), "Failed to parse HTML comment: {:?}", result);
+        let (rest, elements) = result.unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(elements.len(), 1);
+        match &elements[0] {
+            Element::Html(s) => assert_eq!(s, &"<!-- this is a comment -->"),
+            _ => panic!("Expected Html element"),
+        }
+    }
+
+    #[test]
+    fn test_html_comment_in_document() {
+        let input = "<!-- comment --><div>test</div>";
+        let (rest, elements) = parse(input).unwrap();
+        assert_eq!(rest, "");
+        // Comment should be parsed as one element
+        assert!(elements.len() >= 1, "Expected at least 1 element");
+        match &elements[0] {
+            Element::Html(s) => assert_eq!(s, &"<!-- comment -->"),
+            _ => panic!("Expected Html element for comment, got {:?}", &elements[0]),
+        }
     }
 }
