@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 
 pub use crate::error::{ExecutionError as ESIError, Result};
-pub use crate::parser::{parse, parse_complete};
+pub use crate::parser::{parse, parse_complete, parse_expression, parse_interpolated_string};
 
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;

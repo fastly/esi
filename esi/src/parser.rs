@@ -455,10 +455,10 @@ fn esi_choose<'a>(
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     let (input, _) = tag(b"<esi:choose>")(input)?;
     let (input, v) = parse_interpolated(original, input)?;
-    eprintln!(
-        "esi_choose: parse_interpolated returned {} elements",
-        v.len()
-    );
+    // eprintln!(
+    //     "esi_choose: parse_interpolated returned {} elements",
+    //     v.len()
+    // );
     let (input, _) = tag(b"</esi:choose>")(input)?;
 
     let mut when_branches = vec![];
