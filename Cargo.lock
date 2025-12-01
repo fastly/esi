@@ -315,6 +315,7 @@ dependencies = [
  "fastly",
  "html-escape",
  "log",
+ "memchr",
  "nom",
  "regex",
  "thiserror 2.0.17",

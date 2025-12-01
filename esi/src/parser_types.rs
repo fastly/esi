@@ -1,3 +1,29 @@
+/// Parser result that avoids Vec allocation for single elements
+#[derive(Debug, PartialEq, Clone)]
+pub enum ParseResult<'a> {
+    Single(Element<'a>),
+    Multiple(Vec<Element<'a>>),
+    Empty,
+}
+
+impl<'a> ParseResult<'a> {
+    pub fn into_vec(self) -> Vec<Element<'a>> {
+        match self {
+            ParseResult::Single(elem) => vec![elem],
+            ParseResult::Multiple(vec) => vec,
+            ParseResult::Empty => vec![],
+        }
+    }
+
+    pub fn push_to(self, acc: &mut Vec<Element<'a>>) {
+        match self {
+            ParseResult::Single(elem) => acc.push(elem),
+            ParseResult::Multiple(mut vec) => acc.append(&mut vec),
+            ParseResult::Empty => {}
+        }
+    }
+}
+
 /// Represents a single when branch in a choose block
 #[derive(Debug, PartialEq, Clone)]
 pub struct WhenBranch<'a> {

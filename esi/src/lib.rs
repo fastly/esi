@@ -353,7 +353,7 @@ impl Processor {
                     continue_on_error,
                 } => {
                     // Interpolate src using self.ctx
-                    let interpolated_src = try_evaluate_interpolated_string(&src, &mut self.ctx)?;
+                    let interpolated_src = evaluate_interpolated_string(&src, &mut self.ctx)?;
 
                     // Build request
                     let req = build_fragment_request(
@@ -378,7 +378,7 @@ impl Processor {
                                 // Try alt if available
                                 if let Some(alt_src) = alt {
                                     let interpolated_alt =
-                                        try_evaluate_interpolated_string(&alt_src, &mut self.ctx)?;
+                                        evaluate_interpolated_string(&alt_src, &mut self.ctx)?;
                                     let alt_req = build_fragment_request(
                                         self.ctx.get_request().clone_without_body(),
                                         &interpolated_alt,
@@ -565,7 +565,7 @@ impl Processor {
             // Response status is NOT success, either continue, fallback to alt, or fail
             if let Some(alt_src) = alt {
                 debug!("Main request failed, trying alt");
-                let interpolated_alt = try_evaluate_interpolated_string(&alt_src, &mut self.ctx)?;
+                let interpolated_alt = evaluate_interpolated_string(&alt_src, &mut self.ctx)?;
 
                 let alt_req = build_fragment_request(
                     self.ctx.get_request().clone_without_body(),
@@ -671,66 +671,10 @@ fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> 
     Ok(request)
 }
 
-/// Processes a string containing interpolated expressions using a character-based approach
-///
-/// This function evaluates expressions like $(`HTTP_HOST``) in text content and
-/// provides the processed segments to the caller through a callback function.
-///
-/// # Arguments
-/// * `input` - The input string containing potential interpolated expressions
-/// * `ctx` - Evaluation context containing variables and state
-/// * `segment_handler` - A function that handles each segment (raw text or evaluated expression)
-///
-/// # Returns
-/// * `Result<()>` - Success or error during processing
-///
-pub fn process_interpolated_chars<F>(
-    input: &str,
-    ctx: &mut EvalContext,
-    mut segment_handler: F,
-) -> Result<()>
-where
-    F: FnMut(String) -> Result<()>,
-{
-    // Parse the input string with interpolated expressions using nom parser
-    let elements = match crate::parser::parse_interpolated_string(input) {
-        Ok((_, elements)) => elements,
-        Err(_) => {
-            // If parsing fails, treat the whole input as text
-            segment_handler(input.to_string())?;
-            return Ok(());
-        }
-    };
-
-    // Process each element
-    for element in elements {
-        match element {
-            parser_types::Element::Text(text) => {
-                segment_handler(text.to_string())?;
-            }
-            parser_types::Element::Expr(expr) => {
-                // Evaluate the expression using eval_expr
-                match crate::expression::eval_expr(expr, ctx) {
-                    Ok(value) => segment_handler(value.to_string())?,
-                    Err(e) => {
-                        // Log the error but continue processing (same behavior as old code)
-                        debug!("Error while evaluating interpolated expression: {e}");
-                    }
-                }
-            }
-            _ => {
-                // Skip ESI tags (shouldn't happen in interpolated strings but handle gracefully)
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Evaluates all interpolated expressions in a string and returns the complete result
 ///
-/// This is a convenience wrapper around `process_interpolated_chars` that collects
-/// all output into a single string.
+/// This function evaluates expressions like $(HTTP_HOST) in text content and
+/// returns the fully processed string with all expressions evaluated.
 ///
 /// # Arguments
 /// * `input` - The input string containing potential interpolated expressions
@@ -742,13 +686,39 @@ where
 /// # Errors
 /// Returns error if expression evaluation fails
 ///
-pub fn try_evaluate_interpolated_string(input: &str, ctx: &mut EvalContext) -> Result<String> {
+pub fn evaluate_interpolated_string(input: &str, ctx: &mut EvalContext) -> Result<String> {
     let mut result = String::new();
 
-    process_interpolated_chars(input, ctx, |segment| {
-        result.push_str(&segment);
-        Ok(())
-    })?;
+    // Parse the input string with interpolated expressions using nom parser
+    let elements = match crate::parser::parse_interpolated_string(input) {
+        Ok((_, elements)) => elements,
+        Err(_) => {
+            // If parsing fails, treat the whole input as text
+            return Ok(input.to_string());
+        }
+    };
+
+    // Process each element
+    for element in elements {
+        match element {
+            parser_types::Element::Text(text) => {
+                result.push_str(text);
+            }
+            parser_types::Element::Expr(expr) => {
+                // Evaluate the expression using eval_expr
+                match crate::expression::eval_expr(expr, ctx) {
+                    Ok(value) => result.push_str(&value.to_string()),
+                    Err(e) => {
+                        // Log the error but continue processing (same behavior as old code)
+                        debug!("Error while evaluating interpolated expression: {e}");
+                    }
+                }
+            }
+            _ => {
+                // Skip ESI tags (shouldn't happen in interpolated strings but handle gracefully)
+            }
+        }
+    }
 
     Ok(result)
 }
