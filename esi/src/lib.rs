@@ -696,7 +696,7 @@ impl Processor {
             Ok(pending) => {
                 let fragment = Fragment {
                     request: req,
-                    alt: alt.map(|s| s.clone()),
+                    alt: alt.cloned(),
                     continue_on_error,
                     pending_content: pending,
                 };

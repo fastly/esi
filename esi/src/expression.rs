@@ -323,22 +323,6 @@ impl Value {
             Self::Null => Bytes::new(),
         }
     }
-
-    /// Convert Value to string for display/processing
-    pub(crate) fn to_string(&self) -> String {
-        match self {
-            Self::Integer(i) => i.to_string(),
-            Self::Text(b) => String::from_utf8_lossy(b.as_ref()).into_owned(),
-            Self::Boolean(b) => {
-                if *b {
-                    "true".to_string()
-                } else {
-                    "false".to_string()
-                }
-            }
-            Self::Null => String::new(), // Empty string, not "null"
-        }
-    }
 }
 
 impl From<String> for Value {
@@ -363,7 +347,12 @@ impl From<Bytes> for Value {
 
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        match self {
+            Self::Integer(i) => write!(f, "{}", i),
+            Self::Text(b) => write!(f, "{}", String::from_utf8_lossy(b.as_ref())),
+            Self::Boolean(b) => write!(f, "{}", if *b { "true" } else { "false" }),
+            Self::Null => Ok(()), // Empty string for Null
+        }
     }
 }
 
