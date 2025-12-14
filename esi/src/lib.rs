@@ -810,10 +810,10 @@ impl Processor {
     ) -> Result<()> {
         while !self.queue.is_empty() {
             // First, write out any content that's at the front
-            while let Some(QueuedElement::Content(bytes)) = self.queue.front() {
-                let bytes = bytes.clone();
-                self.queue.pop_front();
-                output_writer.write_all(&bytes)?;
+            while let Some(QueuedElement::Content(_)) = self.queue.front() {
+                if let Some(QueuedElement::Content(bytes)) = self.queue.pop_front() {
+                    output_writer.write_all(&bytes)?;
+                }
             }
 
             if self.queue.is_empty() {
@@ -1011,7 +1011,6 @@ impl Processor {
         dispatcher: &FragmentRequestDispatcher,
         processor: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
-        let alt = fragment.alt.clone();
         let continue_on_error = fragment.continue_on_error;
 
         // Wait for response
@@ -1031,7 +1030,7 @@ impl Processor {
             // Write Bytes directly - no UTF-8 conversion needed!
             output_writer.write_all(&body_bytes)?;
             Ok(())
-        } else if let Some(alt_src) = alt {
+        } else if let Some(alt_src) = fragment.alt {
             // Try alt
             debug!("Main request failed, trying alt");
             let alt_interpolated = try_evaluate_interpolated_string(&alt_src, &mut self.ctx)?;

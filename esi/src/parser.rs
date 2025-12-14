@@ -11,6 +11,7 @@ use nom::error::Error;
 use nom::multi::{fold_many0, many0, many_till, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
+use std::collections::HashMap;
 
 use crate::parser_types::*;
 
@@ -245,16 +246,9 @@ fn esi_assign<'a>(
     alt((esi_assign_short, |i| esi_assign_long(original, i)))(input)
 }
 
-fn assign_attributes_short(attrs: Vec<(String, String)>) -> Vec<Element> {
-    let mut name = String::new();
-    let mut value_str = String::new();
-    for (key, val) in attrs {
-        match key.as_str() {
-            "name" => name = val,
-            "value" => value_str = val,
-            _ => {}
-        }
-    }
+fn assign_attributes_short(attrs: HashMap<String, String>) -> Vec<Element> {
+    let name = attrs.get("name").cloned().unwrap_or_default();
+    let value_str = attrs.get("value").cloned().unwrap_or_default();
 
     // Per ESI spec, short form value attribute contains an expression
     // Try to parse as ESI expression. If it fails, treat as string literal.
@@ -262,20 +256,15 @@ fn assign_attributes_short(attrs: Vec<(String, String)>) -> Vec<Element> {
         Ok((_, expr)) => expr,
         Err(_) => {
             // If parsing fails (e.g., plain text), treat as a string literal
-            Expr::String(Some(value_str.clone()))
+            Expr::String(Some(value_str))
         }
     };
 
     vec![Element::Esi(Tag::Assign { name, value })]
 }
 
-fn assign_long(attrs: Vec<(String, String)>, content: Vec<Element>) -> Vec<Element> {
-    let mut name = String::new();
-    for (key, val) in attrs {
-        if key == "name" {
-            name = val;
-        }
-    }
+fn assign_long(attrs: HashMap<String, String>, mut content: Vec<Element>) -> Vec<Element> {
+    let name = attrs.get("name").cloned().unwrap_or_default();
 
     // Per ESI spec, long form value comes from content between tags
     // Content is already parsed as Vec<Element> (can be text, expressions, etc.)
@@ -284,19 +273,21 @@ fn assign_long(attrs: Vec<(String, String)>, content: Vec<Element>) -> Vec<Eleme
         // Empty content - empty string
         Expr::String(Some(String::new()))
     } else if content.len() == 1 {
-        // Single element - use it directly
-        if let Element::Expr(expr) = &content[0] {
-            expr.clone()
-        } else if let Element::Text(text) = &content[0] {
-            // Try to parse the text as an expression
-            let text_str = String::from_utf8_lossy(text.as_ref()).to_string();
-            match parse_expression(&text_str) {
-                Ok((_, expr)) => expr,
-                Err(_) => Expr::String(Some(text_str)),
+        // Single element - pop to take ownership
+        match content.pop().expect("checked len == 1") {
+            Element::Expr(expr) => expr,
+            Element::Text(text) => {
+                // Try to parse the text as an expression
+                let text_str = String::from_utf8_lossy(text.as_ref()).to_string();
+                match parse_expression(&text_str) {
+                    Ok((_, expr)) => expr,
+                    Err(_) => Expr::String(Some(text_str)),
+                }
             }
-        } else {
-            // HTML or other - treat as empty string
-            Expr::String(Some(String::new()))
+            _ => {
+                // HTML or other - treat as empty string
+                Expr::String(Some(String::new()))
+            }
         }
     } else {
         // Multiple elements - this is a compound expression per ESI spec
@@ -429,16 +420,8 @@ fn esi_when<'a>(
             tag(b"</esi:when>"),
         )),
         |(attrs, content, _)| {
-            let test = attrs
-                .iter()
-                .find(|(key, _)| key == "test")
-                .map(|(_, val)| val.clone())
-                .unwrap_or_default();
-
-            let match_name = attrs
-                .iter()
-                .find(|(key, _)| key == "matchname")
-                .map(|(_, val)| val.clone());
+            let test = attrs.get("test").cloned().unwrap_or_default();
+            let match_name = attrs.get("matchname").cloned();
 
             // Return the When tag followed by its content elements as a marker
             let mut result = vec![Element::Esi(Tag::When { test, match_name })];
@@ -536,8 +519,8 @@ fn esi_vars<'a>(
     alt((esi_vars_short, |i| esi_vars_long(original, i)))(input)
 }
 
-fn parse_vars_attributes(attrs: Vec<(String, String)>) -> Result<Vec<Element>, &'static str> {
-    if let Some((_k, v)) = attrs.iter().find(|(k, _v)| k == "name") {
+fn parse_vars_attributes(attrs: HashMap<String, String>) -> Result<Vec<Element>, &'static str> {
+    if let Some(v) = attrs.get("name") {
         if let Ok((_, expr)) = expression(v.as_bytes()) {
             Ok(expr)
         } else {
@@ -633,18 +616,14 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
             attributes,
             preceded(multispace0, alt((closing_bracket, self_closing))),
         ),
-        |attrs| {
-            let mut src = Bytes::new();
-            let mut alt = None;
-            let mut continue_on_error = false;
-            for (key, val) in attrs {
-                match key.as_str() {
-                    "src" => src = Bytes::from(val),
-                    "alt" => alt = Some(Bytes::from(val)),
-                    "onerror" => continue_on_error = &val == "continue",
-                    _ => {}
-                }
-            }
+        |mut attrs| {
+            let src = attrs.remove("src").map(Bytes::from).unwrap_or_default();
+            let alt = attrs.remove("alt").map(Bytes::from);
+            let continue_on_error = attrs
+                .get("onerror")
+                .map(|s| s == "continue")
+                .unwrap_or(false);
+
             vec![Element::Esi(Tag::Include {
                 src,
                 alt,
@@ -654,7 +633,7 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     )(input)
 }
 
-fn attributes(input: &[u8]) -> IResult<&[u8], Vec<(String, String)>, Error<&[u8]>> {
+fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<String, String>, Error<&[u8]>> {
     map(
         many0(separated_pair(
             preceded(multispace1, alpha1),
