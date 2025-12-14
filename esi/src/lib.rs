@@ -261,8 +261,8 @@ impl Processor {
         let mut execution_queue: Vec<ExecutionElement> = Vec::new();
 
         // Parse with callback - as we parse, we dispatch includes and build the execution queue
-        let parse_result = parser::parse_with_callback(&doc_content, |elements| {
-            for element in elements {
+        let parse_result = parser::parse_with_callback(&doc_content, |result| {
+            for element in result.into_vec() {
                 match self.process_element(element, dispatch_fragment_request) {
                     Ok(mut exec_elements) => {
                         execution_queue.append(&mut exec_elements);
@@ -691,7 +691,7 @@ pub fn evaluate_interpolated_string(input: &str, ctx: &mut EvalContext) -> Resul
 
     // Parse the input string with interpolated expressions using nom parser
     let elements = match crate::parser::parse_interpolated_string(input) {
-        Ok((_, elements)) => elements,
+        Ok((_, parse_result)) => parse_result.into_vec(),
         Err(_) => {
             // If parsing fails, treat the whole input as text
             return Ok(input.to_string());

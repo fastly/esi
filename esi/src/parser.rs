@@ -5,17 +5,14 @@ use nom::bytes::complete::{
 use nom::character::complete::{alpha1, char, multispace0, multispace1};
 use nom::combinator::{map, map_res, opt, recognize, verify};
 use nom::error::Error;
-use nom::multi::{fold_many0, many0, separated_list0};
+use nom::multi::{many0, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::{AsChar, IResult};
 
 use crate::parser_types::*;
 
-pub fn parse(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
-    fold_many0(element, Vec::new, |mut acc: Vec<Element>, item| {
-        item.push_to(&mut acc);
-        acc
-    })(input)
+pub fn parse(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
+    map(many0(element), ParseResult::from_results)(input)
 }
 
 /// Callback-based parser that invokes a callback for each element as it's parsed
@@ -25,15 +22,15 @@ pub fn parse_with_callback<'a, F>(
     mut callback: F,
 ) -> IResult<&'a str, (), Error<&'a str>>
 where
-    F: FnMut(Vec<Element<'a>>) -> Result<(), String>,
+    F: FnMut(ParseResult<'a>) -> Result<(), String>,
 {
     let mut remaining = input;
 
     while !remaining.is_empty() {
         match element(remaining) {
             Ok((rest, result)) => {
-                // Call the callback with parsed elements
-                if let Err(_e) = callback(result.into_vec()) {
+                // Call the callback with parsed result
+                if let Err(_e) = callback(result) {
                     return Err(nom::Err::Failure(Error::new(
                         rest,
                         nom::error::ErrorKind::Fail,
@@ -57,15 +54,11 @@ pub fn parse_expression(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
     expr(input)
 }
 
-// Parses a string that may contain interpolated expressions like $(VAR)
-pub fn parse_interpolated_string(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
-    fold_many0(
-        alt((interpolated_expression, interpolated_text)),
-        Vec::new,
-        |mut acc: Vec<Element>, item| {
-            item.push_to(&mut acc);
-            acc
-        },
+/// Parses a string that may contain interpolated expressions like $(VAR)
+pub fn parse_interpolated_string(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
+    map(
+        many0(alt((interpolated_expression, interpolated_text))),
+        ParseResult::from_results,
     )(input)
 }
 
@@ -73,15 +66,8 @@ fn element(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
     alt((text, esi_tag, html))(input)
 }
 
-fn parse_interpolated(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
-    fold_many0(
-        interpolated_element,
-        Vec::new,
-        |mut acc: Vec<Element>, item| {
-            item.push_to(&mut acc);
-            acc
-        },
-    )(input)
+fn parse_interpolated(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
+    map(many0(interpolated_element), ParseResult::from_results)(input)
 }
 
 fn interpolated_element(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
@@ -113,9 +99,9 @@ fn parse_assign_attributes_short<'a>(attrs: Vec<(&'a str, &'a str)>) -> ParseRes
     let mut name = "";
     let mut value_str = "";
     for (key, val) in attrs {
-        match key {
-            "name" => name = val,
-            "value" => value_str = val,
+        match key.as_bytes() {
+            b"name" => name = val,
+            b"value" => value_str = val,
             _ => {}
         }
     }
@@ -197,7 +183,7 @@ fn esi_assign_long(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
             parse_interpolated,
             tag("</esi:assign>"),
         )),
-        |(attrs, content, _)| parse_assign_long(attrs, content),
+        |(attrs, content, _)| parse_assign_long(attrs, content.into_vec()),
     )(input)
 }
 fn esi_except(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
@@ -207,7 +193,7 @@ fn esi_except(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
             parse_interpolated,
             tag("</esi:except>"),
         ),
-        |v| ParseResult::Single(Element::Esi(Tag::Except(v))),
+        |v| ParseResult::Single(Element::Esi(Tag::Except(v.into_vec()))),
     )(input)
 }
 fn esi_attempt(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
@@ -217,14 +203,14 @@ fn esi_attempt(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
             parse_interpolated,
             tag("</esi:attempt>"),
         ),
-        |v| ParseResult::Single(Element::Esi(Tag::Attempt(v))),
+        |v| ParseResult::Single(Element::Esi(Tag::Attempt(v.into_vec()))),
     )(input)
 }
 fn esi_try(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
     map(delimited(tag("<esi:try>"), parse, tag("</esi:try>")), |v| {
         let mut attempts = vec![];
         let mut except = None;
-        for element in v {
+        for element in v.into_vec() {
             match element {
                 Element::Esi(Tag::Attempt(cs)) => attempts.push(cs),
                 Element::Esi(Tag::Except(cs)) => {
@@ -250,7 +236,7 @@ fn esi_otherwise(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
         |(_, content, _)| {
             // Return the Otherwise tag followed by its content elements (same as esi_when)
             let mut result = vec![Element::Esi(Tag::Otherwise)];
-            result.extend(content);
+            result.extend(content.into_vec());
             ParseResult::Multiple(result)
         },
     )(input)
@@ -270,18 +256,18 @@ fn esi_when(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
         |(attrs, content, _)| {
             let test = attrs
                 .iter()
-                .find(|(key, _)| *key == "test")
+                .find(|(key, _)| key.as_bytes() == b"test")
                 .map(|(_, val)| *val)
                 .unwrap_or("");
 
             let match_name = attrs
                 .iter()
-                .find(|(key, _)| *key == "matchname")
+                .find(|(key, _)| key.as_bytes() == b"matchname")
                 .map(|(_, val)| val.to_string());
 
             // Return the When tag followed by its content elements as a marker
             let mut result = vec![Element::Esi(Tag::When { test, match_name })];
-            result.extend(content);
+            result.extend(content.into_vec());
             ParseResult::Multiple(result)
         },
     )(input)
@@ -296,7 +282,7 @@ fn esi_choose(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
             let mut current_when: Option<WhenBranch> = None;
             let mut in_otherwise = false;
 
-            for element in v {
+            for element in v.into_vec() {
                 match element {
                     Element::Esi(Tag::When { test, match_name }) => {
                         // Save any previous when
@@ -366,15 +352,8 @@ fn parse_vars_attributes<'a>(
     attrs: Vec<(&'a str, &'a str)>,
 ) -> Result<ParseResult<'a>, &'static str> {
     if let Some((_k, v)) = attrs.iter().find(|(k, _v)| *k == "name") {
-        if let Ok((_, expr)) = expression(v) {
-            // expression returns Vec<Element>, convert to ParseResult
-            if expr.is_empty() {
-                Ok(ParseResult::Empty)
-            } else if expr.len() == 1 {
-                Ok(ParseResult::Single(expr.into_iter().next().unwrap()))
-            } else {
-                Ok(ParseResult::Multiple(expr))
-            }
+        if let Ok((_, result)) = expression(v) {
+            Ok(result)
         } else {
             Err("failed to parse expression")
         }
@@ -414,36 +393,21 @@ fn esi_tag_non_vars(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> 
 
 // Parser for content inside esi:vars - handles text, expressions, and most ESI tags (except nested vars)
 // Supports nested variable expressions like $(VAR{$(other)}) as of the nom migration
-fn parse_vars_content(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
-    fold_many0(
-        alt((
+fn parse_vars_content(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
+    map(
+        many0(alt((
             interpolated_text,
             interpolated_expression,
             esi_tag_non_vars,
             html,
-        )),
-        Vec::new,
-        |mut acc: Vec<Element>, item| {
-            item.push_to(&mut acc);
-            acc
-        },
+        ))),
+        ParseResult::from_results,
     )(input)
 }
 
 fn esi_vars_long(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
     // Use parse_vars_content instead of parse_interpolated to avoid infinite recursion
-    map(
-        delimited(tag("<esi:vars>"), parse_vars_content, tag("</esi:vars>")),
-        |content| {
-            if content.is_empty() {
-                ParseResult::Empty
-            } else if content.len() == 1 {
-                ParseResult::Single(content.into_iter().next().unwrap())
-            } else {
-                ParseResult::Multiple(content)
-            }
-        },
-    )(input)
+    delimited(tag("<esi:vars>"), parse_vars_content, tag("</esi:vars>"))(input)
 }
 
 fn esi_comment(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
@@ -485,10 +449,10 @@ fn esi_include(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
             let mut alt = None;
             let mut continue_on_error = false;
             for (key, val) in attrs {
-                match key {
-                    "src" => src = val,
-                    "alt" => alt = Some(val),
-                    "onerror" => continue_on_error = val == "continue",
+                match key.as_bytes() {
+                    b"src" => src = val,
+                    b"alt" => alt = Some(val),
+                    b"onerror" => continue_on_error = val.as_bytes() == b"continue",
                     _ => {}
                 }
             }
@@ -779,8 +743,8 @@ fn expr(input: &str) -> IResult<&str, Expr<'_>, Error<&str>> {
         Ok((rest, exp))
     }
 }
-fn expression(input: &str) -> IResult<&str, Vec<Element<'_>>, Error<&str>> {
-    map(expr, |x| vec![Element::Expr(x)])(input)
+fn expression(input: &str) -> IResult<&str, ParseResult<'_>, Error<&str>> {
+    map(expr, |x| ParseResult::Single(Element::Expr(x)))(input)
 }
 
 #[cfg(test)]
@@ -857,7 +821,7 @@ exception!
     fn test_new_parse_script_with_src() {
         let (rest, x) = parse("<sCripT src=\"whatever\">").unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(x, [Element::Html("<sCripT src=\"whatever\">")]);
+        assert_eq!(x.into_vec(), [Element::Html("<sCripT src=\"whatever\">")]);
     }
     #[test]
     fn test_new_parse_esi_vars_short() {
@@ -874,7 +838,10 @@ exception!
         // The inner <esi:vars> tags should be treated as plain text/HTML
         let (rest, x) = parse(r#"<esi:vars>hello<br></esi:vars>"#).unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(x, [Element::Text("hello"), Element::Html("<br>"),]);
+        assert_eq!(
+            x.into_vec(),
+            [Element::Text("hello"), Element::Html("<br>"),]
+        );
     }
 
     #[test]
@@ -894,9 +861,10 @@ exception!
                 if rest.is_empty() {
                     // Inner vars should be treated as text/HTML
                     eprintln!("Parsed elements: {:?}", elements);
+                    let elements_vec = elements.into_vec();
                     // We expect the text "outer<esi:vars>inner" to be captured somehow
                     assert!(
-                        elements
+                        elements_vec
                             .iter()
                             .any(|c| matches!(c, Element::Text(t) if t.contains("inner"))),
                         "Inner <esi:vars> content should be present as text"
@@ -922,7 +890,7 @@ exception!
             parse(r#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
-            x,
+            x.into_vec(),
             [Element::Expr(Expr::Comparison {
                 left: Box::new(Expr::Call("call", vec![Expr::String(Some("hello"))])),
                 operator: Operator::Matches,
@@ -1012,14 +980,14 @@ exception!
     fn test_new_parse_plain_text() {
         let (rest, x) = parse("hello\nthere").unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(x, [Element::Text("hello\nthere")]);
+        assert_eq!(x.into_vec(), [Element::Text("hello\nthere")]);
     }
     #[test]
     fn test_new_parse_interpolated() {
         let (rest, x) = parse("hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>").unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
-            x,
+            x.into_vec(),
             [
                 Element::Text("hello $(foo)"),
                 Element::Text("goodbye "),
@@ -1159,12 +1127,13 @@ exception!
     #[test]
     fn test_html_comment_in_document() {
         let input = "<!-- comment --><div>test</div>";
-        let (rest, elements) = parse(input).unwrap();
+        let (rest, result) = parse(input).unwrap();
         assert_eq!(rest, "");
+        let elements = result.into_vec();
         // Comment should be parsed as one element
         assert!(elements.len() >= 1, "Expected at least 1 element");
         match &elements[0] {
-            Element::Html(s) => assert_eq!(s, &"<!-- comment -->"),
+            Element::Html(s) => assert_eq!(*s, "<!-- comment -->"),
             _ => panic!("Expected Html element for comment, got {:?}", &elements[0]),
         }
     }

@@ -22,6 +22,24 @@ impl<'a> ParseResult<'a> {
             ParseResult::Empty => {}
         }
     }
+
+    /// Convert a Vec<Element> into the appropriate ParseResult variant
+    pub fn from_vec(vec: Vec<Element<'a>>) -> Self {
+        match vec.len() {
+            0 => ParseResult::Empty,
+            1 => ParseResult::Single(vec.into_iter().next().unwrap()),
+            _ => ParseResult::Multiple(vec),
+        }
+    }
+
+    /// Flatten a Vec of ParseResults into a single ParseResult
+    pub fn from_results(results: Vec<ParseResult<'a>>) -> ParseResult<'a> {
+        let mut elements = Vec::new();
+        for result in results {
+            result.push_to(&mut elements);
+        }
+        Self::from_vec(elements)
+    }
 }
 
 /// Represents a single when branch in a choose block
