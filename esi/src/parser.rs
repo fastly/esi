@@ -1,12 +1,16 @@
 use bytes::Bytes;
 use nom::branch::alt;
-// Using STREAMING parsers - they return Incomplete when they need more data
-// This enables TRUE bounded-memory streaming
+// Using STREAMING parsers for document structure - they return Incomplete when they need more data
+// This enables TRUE bounded-memory streaming for the main document parsing
 use nom::bytes::streaming::{
     tag, tag_no_case, take_till, take_until, take_while, take_while1, take_while_m_n,
 };
 use nom::character::streaming::{alpha1, multispace0, multispace1};
-use nom::combinator::{complete, map, map_res, not, opt, peek, recognize};
+// Using COMPLETE parsers for expression parsing - expressions are always complete
+// (they come from attribute values which are fully extracted before parsing)
+use nom::bytes::complete as complete_bytes;
+use nom::character::complete as complete_char;
+use nom::combinator::{map, map_res, not, opt, peek, recognize};
 use nom::error::Error;
 use nom::multi::{fold_many0, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
@@ -161,13 +165,14 @@ fn bytes_to_string(bytes: &[u8]) -> String {
 }
 
 // ============================================================================
-// Expression Parsing
+// Expression Parsing - Uses COMPLETE parsers (input is always complete)
+// Expressions come from attribute values which are fully extracted before parsing
 // ============================================================================
 
 /// Accepts str for convenience but works on bytes internally
 pub fn parse_expression(input: &str) -> IResult<&str, Expr, Error<&str>> {
     let bytes = input.as_bytes();
-    match complete(expr)(bytes) {
+    match expr(bytes) {
         Ok((remaining_bytes, expr)) => {
             let consumed = bytes.len() - remaining_bytes.len();
             Ok((&input[consumed..], expr))
@@ -175,11 +180,8 @@ pub fn parse_expression(input: &str) -> IResult<&str, Expr, Error<&str>> {
         Err(nom::Err::Error(e)) => Err(nom::Err::Error(Error::new(input, e.code))),
         Err(nom::Err::Failure(e)) => Err(nom::Err::Failure(Error::new(input, e.code))),
         Err(nom::Err::Incomplete(_)) => {
-            // nom's complete() should convert Incomplete to Error, so this shouldn't happen
-            Err(nom::Err::Error(Error::new(
-                input,
-                nom::error::ErrorKind::Complete,
-            )))
+            // Complete parsers should never return Incomplete
+            unreachable!("complete parsers don't return Incomplete")
         }
     }
 }
@@ -946,7 +948,10 @@ fn is_lower_alphanumeric_or_underscore(c: u8) -> bool {
 
 fn esi_fn_name(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        preceded(tag(b"$"), take_while1(is_lower_alphanumeric_or_underscore)),
+        preceded(
+            complete_bytes::tag(b"$"),
+            complete_bytes::take_while1(is_lower_alphanumeric_or_underscore),
+        ),
         bytes_to_string,
     )(input)
 }
@@ -954,9 +959,13 @@ fn esi_fn_name(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
 fn esi_var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map(
         tuple((
-            take_while1(is_alphanumeric_or_underscore),
-            opt(delimited(tag(b"{"), esi_var_key_expr, tag(b"}"))),
-            opt(preceded(tag(b"|"), fn_nested_argument)),
+            complete_bytes::take_while1(is_alphanumeric_or_underscore),
+            opt(delimited(
+                complete_bytes::tag(b"{"),
+                esi_var_key_expr,
+                complete_bytes::tag(b"}"),
+            )),
+            opt(preceded(complete_bytes::tag(b"|"), fn_nested_argument)),
         )),
         |(name, key, default): (&[u8], _, _)| {
             Expr::Variable(
@@ -970,7 +979,7 @@ fn esi_var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        take_while(|c| c != b'$' && c != b'{' && c != b'}' && c != b',' && c != b'"'),
+        complete_bytes::take_while(|c| c != b'$' && c != b'{' && c != b'}' && c != b',' && c != b'"'),
         bytes_to_string,
     )(input)
 }
@@ -979,16 +988,20 @@ fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
 fn single_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
         delimited(
-            single_quote,
-            take_while(|c| !is_single_quote(c)),
-            single_quote,
+            complete_bytes::tag(b"'"),
+            complete_bytes::take_while(|c| !is_single_quote(c)),
+            complete_bytes::tag(b"'"),
         ),
         bytes_to_string,
     )(input)
 }
 fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        delimited(tag(b"'''"), take_until(b"'''".as_ref()), tag(b"'''")),
+        delimited(
+            complete_bytes::tag(b"'''"),
+            complete_bytes::take_until("'''"),
+            complete_bytes::tag(b"'''"),
+        ),
         bytes_to_string,
     )(input)
 }
@@ -1026,7 +1039,11 @@ fn esi_var_key_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn fn_argument(input: &[u8]) -> IResult<&[u8], Vec<Expr>, Error<&[u8]>> {
     let (input, mut parsed) = separated_list0(
-        tuple((multispace0, tag(b","), multispace0)),
+        tuple((
+            complete_char::multispace0,
+            complete_bytes::tag(b","),
+            complete_char::multispace0,
+        )),
         fn_nested_argument,
     )(input)?;
 
@@ -1044,8 +1061,8 @@ fn fn_nested_argument(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map_res(
         recognize(tuple((
-            opt(tag(b"-")),
-            take_while1(|c: u8| c.is_ascii_digit()),
+            opt(complete_bytes::tag(b"-")),
+            complete_bytes::take_while1(|c: u8| c.is_ascii_digit()),
         ))),
         |s: &[u8]| String::from_utf8_lossy(s).parse::<i32>().map(Expr::Integer),
     )(input)
@@ -1053,7 +1070,7 @@ fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn bareword(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map(
-        take_while1(is_alphanumeric_or_underscore),
+        complete_bytes::take_while1(is_alphanumeric_or_underscore),
         |name: &[u8]| Expr::Variable(bytes_to_string(name), None, None),
     )(input)
 }
@@ -1062,9 +1079,9 @@ fn esi_function(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (input, parsed) = tuple((
         esi_fn_name,
         delimited(
-            terminated(tag(b"("), multispace0),
+            terminated(complete_bytes::tag(b"("), complete_char::multispace0),
             fn_argument,
-            preceded(multispace0, tag(b")")),
+            preceded(complete_char::multispace0, complete_bytes::tag(b")")),
         ),
     ))(input)?;
 
@@ -1074,22 +1091,28 @@ fn esi_function(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 }
 
 fn esi_variable(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    delimited(tag(b"$("), esi_var_name, tag(b")"))(input)
+    delimited(
+        complete_bytes::tag(b"$("),
+        esi_var_name,
+        complete_bytes::tag(b")"),
+    )(input)
 }
 
 fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
     alt((
         // Try longer operators first
-        map(tag(b"matches_i"), |_| Operator::MatchesInsensitive),
-        map(tag(b"matches"), |_| Operator::Matches),
-        map(tag(b"=="), |_| Operator::Equals),
-        map(tag(b"!="), |_| Operator::NotEquals),
-        map(tag(b"<="), |_| Operator::LessThanOrEqual),
-        map(tag(b">="), |_| Operator::GreaterThanOrEqual),
-        map(tag(b"<"), |_| Operator::LessThan),
-        map(tag(b">"), |_| Operator::GreaterThan),
-        map(tag(b"&&"), |_| Operator::And),
-        map(tag(b"||"), |_| Operator::Or),
+        map(complete_bytes::tag(b"matches_i"), |_| {
+            Operator::MatchesInsensitive
+        }),
+        map(complete_bytes::tag(b"matches"), |_| Operator::Matches),
+        map(complete_bytes::tag(b"=="), |_| Operator::Equals),
+        map(complete_bytes::tag(b"!="), |_| Operator::NotEquals),
+        map(complete_bytes::tag(b"<="), |_| Operator::LessThanOrEqual),
+        map(complete_bytes::tag(b">="), |_| Operator::GreaterThanOrEqual),
+        map(complete_bytes::tag(b"<"), |_| Operator::LessThan),
+        map(complete_bytes::tag(b">"), |_| Operator::GreaterThan),
+        map(complete_bytes::tag(b"&&"), |_| Operator::And),
+        map(complete_bytes::tag(b"||"), |_| Operator::Or),
     ))(input)
 }
 
@@ -1103,14 +1126,17 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     alt((
         // Parse negation: !expr
         map(
-            preceded(tag(b"!"), preceded(multispace0, primary_expr)),
+            preceded(
+                complete_bytes::tag(b"!"),
+                preceded(complete_char::multispace0, primary_expr),
+            ),
             |expr| Expr::Not(Box::new(expr)),
         ),
         // Parse grouped expression: (expr)
         delimited(
-            tag(b"("),
-            delimited(multispace0, expr, multispace0),
-            tag(b")"),
+            complete_bytes::tag(b"("),
+            delimited(complete_char::multispace0, expr, complete_char::multispace0),
+            complete_bytes::tag(b")"),
         ),
         // Parse basic expressions
         esi_function,
@@ -1123,8 +1149,14 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 fn expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (rest, exp) = primary_expr(input)?;
 
-    if let Ok((rest, (operator, right_exp))) =
-        tuple((delimited(multispace0, operator, multispace0), expr))(rest)
+    if let Ok((rest, (operator, right_exp))) = tuple((
+        delimited(
+            complete_char::multispace0,
+            operator,
+            complete_char::multispace0,
+        ),
+        expr,
+    ))(rest)
     {
         Ok((
             rest,
