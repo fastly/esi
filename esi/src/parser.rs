@@ -3,12 +3,12 @@ use nom::branch::alt;
 // Using STREAMING parsers - they return Incomplete when they need more data
 // This enables TRUE bounded-memory streaming
 use nom::bytes::streaming::{
-    tag, tag_no_case, take, take_till, take_until, take_while, take_while1, take_while_m_n,
+    tag, tag_no_case, take_till, take_until, take_while, take_while1, take_while_m_n,
 };
 use nom::character::streaming::{alpha1, multispace0, multispace1};
 use nom::combinator::{map, map_res, not, opt, peek, recognize};
 use nom::error::Error;
-use nom::multi::{fold_many0, many0, many_till, separated_list0};
+use nom::multi::{fold_many0, many0, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 use std::collections::HashMap;
@@ -50,6 +50,30 @@ enum ParsingMode {
     Complete,
 }
 
+/// Parser output that avoids Vec allocation for single elements
+/// This is a key optimization: most parsers return exactly one element,
+/// so we avoid the Vec allocation overhead in the common case.
+enum ParseResult {
+    /// Single element (most common case - no Vec allocation)
+    Single(Element),
+    /// Multiple elements (for parsers that return variable number of elements)
+    Multiple(Vec<Element>),
+    /// No elements (for esi:comment, esi:remove that produce nothing)
+    Empty,
+}
+
+impl ParseResult {
+    /// Append elements to an existing Vec
+    #[inline]
+    fn append_to(self, acc: &mut Vec<Element>) {
+        match self {
+            ParseResult::Single(e) => acc.push(e),
+            ParseResult::Multiple(mut v) => acc.append(&mut v),
+            ParseResult::Empty => {}
+        }
+    }
+}
+
 /// Zero-copy parse loop that threads Bytes through the parser chain
 fn parse_loop<'a, F>(
     original: &Bytes,
@@ -58,15 +82,15 @@ fn parse_loop<'a, F>(
     incomplete_strategy: ParsingMode,
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>
 where
-    F: FnMut(&Bytes, &'a [u8]) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>,
+    F: FnMut(&Bytes, &'a [u8]) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>>,
 {
     let mut result = Vec::new();
     let mut remaining = input;
 
     loop {
         match parser(original, remaining) {
-            Ok((rest, mut elements)) => {
-                result.append(&mut elements);
+            Ok((rest, parse_result)) => {
+                parse_result.append_to(&mut result);
 
                 // If we consumed nothing, break to avoid infinite loop
                 if rest.len() == remaining.len() {
@@ -179,8 +203,8 @@ pub fn parse_interpolated_string(input: &Bytes) -> IResult<&[u8], Vec<Element>, 
 
     loop {
         match alt((interpolated_expression, |i| interpolated_text(input, i)))(remaining) {
-            Ok((rest, mut elements)) => {
-                result.append(&mut elements);
+            Ok((rest, parse_result)) => {
+                parse_result.append_to(&mut result);
                 if rest.is_empty() {
                     // Parsed everything
                     return Ok((b"", result));
@@ -209,7 +233,7 @@ pub fn parse_interpolated_string(input: &Bytes) -> IResult<&[u8], Vec<Element>, 
 fn element<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     alt((|i| text(original, i), |i| tag_handler(original, i)))(input)
 }
 
@@ -220,8 +244,8 @@ fn parse_interpolated<'a>(
     fold_many0(
         |i| interpolated_element(original, i),
         Vec::new,
-        |mut acc: Vec<Element>, mut item| {
-            acc.append(&mut item);
+        |mut acc: Vec<Element>, item: ParseResult| {
+            item.append_to(&mut acc);
             acc
         },
     )(input)
@@ -230,7 +254,7 @@ fn parse_interpolated<'a>(
 fn interpolated_element<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     alt((
         |i| interpolated_text(original, i),
         interpolated_expression,
@@ -242,11 +266,11 @@ fn interpolated_element<'a>(
 fn esi_assign<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     alt((esi_assign_short, |i| esi_assign_long(original, i)))(input)
 }
 
-fn assign_attributes_short(attrs: HashMap<String, String>) -> Vec<Element> {
+fn assign_attributes_short(attrs: HashMap<String, String>) -> ParseResult {
     let name = attrs.get("name").cloned().unwrap_or_default();
     let value_str = attrs.get("value").cloned().unwrap_or_default();
 
@@ -260,10 +284,10 @@ fn assign_attributes_short(attrs: HashMap<String, String>) -> Vec<Element> {
         }
     };
 
-    vec![Element::Esi(Tag::Assign { name, value })]
+    ParseResult::Single(Element::Esi(Tag::Assign { name, value }))
 }
 
-fn assign_long(attrs: HashMap<String, String>, mut content: Vec<Element>) -> Vec<Element> {
+fn assign_long(attrs: HashMap<String, String>, mut content: Vec<Element>) -> ParseResult {
     let name = attrs.get("name").cloned().unwrap_or_default();
 
     // Per ESI spec, long form value comes from content between tags
@@ -297,10 +321,10 @@ fn assign_long(attrs: HashMap<String, String>, mut content: Vec<Element>) -> Vec
         Expr::Interpolated(content)
     };
 
-    vec![Element::Esi(Tag::Assign { name, value })]
+    ParseResult::Single(Element::Esi(Tag::Assign { name, value }))
 }
 
-fn esi_assign_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_assign_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map(
         delimited(
             tag(b"<esi:assign"),
@@ -314,7 +338,7 @@ fn esi_assign_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> 
 fn esi_assign_long<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         tuple((
             delimited(
@@ -332,28 +356,28 @@ fn esi_assign_long<'a>(
 fn esi_except<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         delimited(
             tag(b"<esi:except>"),
             |i| parse_interpolated(original, i),
             tag(b"</esi:except>"),
         ),
-        |v| vec![Element::Esi(Tag::Except(v))],
+        |v| ParseResult::Single(Element::Esi(Tag::Except(v))),
     )(input)
 }
 
 fn esi_attempt<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         delimited(
             tag(b"<esi:attempt>"),
             |i| parse_interpolated(original, i),
             tag(b"</esi:attempt>"),
         ),
-        |v| vec![Element::Esi(Tag::Attempt(v))],
+        |v| ParseResult::Single(Element::Esi(Tag::Attempt(v))),
     )(input)
 }
 
@@ -361,7 +385,7 @@ fn esi_attempt<'a>(
 fn esi_try<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     let (input, _) = tag(b"<esi:try>")(input)?;
     let (input, v) = parse_interpolated(original, input)?;
     let (input, _) = tag(b"</esi:try>")(input)?;
@@ -379,17 +403,17 @@ fn esi_try<'a>(
     }
     Ok((
         input,
-        vec![Element::Esi(Tag::Try {
+        ParseResult::Single(Element::Esi(Tag::Try {
             attempt_events: attempts,
             except_events: except.unwrap_or_default(),
-        })],
+        })),
     ))
 }
 
 fn esi_otherwise<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         delimited(
             tag(b"<esi:otherwise>"),
@@ -400,7 +424,7 @@ fn esi_otherwise<'a>(
             // Return the Otherwise tag followed by its content elements
             let mut result = vec![Element::Esi(Tag::Otherwise)];
             result.extend(content);
-            result
+            ParseResult::Multiple(result)
         },
     )(input)
 }
@@ -408,7 +432,7 @@ fn esi_otherwise<'a>(
 fn esi_when<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         tuple((
             delimited(
@@ -426,7 +450,7 @@ fn esi_when<'a>(
             // Return the When tag followed by its content elements as a marker
             let mut result = vec![Element::Esi(Tag::When { test, match_name })];
             result.extend(content);
-            result
+            ParseResult::Multiple(result)
         },
     )(input)
 }
@@ -435,13 +459,9 @@ fn esi_when<'a>(
 fn esi_choose<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     let (input, _) = tag(b"<esi:choose>")(input)?;
     let (input, v) = parse_interpolated(original, input)?;
-    // eprintln!(
-    //     "esi_choose: parse_interpolated returned {} elements",
-    //     v.len()
-    // );
     let (input, _) = tag(b"</esi:choose>")(input)?;
 
     let mut when_branches = vec![];
@@ -501,10 +521,10 @@ fn esi_choose<'a>(
 
     Ok((
         input,
-        vec![Element::Esi(Tag::Choose {
+        ParseResult::Single(Element::Esi(Tag::Choose {
             when_branches,
             otherwise_events,
-        })],
+        })),
     ))
 }
 
@@ -515,14 +535,14 @@ fn esi_choose<'a>(
 fn esi_vars<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     alt((esi_vars_short, |i| esi_vars_long(original, i)))(input)
 }
 
-fn parse_vars_attributes(attrs: HashMap<String, String>) -> Result<Vec<Element>, &'static str> {
+fn parse_vars_attributes(attrs: HashMap<String, String>) -> Result<ParseResult, &'static str> {
     if let Some(v) = attrs.get("name") {
         if let Ok((_, expr)) = expression(v.as_bytes()) {
-            Ok(expr)
+            Ok(ParseResult::Multiple(expr))
         } else {
             Err("failed to parse expression")
         }
@@ -531,7 +551,7 @@ fn parse_vars_attributes(attrs: HashMap<String, String>) -> Result<Vec<Element>,
     }
 }
 
-fn esi_vars_short(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_vars_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map_res(
         delimited(
             tag(b"<esi:vars"),
@@ -555,8 +575,8 @@ fn esi_vars_content<'a>(
             |i| tag_handler(original, i),
         )),
         Vec::new,
-        |mut acc: Vec<Element>, mut item| {
-            acc.append(&mut item);
+        |mut acc: Vec<Element>, item: ParseResult| {
+            item.append_to(&mut acc);
             acc
         },
     )(input)
@@ -565,23 +585,23 @@ fn esi_vars_content<'a>(
 fn esi_vars_long<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     // Use parse_vars_content instead of parse_interpolated to avoid infinite recursion
     let (input, _) = tag(b"<esi:vars>")(input)?;
     let (input, elements) = esi_vars_content(original, input)?;
     let (input, _) = tag(b"</esi:vars>")(input)?;
 
-    Ok((input, elements))
+    Ok((input, ParseResult::Multiple(elements)))
 }
 
-fn esi_comment(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_comment(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map(
         delimited(
             tag(b"<esi:comment"),
             attributes,
             preceded(multispace0, self_closing), // ESI comment must be self-closing per ESI spec
         ),
-        |_| vec![],
+        |_| ParseResult::Empty,
     )(input)
 }
 
@@ -589,27 +609,27 @@ fn esi_comment(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
 fn esi_remove<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     let (input, _) = tag(b"<esi:remove>")(input)?;
     let (input, _) = parse_interpolated(original, input)?;
     let (input, _) = tag(b"</esi:remove>")(input)?;
-    Ok((input, vec![]))
+    Ok((input, ParseResult::Empty))
 }
 
 fn esi_text<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         delimited(
             tag(b"<esi:text>"),
             take_until(b"</esi:text>".as_ref()),
             tag(b"</esi:text>"),
         ),
-        |v| vec![Element::Text(slice_as_bytes(original, v))],
+        |v| ParseResult::Single(Element::Text(slice_as_bytes(original, v))),
     )(input)
 }
-fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map(
         delimited(
             tag(b"<esi:include"),
@@ -624,27 +644,35 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
                 .map(|s| s == "continue")
                 .unwrap_or(false);
 
-            vec![Element::Esi(Tag::Include {
+            ParseResult::Single(Element::Esi(Tag::Include {
                 src,
                 alt,
                 continue_on_error,
-            })]
+            }))
         },
     )(input)
 }
 
 fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<String, String>, Error<&[u8]>> {
-    map(
-        many0(separated_pair(
-            preceded(multispace1, alpha1),
-            tag(b"="),
-            htmlstring,
-        )),
-        |pairs| {
-            pairs
-                .into_iter()
-                .map(|(k, v)| (bytes_to_string(k), bytes_to_string(v)))
-                .collect()
+    // map(
+    //     many0(separated_pair(
+    //         preceded(multispace1, alpha1),
+    //         tag(b"="),
+    //         htmlstring,
+    //     )),
+    //     |pairs| {
+    //         pairs
+    //             .into_iter()
+    //             .map(|(k, v)| (bytes_to_string(k), bytes_to_string(v)))
+    //             .collect()
+    //     },
+    // )(input)
+    fold_many0(
+        separated_pair(preceded(multispace1, alpha1), tag(b"="), htmlstring),
+        HashMap::new,
+        |mut acc, (k, v)| {
+            acc.insert(bytes_to_string(k), bytes_to_string(v));
+            acc
         },
     )(input)
 }
@@ -668,10 +696,10 @@ fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 fn interpolated_text<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         recognize(take_while1(|c| !is_opening_bracket(c) && !is_dollar(c))),
-        |s: &[u8]| vec![Element::Text(slice_as_bytes(original, s))],
+        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
     )(input)
 }
 
@@ -754,7 +782,7 @@ fn tag_name(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 fn tag_handler<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     alt((
         // Try HTML comment first (special syntax `<!--`)
         |i| html_comment_content(original, i),
@@ -801,7 +829,7 @@ fn tag_handler<'a>(
 
                     Ok((
                         input,
-                        vec![Element::Html(slice_as_bytes(original, full_tag))],
+                        ParseResult::Single(Element::Html(slice_as_bytes(original, full_tag))),
                     ))
                 }
             }
@@ -813,29 +841,38 @@ fn tag_handler<'a>(
 fn html_comment_content<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
-        recognize(delimited(
-            tag(b"<!--"),
-            take_until(b"-->".as_ref()),
-            tag(b"-->"),
-        )),
-        |s: &[u8]| vec![Element::Html(slice_as_bytes(original, s))],
+        delimited(tag(b"<!--"), take_until(b"-->".as_ref()), tag(b"-->")),
+        |s: &[u8]| ParseResult::Single(Element::Html(slice_as_bytes(original, s))),
     )(input)
 }
 
 /// Helper to find closing script tag, handling any content including other closing tags
 /// Looks for </script (case insensitive) and returns content before it  
 fn script_content(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    recognize(many_till(take(1usize), peek(tag_no_case(b"</script"))))(input)
-}
+    // recognize(many_till(take(1usize), peek(tag_no_case(b"</script"))))(input)
+    // Scan for </script (case insensitive) - much faster than many_till
+    const CLOSING_SCRIPT: &[u8] = b"</script";
 
+    for i in 0..input.len() {
+        if i + CLOSING_SCRIPT.len() <= input.len() {
+            let window = &input[i..i + CLOSING_SCRIPT.len()];
+            if window.eq_ignore_ascii_case(CLOSING_SCRIPT) {
+                return Ok((&input[i..], &input[..i]));
+            }
+        }
+    }
+
+    // Not found - need more data (streaming)
+    Err(nom::Err::Incomplete(nom::Needed::Unknown))
+}
 /// script tag parser - input starts at <script
 /// Treats all script tags (inline and external) as HTML elements
 fn html_script_tag<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     let start = input;
 
     // Parse opening tag
@@ -859,7 +896,7 @@ fn html_script_tag<'a>(
     let full_script = &start[..start.len() - input.len()];
     Ok((
         input,
-        vec![Element::Html(slice_as_bytes(original, full_script))],
+        ParseResult::Single(Element::Html(slice_as_bytes(original, full_script))),
     ))
 }
 
@@ -870,20 +907,20 @@ fn html_script_tag<'a>(
 fn closing_tag<'a>(
     original: &Bytes,
     input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     // Reject ESI closing tags before trying to parse
     let (_, _) = peek(not(tag(b"</esi:")))(input)?;
 
     map(
         recognize(tuple((tag(b"</"), tag_name, multispace0, closing_bracket))),
-        |s: &[u8]| vec![Element::Html(slice_as_bytes(original, s))],
+        |s: &[u8]| ParseResult::Single(Element::Html(slice_as_bytes(original, s))),
     )(input)
 }
 
-fn text<'a>(original: &Bytes, input: &'a [u8]) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
+fn text<'a>(original: &Bytes, input: &'a [u8]) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         recognize(take_while1(|c| !is_opening_bracket(c))),
-        |s: &[u8]| vec![Element::Text(slice_as_bytes(original, s))],
+        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
     )(input)
 }
 
@@ -1057,9 +1094,9 @@ fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
     ))(input)
 }
 
-fn interpolated_expression(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+fn interpolated_expression(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map(alt((esi_function, esi_variable)), |expr| {
-        vec![Element::Expr(expr)]
+        ParseResult::Single(Element::Expr(expr))
     })(input)
 }
 
@@ -1210,12 +1247,10 @@ exception!
         let bytes = Bytes::from_static(input);
         let (rest, x) = html_script_tag(&bytes, input).unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(
+        assert!(matches!(
             x,
-            [Element::Html(Bytes::from_static(
-                b"<sCripT> less < more </scRIpt>"
-            ))]
-        );
+            ParseResult::Single(Element::Html(ref h)) if h.as_ref() == b"<sCripT> less < more </scRIpt>"
+        ));
     }
     #[test]
     fn test_parse_script_with_src() {
@@ -1223,12 +1258,10 @@ exception!
         let bytes = Bytes::from_static(input);
         let (rest, x) = html_script_tag(&bytes, input).unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(
+        assert!(matches!(
             x,
-            [Element::Html(Bytes::from_static(
-                b"<sCripT src=\"whatever\"></sCripT>"
-            ))]
-        );
+            ParseResult::Single(Element::Html(ref h)) if h.as_ref() == b"<sCripT src=\"whatever\"></sCripT>"
+        ));
     }
     #[test]
     fn test_parse_esi_vars_short() {
@@ -1236,14 +1269,16 @@ exception!
         let bytes = Bytes::from_static(input);
         let (rest, x) = esi_vars(&bytes, input).unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(
-            x,
-            [Element::Expr(Expr::Variable(
-                "hello".to_string(),
-                None,
-                None
-            )),]
-        );
+        // esi_vars returns Multiple when parsing short form with expression
+        if let ParseResult::Multiple(elements) = x {
+            assert_eq!(elements.len(), 1);
+            assert!(matches!(
+                &elements[0],
+                Element::Expr(Expr::Variable(name, None, None)) if name == "hello"
+            ));
+        } else {
+            panic!("Expected ParseResult::Multiple");
+        }
     }
     #[test]
     fn test_parse_esi_vars_long() {
@@ -1350,11 +1385,11 @@ exception!
             $(QUERY_STRING{param})
             $(QUERY_STRING{$(keyVar)})
         </esi:vars>"#;
-        eprintln!("Testing esi_vars on input: {:?}", input);
         let bytes = Bytes::from_static(input);
         let result = esi_vars(&bytes, input);
-        eprintln!("Result: {:?}", result);
         assert!(result.is_ok(), "esi_vars should parse: {:?}", result.err());
+        let (rest, _) = result.unwrap();
+        assert_eq!(rest.len(), 0, "Should consume all input");
     }
 
     #[test]
@@ -1537,6 +1572,52 @@ exception!
             assert_eq!(value, &Expr::String(Some("bar".to_string())));
         } else {
             panic!("Expected Assign tag");
+        }
+    }
+    #[test]
+    fn test_unclosed_script_tag() {
+        // Unclosed script tag - should handle gracefully
+        let input = b"<script>content without closing";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+
+        // In complete mode, unclosed script becomes text
+        assert_eq!(rest.len(), 0, "Should consume all input");
+        assert_eq!(elements.len(), 1);
+        // The whole thing becomes text since script tag couldn't be fully parsed
+        assert!(matches!(&elements[0], Element::Text(_)));
+    }
+    #[test]
+    fn test_partial_esi_tag() {
+        // Partial ESI tag - streaming should return Incomplete
+        let input = b"<esi:inclu";
+        let bytes = Bytes::from_static(input);
+        let result = parse(&bytes);
+
+        // Should return Incomplete in streaming mode
+        assert!(matches!(result, Err(nom::Err::Incomplete(_))));
+    }
+
+    #[test]
+    fn test_partial_esi_tag_with_prefix() {
+        // Text followed by partial ESI tag
+        let input = b"hello <esi:inclu";
+        let bytes = Bytes::from_static(input);
+        let result = parse(&bytes);
+
+        // Should return the text and indicate more data needed
+        match result {
+            Ok((rest, elements)) => {
+                // Should have parsed "hello " as text
+                assert_eq!(elements.len(), 1);
+                assert!(matches!(&elements[0], Element::Text(t) if t.as_ref() == b"hello "));
+                // Remaining should be the partial tag
+                assert_eq!(rest, b"<esi:inclu");
+            }
+            Err(nom::Err::Incomplete(_)) => {
+                // This is also acceptable - couldn't parse anything
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
         }
     }
 }
