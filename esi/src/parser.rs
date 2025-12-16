@@ -6,9 +6,9 @@ use nom::bytes::streaming::{
     tag, tag_no_case, take_till, take_until, take_while, take_while1, take_while_m_n,
 };
 use nom::character::streaming::{alpha1, multispace0, multispace1};
-use nom::combinator::{map, map_res, not, opt, peek, recognize};
+use nom::combinator::{complete, map, map_res, not, opt, peek, recognize};
 use nom::error::Error;
-use nom::multi::{fold_many0, many0, separated_list0};
+use nom::multi::{fold_many0, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 use std::collections::HashMap;
@@ -166,29 +166,21 @@ fn bytes_to_string(bytes: &[u8]) -> String {
 
 /// Accepts str for convenience but works on bytes internally
 pub fn parse_expression(input: &str) -> IResult<&str, Expr, Error<&str>> {
-    // NOTE: This parses complete expression strings (like attribute values)
-    // Streaming parsers may return Incomplete for complete input
     let bytes = input.as_bytes();
-    match expr(bytes) {
+    match complete(expr)(bytes) {
         Ok((remaining_bytes, expr)) => {
             let consumed = bytes.len() - remaining_bytes.len();
             Ok((&input[consumed..], expr))
         }
+        Err(nom::Err::Error(e)) => Err(nom::Err::Error(Error::new(input, e.code))),
+        Err(nom::Err::Failure(e)) => Err(nom::Err::Failure(Error::new(input, e.code))),
         Err(nom::Err::Incomplete(_)) => {
-            // Streaming parser needs more data, but we have complete input
-            // Try simple parsers for common cases (integers, strings)
-            // Check if it's an integer
-            if let Ok(num) = input.parse::<i32>() {
-                return Ok(("", Expr::Integer(num)));
-            }
-            // Otherwise treat as parse failure
+            // nom's complete() should convert Incomplete to Error, so this shouldn't happen
             Err(nom::Err::Error(Error::new(
                 input,
                 nom::error::ErrorKind::Complete,
             )))
         }
-        Err(nom::Err::Error(e)) => Err(nom::Err::Error(Error::new(input, e.code))),
-        Err(nom::Err::Failure(e)) => Err(nom::Err::Failure(Error::new(input, e.code))),
     }
 }
 
@@ -773,6 +765,24 @@ fn tag_name(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     ))(input)
 }
 
+/// Parse a complete opening tag, returning (tag_name, remaining_after_tag, full_tag_slice)
+/// Only succeeds when we have a complete tag (ending with > or />)
+fn complete_opening_tag(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8]), Error<&[u8]>> {
+    let start = input;
+
+    // Parse <tagname
+    let (rest, _) = opening_bracket(input)?;
+    let (rest, name) = tag_name(rest)?;
+
+    // Parse attributes - consume everything up to '>'
+    let (rest, _) = take_till(is_closing_bracket)(rest)?;
+
+    // Must have > to be complete
+    let (rest, _) = closing_bracket(rest)?;
+
+    Ok((rest, (name, start)))
+}
+
 // ============================================================================
 // Unified Tag Dispatcher
 // ============================================================================
@@ -790,12 +800,9 @@ fn tag_handler<'a>(
         |i| closing_tag(original, i),
         // Try opening tags (parses tag name once, then dispatches)
         |i| {
-            let start = i;
-
-            // Parse opening bracket and tag name ONCE
-            let (input, _) = opening_bracket(i)?;
-            let (input, name) = tag_name(input)?;
-
+            // First, parse the complete opening tag (including >)
+            // This ensures we don't dispatch on partial tag names like "esi:ass"
+            let (rest, (name, start)) = complete_opening_tag(i)?;
             // Dispatch based on tag name without re-parsing
             match name {
                 // ESI tags - pass start position to parse from <esi:tagname
@@ -818,17 +825,9 @@ fn tag_handler<'a>(
 
                 // Regular HTML tag - continue parsing from where we left off
                 _ => {
-                    // we've already consumed `<tagname`, let's find `>`
-                    // Consume everything up to '>'
-                    let (input, _) = take_till(is_closing_bracket)(input)?;
-                    //  Consume the '>' itself
-                    let (input, _) = closing_bracket(input)?;
-
-                    // Calculate the full tag from start (includes `<tagname...>`)
-                    let full_tag = &start[..start.len() - input.len()];
-
+                    let full_tag = &start[..start.len() - rest.len()];
                     Ok((
-                        input,
+                        rest,
                         ParseResult::Single(Element::Html(slice_as_bytes(original, full_tag))),
                     ))
                 }
