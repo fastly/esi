@@ -1,15 +1,14 @@
 use bytes::Bytes;
-use nom::branch::alt;
 // Using STREAMING parsers for document structure - they return Incomplete when they need more data
 // This enables TRUE bounded-memory streaming for the main document parsing
-use nom::bytes::streaming::{
-    tag, tag_no_case, take_till, take_until, take_while, take_while1, take_while_m_n,
-};
-use nom::character::streaming::{alpha1, multispace0, multispace1};
+use nom::bytes::streaming as streaming_bytes;
+use nom::character::streaming as streaming_char;
 // Using COMPLETE parsers for expression parsing - expressions are always complete
 // (they come from attribute values which are fully extracted before parsing)
-use nom::bytes::complete as complete_bytes;
-use nom::character::complete as complete_char;
+use nom::bytes::complete::{tag, take_until, take_while, take_while1};
+use nom::character::complete::multispace0;
+
+use nom::branch::alt;
 use nom::combinator::{map, map_res, not, opt, peek, recognize};
 use nom::error::Error;
 use nom::multi::{fold_many0, separated_list0};
@@ -321,9 +320,9 @@ fn assign_long(attrs: HashMap<String, String>, mut content: Vec<Element>) -> Par
 fn esi_assign_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map(
         delimited(
-            tag(b"<esi:assign"),
+            streaming_bytes::tag(b"<esi:assign"),
             attributes,
-            preceded(multispace0, self_closing),
+            preceded(streaming_char::multispace0, self_closing),
         ),
         assign_attributes_short,
     )(input)
@@ -336,12 +335,12 @@ fn esi_assign_long<'a>(
     map(
         tuple((
             delimited(
-                tag(b"<esi:assign"),
+                streaming_bytes::tag(b"<esi:assign"),
                 attributes,
-                preceded(multispace0, closing_bracket),
+                preceded(streaming_char::multispace0, closing_bracket),
             ),
             |i| parse_interpolated(original, i),
-            tag(b"</esi:assign>"),
+            streaming_bytes::tag(b"</esi:assign>"),
         )),
         |(attrs, content, _)| assign_long(attrs, content),
     )(input)
@@ -353,9 +352,9 @@ fn esi_except<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         delimited(
-            tag(b"<esi:except>"),
+            streaming_bytes::tag(b"<esi:except>"),
             |i| parse_interpolated(original, i),
-            tag(b"</esi:except>"),
+            streaming_bytes::tag(b"</esi:except>"),
         ),
         |v| ParseResult::Single(Element::Esi(Tag::Except(v))),
     )(input)
@@ -367,9 +366,9 @@ fn esi_attempt<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         delimited(
-            tag(b"<esi:attempt>"),
+            streaming_bytes::tag(b"<esi:attempt>"),
             |i| parse_interpolated(original, i),
-            tag(b"</esi:attempt>"),
+            streaming_bytes::tag(b"</esi:attempt>"),
         ),
         |v| ParseResult::Single(Element::Esi(Tag::Attempt(v))),
     )(input)
@@ -380,9 +379,9 @@ fn esi_try<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    let (input, _) = tag(b"<esi:try>")(input)?;
+    let (input, _) = streaming_bytes::tag(b"<esi:try>")(input)?;
     let (input, v) = parse_interpolated(original, input)?;
-    let (input, _) = tag(b"</esi:try>")(input)?;
+    let (input, _) = streaming_bytes::tag(b"</esi:try>")(input)?;
 
     let mut attempts = vec![];
     let mut except = None;
@@ -410,9 +409,9 @@ fn esi_otherwise<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         delimited(
-            tag(b"<esi:otherwise>"),
+            streaming_bytes::tag(b"<esi:otherwise>"),
             |i| parse_interpolated(original, i),
-            tag(b"</esi:otherwise>"),
+            streaming_bytes::tag(b"</esi:otherwise>"),
         ),
         |content| {
             // Return the Otherwise tag followed by its content elements
@@ -430,12 +429,15 @@ fn esi_when<'a>(
     map(
         tuple((
             delimited(
-                tag(b"<esi:when"),
+                streaming_bytes::tag(b"<esi:when"),
                 attributes,
-                preceded(multispace0, alt((closing_bracket, self_closing))),
+                preceded(
+                    streaming_char::multispace0,
+                    alt((closing_bracket, self_closing)),
+                ),
             ),
             |i| parse_interpolated(original, i),
-            tag(b"</esi:when>"),
+            streaming_bytes::tag(b"</esi:when>"),
         )),
         |(attrs, content, _)| {
             let test = attrs.get("test").cloned().unwrap_or_default();
@@ -454,9 +456,9 @@ fn esi_choose<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    let (input, _) = tag(b"<esi:choose>")(input)?;
+    let (input, _) = streaming_bytes::tag(b"<esi:choose>")(input)?;
     let (input, v) = parse_interpolated(original, input)?;
-    let (input, _) = tag(b"</esi:choose>")(input)?;
+    let (input, _) = streaming_bytes::tag(b"</esi:choose>")(input)?;
 
     let mut when_branches = vec![];
     let mut otherwise_events = Vec::new();
@@ -535,8 +537,8 @@ fn esi_vars<'a>(
 
 fn parse_vars_attributes(attrs: HashMap<String, String>) -> Result<ParseResult, &'static str> {
     if let Some(v) = attrs.get("name") {
-        if let Ok((_, expr)) = expression(v.as_bytes()) {
-            Ok(ParseResult::Multiple(expr))
+        if let Ok((_, expr)) = parse_expression(&v) {
+            Ok(ParseResult::Single(Element::Expr(expr)))
         } else {
             Err("failed to parse expression")
         }
@@ -548,9 +550,9 @@ fn parse_vars_attributes(attrs: HashMap<String, String>) -> Result<ParseResult, 
 fn esi_vars_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map_res(
         delimited(
-            tag(b"<esi:vars"),
+            streaming_bytes::tag(b"<esi:vars"),
             attributes,
-            preceded(multispace0, self_closing), // Short form must be self-closing per ESI spec
+            preceded(streaming_char::multispace0, self_closing), // Short form must be self-closing per ESI spec
         ),
         parse_vars_attributes,
     )(input)
@@ -581,9 +583,9 @@ fn esi_vars_long<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     // Use parse_vars_content instead of parse_interpolated to avoid infinite recursion
-    let (input, _) = tag(b"<esi:vars>")(input)?;
+    let (input, _) = streaming_bytes::tag(b"<esi:vars>")(input)?;
     let (input, elements) = esi_vars_content(original, input)?;
-    let (input, _) = tag(b"</esi:vars>")(input)?;
+    let (input, _) = streaming_bytes::tag(b"</esi:vars>")(input)?;
 
     Ok((input, ParseResult::Multiple(elements)))
 }
@@ -591,9 +593,9 @@ fn esi_vars_long<'a>(
 fn esi_comment(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map(
         delimited(
-            tag(b"<esi:comment"),
+            streaming_bytes::tag(b"<esi:comment"),
             attributes,
-            preceded(multispace0, self_closing), // ESI comment must be self-closing per ESI spec
+            preceded(streaming_char::multispace0, self_closing), // ESI comment must be self-closing per ESI spec
         ),
         |_| ParseResult::Empty,
     )(input)
@@ -604,9 +606,9 @@ fn esi_remove<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    let (input, _) = tag(b"<esi:remove>")(input)?;
+    let (input, _) = streaming_bytes::tag(b"<esi:remove>")(input)?;
     let (input, _) = parse_interpolated(original, input)?;
-    let (input, _) = tag(b"</esi:remove>")(input)?;
+    let (input, _) = streaming_bytes::tag(b"</esi:remove>")(input)?;
     Ok((input, ParseResult::Empty))
 }
 
@@ -616,9 +618,9 @@ fn esi_text<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         delimited(
-            tag(b"<esi:text>"),
-            take_until(b"</esi:text>".as_ref()),
-            tag(b"</esi:text>"),
+            streaming_bytes::tag(b"<esi:text>"),
+            streaming_bytes::take_until(b"</esi:text>".as_ref()),
+            streaming_bytes::tag(b"</esi:text>"),
         ),
         |v| ParseResult::Single(Element::Text(slice_as_bytes(original, v))),
     )(input)
@@ -626,9 +628,12 @@ fn esi_text<'a>(
 fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map(
         delimited(
-            tag(b"<esi:include"),
+            streaming_bytes::tag(b"<esi:include"),
             attributes,
-            preceded(multispace0, alt((closing_bracket, self_closing))),
+            preceded(
+                streaming_char::multispace0,
+                alt((closing_bracket, self_closing)),
+            ),
         ),
         |mut attrs| {
             let src = attrs.remove("src").map(Bytes::from).unwrap_or_default();
@@ -648,21 +653,12 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
 }
 
 fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<String, String>, Error<&[u8]>> {
-    // map(
-    //     many0(separated_pair(
-    //         preceded(multispace1, alpha1),
-    //         tag(b"="),
-    //         htmlstring,
-    //     )),
-    //     |pairs| {
-    //         pairs
-    //             .into_iter()
-    //             .map(|(k, v)| (bytes_to_string(k), bytes_to_string(v)))
-    //             .collect()
-    //     },
-    // )(input)
     fold_many0(
-        separated_pair(preceded(multispace1, alpha1), tag(b"="), htmlstring),
+        separated_pair(
+            preceded(streaming_char::multispace1, streaming_char::alpha1),
+            streaming_bytes::tag(b"="),
+            htmlstring,
+        ),
         HashMap::new,
         |mut acc, (k, v)| {
             acc.insert(bytes_to_string(k), bytes_to_string(v));
@@ -675,12 +671,12 @@ fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     alt((
         delimited(
             double_quote,
-            take_while(|c| !is_double_quote(c)),
+            streaming_bytes::take_while(|c| !is_double_quote(c)),
             double_quote,
         ),
         delimited(
             single_quote,
-            take_while(|c| !is_single_quote(c)),
+            streaming_bytes::take_while(|c| !is_single_quote(c)),
             single_quote,
         ),
     ))(input)
@@ -692,7 +688,9 @@ fn interpolated_text<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
-        recognize(take_while1(|c| !is_opening_bracket(c) && !is_dollar(c))),
+        recognize(streaming_bytes::take_while1(|c| {
+            !is_opening_bracket(c) && !is_dollar(c)
+        })),
         |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
     )(input)
 }
@@ -703,31 +701,31 @@ fn interpolated_text<'a>(
 /// Helper to find and consume the closing '>' character
 #[inline]
 fn closing_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    tag(b">")(input)
+    streaming_bytes::tag(b">")(input)
 }
 
 /// Helper to find and consume the closing self-closing tag characters '/>'
 #[inline]
 fn self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    tag(b"/>")(input)
+    streaming_bytes::tag(b"/>")(input)
 }
 
 /// Helper to find and consume the opening '<' character
 #[inline]
 fn opening_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    tag(b"<")(input)
+    streaming_bytes::tag(b"<")(input)
 }
 
 /// Helper to find and consume the closing double quote character
 #[inline]
 fn double_quote(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    tag(b"\"")(input)
+    streaming_bytes::tag(b"\"")(input)
 }
 
 /// Helper to find and consume the closing single quote character
 #[inline]
 fn single_quote(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    tag(b"\'")(input)
+    streaming_bytes::tag(b"\'")(input)
 }
 
 #[inline]
@@ -762,8 +760,8 @@ fn is_tag_cont(b: u8) -> bool {
 #[inline]
 fn tag_name(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     recognize(nom::sequence::pair(
-        take_while_m_n(1, 1, is_tag_start), // first letter
-        take_while(is_tag_cont),            // rest of name
+        streaming_bytes::take_while_m_n(1, 1, is_tag_start), // first letter
+        streaming_bytes::take_while(is_tag_cont),            // rest of name
     ))(input)
 }
 
@@ -777,7 +775,7 @@ fn complete_opening_tag(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8]), Error<&[
     let (rest, name) = tag_name(rest)?;
 
     // Parse attributes - consume everything up to '>'
-    let (rest, _) = take_till(is_closing_bracket)(rest)?;
+    let (rest, _) = streaming_bytes::take_till(is_closing_bracket)(rest)?;
 
     // Must have > to be complete
     let (rest, _) = closing_bracket(rest)?;
@@ -843,10 +841,17 @@ fn html_comment_content<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    map(
-        delimited(tag(b"<!--"), take_until(b"-->".as_ref()), tag(b"-->")),
-        |s: &[u8]| ParseResult::Single(Element::Html(slice_as_bytes(original, s))),
-    )(input)
+    let start = input;
+    let (rest, _) = delimited(
+        streaming_bytes::tag(b"<!--"),
+        streaming_bytes::take_until(b"-->".as_ref()),
+        streaming_bytes::tag(b"-->"),
+    )(input)?;
+    let full_comment = &start[..start.len() - rest.len()];
+    Ok((
+        rest,
+        ParseResult::Single(Element::Html(slice_as_bytes(original, full_comment))),
+    ))
 }
 
 /// Helper to find closing script tag, handling any content including other closing tags
@@ -878,8 +883,8 @@ fn html_script_tag<'a>(
 
     // Parse opening tag
     let (input, _) = recognize(delimited(
-        tag_no_case(b"<script"),
-        take_till(is_closing_bracket),
+        streaming_bytes::tag_no_case(b"<script"),
+        streaming_bytes::take_till(is_closing_bracket),
         closing_bracket,
     ))(input)?;
 
@@ -887,8 +892,8 @@ fn html_script_tag<'a>(
     let (input, _) = opt(tuple((
         script_content,
         recognize(delimited(
-            tag_no_case(b"</script"),
-            multispace0,
+            streaming_bytes::tag_no_case(b"</script"),
+            streaming_char::multispace0,
             closing_bracket,
         )),
     )))(input)?;
@@ -910,17 +915,22 @@ fn closing_tag<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     // Reject ESI closing tags before trying to parse
-    let (_, _) = peek(not(tag(b"</esi:")))(input)?;
+    let (_, _) = peek(not(streaming_bytes::tag(b"</esi:")))(input)?;
 
     map(
-        recognize(tuple((tag(b"</"), tag_name, multispace0, closing_bracket))),
+        recognize(tuple((
+            streaming_bytes::tag(b"</"),
+            tag_name,
+            streaming_char::multispace0,
+            closing_bracket,
+        ))),
         |s: &[u8]| ParseResult::Single(Element::Html(slice_as_bytes(original, s))),
     )(input)
 }
 
 fn text<'a>(original: &Bytes, input: &'a [u8]) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
-        recognize(take_while1(|c| !is_opening_bracket(c))),
+        recognize(streaming_bytes::take_while1(|c| !is_opening_bracket(c))),
         |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
     )(input)
 }
@@ -948,10 +958,7 @@ fn is_lower_alphanumeric_or_underscore(c: u8) -> bool {
 
 fn esi_fn_name(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        preceded(
-            complete_bytes::tag(b"$"),
-            complete_bytes::take_while1(is_lower_alphanumeric_or_underscore),
-        ),
+        preceded(tag(b"$"), take_while1(is_lower_alphanumeric_or_underscore)),
         bytes_to_string,
     )(input)
 }
@@ -959,13 +966,9 @@ fn esi_fn_name(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
 fn esi_var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map(
         tuple((
-            complete_bytes::take_while1(is_alphanumeric_or_underscore),
-            opt(delimited(
-                complete_bytes::tag(b"{"),
-                esi_var_key_expr,
-                complete_bytes::tag(b"}"),
-            )),
-            opt(preceded(complete_bytes::tag(b"|"), fn_nested_argument)),
+            take_while1(is_alphanumeric_or_underscore),
+            opt(delimited(tag(b"{"), esi_var_key_expr, tag(b"}"))),
+            opt(preceded(tag(b"|"), fn_nested_argument)),
         )),
         |(name, key, default): (&[u8], _, _)| {
             Expr::Variable(
@@ -979,7 +982,7 @@ fn esi_var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        complete_bytes::take_while(|c| c != b'$' && c != b'{' && c != b'}' && c != b',' && c != b'"'),
+        take_while(|c| c != b'$' && c != b'{' && c != b'}' && c != b',' && c != b'"'),
         bytes_to_string,
     )(input)
 }
@@ -987,21 +990,13 @@ fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
 // TODO: handle escaping
 fn single_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        delimited(
-            complete_bytes::tag(b"'"),
-            complete_bytes::take_while(|c| !is_single_quote(c)),
-            complete_bytes::tag(b"'"),
-        ),
+        delimited(tag(b"'"), take_while(|c| !is_single_quote(c)), tag(b"'")),
         bytes_to_string,
     )(input)
 }
 fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     map(
-        delimited(
-            complete_bytes::tag(b"'''"),
-            complete_bytes::take_until("'''"),
-            complete_bytes::tag(b"'''"),
-        ),
+        delimited(tag(b"'''"), take_until("'''"), tag(b"'''")),
         bytes_to_string,
     )(input)
 }
@@ -1039,11 +1034,7 @@ fn esi_var_key_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn fn_argument(input: &[u8]) -> IResult<&[u8], Vec<Expr>, Error<&[u8]>> {
     let (input, mut parsed) = separated_list0(
-        tuple((
-            complete_char::multispace0,
-            complete_bytes::tag(b","),
-            complete_char::multispace0,
-        )),
+        tuple((multispace0, tag(b","), multispace0)),
         fn_nested_argument,
     )(input)?;
 
@@ -1061,8 +1052,8 @@ fn fn_nested_argument(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map_res(
         recognize(tuple((
-            opt(complete_bytes::tag(b"-")),
-            complete_bytes::take_while1(|c: u8| c.is_ascii_digit()),
+            opt(tag(b"-")),
+            take_while1(|c: u8| c.is_ascii_digit()),
         ))),
         |s: &[u8]| String::from_utf8_lossy(s).parse::<i32>().map(Expr::Integer),
     )(input)
@@ -1070,7 +1061,7 @@ fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn bareword(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map(
-        complete_bytes::take_while1(is_alphanumeric_or_underscore),
+        take_while1(is_alphanumeric_or_underscore),
         |name: &[u8]| Expr::Variable(bytes_to_string(name), None, None),
     )(input)
 }
@@ -1079,9 +1070,9 @@ fn esi_function(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (input, parsed) = tuple((
         esi_fn_name,
         delimited(
-            terminated(complete_bytes::tag(b"("), complete_char::multispace0),
+            terminated(tag(b"("), multispace0),
             fn_argument,
-            preceded(complete_char::multispace0, complete_bytes::tag(b")")),
+            preceded(multispace0, tag(b")")),
         ),
     ))(input)?;
 
@@ -1091,28 +1082,22 @@ fn esi_function(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 }
 
 fn esi_variable(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    delimited(
-        complete_bytes::tag(b"$("),
-        esi_var_name,
-        complete_bytes::tag(b")"),
-    )(input)
+    delimited(tag(b"$("), esi_var_name, tag(b")"))(input)
 }
 
 fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
     alt((
         // Try longer operators first
-        map(complete_bytes::tag(b"matches_i"), |_| {
-            Operator::MatchesInsensitive
-        }),
-        map(complete_bytes::tag(b"matches"), |_| Operator::Matches),
-        map(complete_bytes::tag(b"=="), |_| Operator::Equals),
-        map(complete_bytes::tag(b"!="), |_| Operator::NotEquals),
-        map(complete_bytes::tag(b"<="), |_| Operator::LessThanOrEqual),
-        map(complete_bytes::tag(b">="), |_| Operator::GreaterThanOrEqual),
-        map(complete_bytes::tag(b"<"), |_| Operator::LessThan),
-        map(complete_bytes::tag(b">"), |_| Operator::GreaterThan),
-        map(complete_bytes::tag(b"&&"), |_| Operator::And),
-        map(complete_bytes::tag(b"||"), |_| Operator::Or),
+        map(tag(b"matches_i"), |_| Operator::MatchesInsensitive),
+        map(tag(b"matches"), |_| Operator::Matches),
+        map(tag(b"=="), |_| Operator::Equals),
+        map(tag(b"!="), |_| Operator::NotEquals),
+        map(tag(b"<="), |_| Operator::LessThanOrEqual),
+        map(tag(b">="), |_| Operator::GreaterThanOrEqual),
+        map(tag(b"<"), |_| Operator::LessThan),
+        map(tag(b">"), |_| Operator::GreaterThan),
+        map(tag(b"&&"), |_| Operator::And),
+        map(tag(b"||"), |_| Operator::Or),
     ))(input)
 }
 
@@ -1126,17 +1111,14 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     alt((
         // Parse negation: !expr
         map(
-            preceded(
-                complete_bytes::tag(b"!"),
-                preceded(complete_char::multispace0, primary_expr),
-            ),
+            preceded(tag(b"!"), preceded(multispace0, primary_expr)),
             |expr| Expr::Not(Box::new(expr)),
         ),
         // Parse grouped expression: (expr)
         delimited(
-            complete_bytes::tag(b"("),
-            delimited(complete_char::multispace0, expr, complete_char::multispace0),
-            complete_bytes::tag(b")"),
+            tag(b"("),
+            delimited(multispace0, expr, multispace0),
+            tag(b")"),
         ),
         // Parse basic expressions
         esi_function,
@@ -1149,14 +1131,8 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 fn expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (rest, exp) = primary_expr(input)?;
 
-    if let Ok((rest, (operator, right_exp))) = tuple((
-        delimited(
-            complete_char::multispace0,
-            operator,
-            complete_char::multispace0,
-        ),
-        expr,
-    ))(rest)
+    if let Ok((rest, (operator, right_exp))) =
+        tuple((delimited(multispace0, operator, multispace0), expr))(rest)
     {
         Ok((
             rest,
@@ -1169,9 +1145,6 @@ fn expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     } else {
         Ok((rest, exp))
     }
-}
-fn expression(input: &[u8]) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    map(expr, |x| vec![Element::Expr(x)])(input)
 }
 
 #[cfg(test)]
@@ -1300,15 +1273,20 @@ exception!
         let bytes = Bytes::from_static(input);
         let (rest, x) = esi_vars(&bytes, input).unwrap();
         assert_eq!(rest.len(), 0);
-        // esi_vars returns Multiple when parsing short form with expression
-        if let ParseResult::Multiple(elements) = x {
-            assert_eq!(elements.len(), 1);
-            assert!(matches!(
-                &elements[0],
-                Element::Expr(Expr::Variable(name, None, None)) if name == "hello"
-            ));
-        } else {
-            panic!("Expected ParseResult::Multiple");
+        // esi_vars returns Single when parsing short form with expression
+        match x {
+            ParseResult::Single(Element::Expr(Expr::Variable(name, None, None))) => {
+                assert_eq!(name, "hello");
+            }
+            ParseResult::Single(e) => {
+                panic!("Expected Variable expression, got {:?}", e);
+            }
+            ParseResult::Multiple(_) => {
+                panic!("Expected ParseResult::Single, got Multiple");
+            }
+            ParseResult::Empty => {
+                panic!("Expected ParseResult::Single, got Empty");
+            }
         }
     }
     #[test]
@@ -1650,5 +1628,18 @@ exception!
             }
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
+    }
+    #[test]
+    fn test_html_comment() {
+        let input = b"<!-- this is a comment -->";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+        // Should return full comment including delimiters
+        assert!(matches!(
+            &elements[0],
+            Element::Html(h) if h.as_ref() == b"<!-- this is a comment -->"
+        ));
     }
 }
