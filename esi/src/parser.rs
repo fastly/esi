@@ -185,6 +185,19 @@ pub fn parse_expression(input: &str) -> IResult<&str, Expr, Error<&str>> {
     }
 }
 
+// Used by parse_interpolated - zero-copy with original Bytes reference
+fn interpolated_text<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    map(
+        recognize(streaming_bytes::take_while1(|c| {
+            !is_opening_bracket(c) && !is_dollar(c)
+        })),
+        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
+    )(input)
+}
+
 /// Parses a string that may contain interpolated expressions like $(VAR)
 /// ZERO-COPY: Accepts &Bytes and returns Bytes slices that reference the original
 pub fn parse_interpolated_string(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
@@ -230,6 +243,17 @@ fn element<'a>(
     alt((|i| text(original, i), |i| tag_handler(original, i)))(input)
 }
 
+fn interpolated_element<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    alt((
+        |i| interpolated_text(original, i),
+        interpolated_expression,
+        |i| tag_handler(original, i),
+    ))(input)
+}
+
 fn parse_interpolated<'a>(
     original: &Bytes,
     input: &'a [u8],
@@ -242,18 +266,6 @@ fn parse_interpolated<'a>(
             acc
         },
     )(input)
-}
-
-fn interpolated_element<'a>(
-    original: &Bytes,
-    input: &'a [u8],
-) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    alt((
-        |i| interpolated_text(original, i),
-        interpolated_expression,
-        // |i| esi_tag(original, i),
-        |i| tag_handler(original, i),
-    ))(input)
 }
 
 fn esi_assign<'a>(
@@ -680,19 +692,6 @@ fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
             single_quote,
         ),
     ))(input)
-}
-
-// Used by parse_interpolated - zero-copy with original Bytes reference
-fn interpolated_text<'a>(
-    original: &Bytes,
-    input: &'a [u8],
-) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    map(
-        recognize(streaming_bytes::take_while1(|c| {
-            !is_opening_bracket(c) && !is_dollar(c)
-        })),
-        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
-    )(input)
 }
 
 // ============================================================================
