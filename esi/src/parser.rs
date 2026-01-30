@@ -344,6 +344,8 @@ fn esi_assign_long<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    // Per ESI spec, esi:assign cannot contain nested ESI tags - only text and expressions
+    // Capture content first with take_until, then parse as complete
     map(
         tuple((
             delimited(
@@ -351,10 +353,14 @@ fn esi_assign_long<'a>(
                 attributes,
                 preceded(streaming_char::multispace0, closing_bracket),
             ),
-            |i| parse_interpolated(original, i),
+            streaming_bytes::take_until(b"</esi:assign>".as_ref()),
             streaming_bytes::tag(b"</esi:assign>"),
         )),
-        |(attrs, content, _)| assign_long(attrs, content),
+        |(attrs, content, _)| {
+            // Parse the captured content in complete mode (text + expressions only)
+            let elements = parse_content_complete(original, content);
+            assign_long(attrs, elements)
+        },
     )(input)
 }
 
@@ -570,33 +576,85 @@ fn esi_vars_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     )(input)
 }
 
-// Parser for content inside esi:vars - handles text, expressions, and ESI tags
-// NOTE: Supports nested variable expressions like $(VAR{$(other)})
-fn esi_vars_content<'a>(
-    original: &Bytes,
-    input: &'a [u8],
-) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    fold_many0(
-        alt((
-            |i| interpolated_text(original, i),
-            interpolated_expression,
-            |i| tag_handler(original, i),
-        )),
-        Vec::new,
-        |mut acc: Vec<Element>, item: ParseResult| {
-            item.append_to(&mut acc);
-            acc
-        },
-    )(input)
+/// Parse content for tags that don't support nested ESI (text + expressions + HTML only)
+/// Uses COMPLETE mode - input must be captured entirely before calling this
+/// Parses: text, expressions ($...), and HTML tags
+/// Does NOT parse: nested ESI tags (treated as literal text)
+fn parse_content_complete(original: &Bytes, content: &[u8]) -> Vec<Element> {
+    // Text in complete mode - stops at $ or < for expression/tag parsing
+    fn text_complete<'a>(
+        original: &Bytes,
+        input: &'a [u8],
+    ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+        map(
+            take_while1(|c| !is_dollar(c) && !is_opening_bracket(c)),
+            |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
+        )(input)
+    }
+
+    // HTML tag in complete mode - any tag that's NOT an ESI tag
+    fn html_tag_complete<'a>(
+        original: &Bytes,
+        input: &'a [u8],
+    ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+        // Check that this is NOT an esi: tag
+        let (_, _) = peek(tuple((
+            tag(b"<"),
+            not(tag(b"esi:")),
+        )))(input)?;
+
+        // Parse the HTML tag (simplified - just capture until >)
+        let (rest, html) = recognize(tuple((
+            tag(b"<"),
+            take_while1(|c| c != b'>'),
+            tag(b">"),
+        )))(input)?;
+
+        Ok((rest, ParseResult::Single(Element::Html(slice_as_bytes(original, html)))))
+    }
+
+    // Parse content using complete parsers
+    let mut elements = Vec::new();
+    let mut remaining = content;
+
+    while !remaining.is_empty() {
+        // Try expression first (starts with $)
+        if let Ok((rest, result)) = interpolated_expression(remaining) {
+            result.append_to(&mut elements);
+            remaining = rest;
+            continue;
+        }
+
+        // Try HTML tag (starts with < but NOT <esi:)
+        if let Ok((rest, result)) = html_tag_complete(original, remaining) {
+            result.append_to(&mut elements);
+            remaining = rest;
+            continue;
+        }
+
+        // Try text (stops at $ or <)
+        if let Ok((rest, result)) = text_complete(original, remaining) {
+            result.append_to(&mut elements);
+            remaining = rest;
+            continue;
+        }
+
+        // Fallback: consume one byte as text if nothing else matches
+        // This handles stray $ or < characters that aren't valid expressions/tags
+        elements.push(Element::Text(slice_as_bytes(original, &remaining[..1])));
+        remaining = &remaining[1..];
+    }
+
+    elements
 }
 
 fn esi_vars_long<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    // Use parse_vars_content instead of parse_interpolated to avoid infinite recursion
+    // esi:vars supports nested ESI tags (like esi:assign) per common usage patterns
     let (input, _) = streaming_bytes::tag(b"<esi:vars>")(input)?;
-    let (input, elements) = esi_vars_content(original, input)?;
+    let (input, elements) = parse_interpolated(original, input)?;
     let (input, _) = streaming_bytes::tag(b"</esi:vars>")(input)?;
 
     Ok((input, ParseResult::Multiple(elements)))
@@ -614,12 +672,10 @@ fn esi_comment(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
 }
 
 /// Zero-copy esi:remove parser
-fn esi_remove<'a>(
-    original: &Bytes,
-    input: &'a [u8],
-) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+/// Per ESI spec, esi:remove content is discarded - no nested ESI processing needed
+fn esi_remove(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     let (input, _) = streaming_bytes::tag(b"<esi:remove>")(input)?;
-    let (input, _) = parse_interpolated(original, input)?;
+    let (input, _) = streaming_bytes::take_until(b"</esi:remove>".as_ref())(input)?;
     let (input, _) = streaming_bytes::tag(b"</esi:remove>")(input)?;
     Ok((input, ParseResult::Empty))
 }
@@ -809,7 +865,7 @@ fn tag_handler<'a>(
                 b"esi:include" => esi_include(start),
                 b"esi:vars" => esi_vars(original, start),
                 b"esi:comment" => esi_comment(start),
-                b"esi:remove" => esi_remove(original, start),
+                b"esi:remove" => esi_remove(start),
                 b"esi:text" => esi_text(original, start),
                 b"esi:choose" => esi_choose(original, start),
                 b"esi:try" => esi_try(original, start),
@@ -1290,8 +1346,7 @@ exception!
     }
     #[test]
     fn test_parse_esi_vars_long() {
-        // Nested <esi:vars> tags are not supported to prevent infinite recursion
-        // The inner <esi:vars> tags should be treated as plain text/HTML
+        // <esi:vars> can contain text, expressions, HTML, and nested ESI tags (like <esi:assign>)
         let input = br#"<esi:vars>hello<br></esi:vars>"#;
         let bytes = Bytes::from_static(input);
         let (rest, x) = parse_complete(&bytes).unwrap();
@@ -1321,6 +1376,50 @@ exception!
             ]
         );
     }
+
+    #[test]
+    fn test_vars_with_expressions() {
+        // This is the proper use of esi:vars - text with expressions
+        let input = br#"<esi:vars>Hello $(name), welcome!</esi:vars>"#;
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+
+        assert_eq!(rest.len(), 0, "Should parse completely");
+        assert_eq!(elements.len(), 3);
+        assert!(matches!(&elements[0], Element::Text(t) if t.as_ref() == b"Hello "));
+        assert!(matches!(&elements[1], Element::Expr(_)));
+        assert!(matches!(&elements[2], Element::Text(t) if t.as_ref() == b", welcome!"));
+    }
+
+    #[test]
+    fn test_assign_inside_vars() {
+        // Per ESI spec, <esi:vars> can contain <esi:assign> tags
+        let input = br#"
+<esi:vars>
+    <esi:assign name="xyz" value="'test'" />
+    Result: $(xyz)
+</esi:vars>"#;
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+
+        assert_eq!(rest.len(), 0, "Should parse completely");
+        
+        // Should have: whitespace, assign tag, whitespace, text "Result: ", expression $(xyz), whitespace
+        assert!(elements.len() >= 3, "Should have at least assign tag, text, and expression");
+        
+        // Find the assign tag
+        let has_assign = elements.iter().any(|e| {
+            matches!(e, Element::Esi(Tag::Assign { name, .. }) if name == "xyz")
+        });
+        assert!(has_assign, "Should contain esi:assign tag with name='xyz'");
+        
+        // Find the expression
+        let has_expr = elements.iter().any(|e| {
+            matches!(e, Element::Expr(Expr::Variable(name, None, None)) if name == "xyz")
+        });
+        assert!(has_expr, "Should contain expression $(xyz)");
+    }
+
     #[test]
     fn test_parse_complex_expr() {
         let input = br#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#;
