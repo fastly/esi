@@ -8,6 +8,7 @@ mod parser;
 pub mod parser_types;
 
 use crate::expression::EvalContext;
+use crate::parser_types::Expr;
 use bytes::{Buf, Bytes, BytesMut};
 use fastly::http::request::{PendingRequest, PollResult};
 use fastly::http::{header, Method, StatusCode, Url};
@@ -17,7 +18,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 
 pub use crate::error::{ExecutionError as ESIError, Result};
-pub use crate::parser::{parse, parse_complete, parse_expression, parse_interpolated_string};
+pub use crate::parser::{interpolated_content, parse, parse_complete, parse_expression};
 
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;
@@ -78,10 +79,9 @@ impl PendingFragmentContent {
     pub fn poll(self) -> Self {
         match self {
             Self::PendingRequest(pending_request) => match pending_request.poll() {
-                PollResult::Done(result) => match result {
-                    Ok(response) => Self::CompletedRequest(response),
-                    Err(_) => Self::NoContent, // Error case
-                },
+                PollResult::Done(result) => {
+                    result.map_or_else(|_| Self::NoContent, Self::CompletedRequest)
+                }
                 PollResult::Pending(pending_request) => {
                     // Still pending - put it back
                     Self::PendingRequest(pending_request)
@@ -367,20 +367,18 @@ impl Processor {
                         if eof {
                             // All done - parsed everything and reached EOF
                             break;
-                        } else {
-                            // Parsed everything in buffer, clear it and continue reading
-                            buffer.clear();
                         }
+                        // Parsed everything in buffer, clear it and continue reading
+                        buffer.clear();
                     } else {
                         // Have unparsed remainder
                         if eof {
                             // At EOF with unparsed data - already handled by parse_complete_bytes
                             // which treats remainder as Text elements
                             break;
-                        } else {
-                            // Keep remainder for next chunk - advance past consumed bytes
-                            buffer.advance(consumed);
                         }
+                        // Keep remainder for next chunk - advance past consumed bytes
+                        buffer.advance(consumed);
                     }
                 }
                 Err(nom::Err::Incomplete(_)) => {
@@ -395,16 +393,15 @@ impl Processor {
                     }
                     // Not at EOF - loop will read more data
                 }
-                Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+                Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
                     // Parse error
                     if eof {
                         // At EOF with parse error - this is a real error
                         return Err(ESIError::ExpressionError(format!("Parser error: {:?}", e)));
-                    } else {
-                        // Not at EOF - maybe more data will help, output what we have and continue
-                        output_writer.write_all(&buffer)?;
-                        buffer.clear();
                     }
+                    // Not at EOF - maybe more data will help, output what we have and continue
+                    output_writer.write_all(&buffer)?;
+                    buffer.clear();
                 }
             }
         }
@@ -460,22 +457,32 @@ impl Processor {
                 self.ctx.set_variable(&name, None, val);
             }
 
-            Element::Esi(Tag::Vars { name }) => {
+            Element::Esi(Tag::Vars { name: Some(n) }) => {
                 // Non-blocking - just update context
-                if let Some(n) = name {
-                    self.ctx.set_match_name(&n);
-                }
+                self.ctx.set_match_name(&n);
+            }
+
+            Element::Esi(Tag::Vars { name: None }) => {
+                // No-op when name is None
             }
 
             Element::Esi(Tag::Include {
                 src,
                 alt,
                 continue_on_error,
-                params: _,
+                params,
             }) => {
                 // BLOCKING - dispatch and queue
-                // TODO: Pass params to dispatch_and_queue_include
-                self.dispatch_and_queue_include(&src, alt.as_ref(), continue_on_error, dispatcher)?;
+                // Evaluate src and alt expressions to get actual URLs
+                let src_bytes = self.evaluate_expr_to_bytes(src)?;
+                let alt_bytes = alt.map(|e| self.evaluate_expr_to_bytes(e)).transpose()?;
+                self.dispatch_and_queue_include(
+                    &src_bytes,
+                    alt_bytes.as_ref(),
+                    continue_on_error,
+                    &params,
+                    dispatcher,
+                )?;
             }
 
             Element::Esi(Tag::Choose {
@@ -550,14 +557,18 @@ impl Processor {
                                 src,
                                 alt,
                                 continue_on_error,
-                                params: _,
+                                params,
                             }) => {
                                 // Dispatch the include and add to attempt queue
-                                // TODO: Pass params to dispatch_include_to_element
+                                // Evaluate src and alt expressions to get actual URLs
+                                let src_bytes = self.evaluate_expr_to_bytes(src)?;
+                                let alt_bytes =
+                                    alt.map(|e| self.evaluate_expr_to_bytes(e)).transpose()?;
                                 let queued_element = self.dispatch_include_to_element(
-                                    &src,
-                                    alt.as_ref(),
+                                    &src_bytes,
+                                    alt_bytes.as_ref(),
                                     continue_on_error,
+                                    &params,
                                     dispatcher,
                                 )?;
                                 attempt_queue.push(queued_element);
@@ -638,14 +649,18 @@ impl Processor {
                             src,
                             alt,
                             continue_on_error,
-                            params: _,
+                            params,
                         }) => {
                             // Dispatch the include and add to except queue
-                            // TODO: Pass params to dispatch_include_to_element
+                            // Evaluate src and alt expressions to get actual URLs
+                            let src_bytes = self.evaluate_expr_to_bytes(src)?;
+                            let alt_bytes =
+                                alt.map(|e| self.evaluate_expr_to_bytes(e)).transpose()?;
                             let queued_element = self.dispatch_include_to_element(
-                                &src,
-                                alt.as_ref(),
+                                &src_bytes,
+                                alt_bytes.as_ref(),
                                 continue_on_error,
+                                &params,
                                 dispatcher,
                             )?;
                             except_queue.push(queued_element);
@@ -667,16 +682,29 @@ impl Processor {
         Ok(())
     }
 
+    /// Evaluate an Expr to a Bytes value for use in includes
+    /// Handles variable resolution, function calls, and string interpolation
+    fn evaluate_expr_to_bytes(&mut self, expr: Expr) -> Result<Bytes> {
+        use crate::expression::eval_expr;
+
+        // Evaluate the expression to get a Value (no clone needed - we own it)
+        let result = eval_expr(expr, &mut self.ctx)?;
+
+        // Convert the Value to Bytes using the built-in to_bytes method
+        Ok(result.to_bytes())
+    }
+
     /// Dispatch an include and add to queue
     fn dispatch_and_queue_include(
         &mut self,
         src: &Bytes,
         alt: Option<&Bytes>,
         continue_on_error: bool,
+        params: &[(String, Expr)],
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<()> {
         let queued_element =
-            self.dispatch_include_to_element(src, alt, continue_on_error, dispatcher)?;
+            self.dispatch_include_to_element(src, alt, continue_on_error, params, dispatcher)?;
         self.queue.push_back(queued_element);
         Ok(())
     }
@@ -688,13 +716,30 @@ impl Processor {
         src: &Bytes,
         alt: Option<&Bytes>,
         continue_on_error: bool,
+        params: &[(String, Expr)],
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<QueuedElement> {
-        let interpolated_src = try_evaluate_interpolated_string(src, &mut self.ctx)?;
+        // Evaluate params and append to URL
+        let mut url = String::from_utf8_lossy(src).into_owned();
+        if !params.is_empty() {
+            let separator = if url.contains('?') { '&' } else { '?' };
+            let mut first = true;
+            for (name, value_expr) in params {
+                let value = self.evaluate_expr_to_bytes(value_expr.clone())?;
+                let value_str = String::from_utf8_lossy(&value);
+                if first && separator == '?' {
+                    url.push_str(&format!("?{}={}", name, value_str));
+                } else {
+                    url.push_str(&format!("&{}={}", name, value_str));
+                }
+                first = false;
+            }
+        }
+        let final_src = Bytes::from(url);
 
         let req = build_fragment_request(
             self.ctx.get_request().clone_without_body(),
-            &interpolated_src,
+            &final_src,
             self.configuration.is_escaped_content,
         )?;
 
@@ -711,16 +756,19 @@ impl Processor {
             Err(_) if continue_on_error => {
                 // Try alt or add error placeholder
                 if let Some(alt_src) = alt {
-                    let alt_interpolated =
-                        try_evaluate_interpolated_string(alt_src, &mut self.ctx)?;
                     let alt_req = build_fragment_request(
                         self.ctx.get_request().clone_without_body(),
-                        &alt_interpolated,
+                        alt_src,
                         self.configuration.is_escaped_content,
                     )?;
 
-                    match dispatcher(alt_req.clone_without_body()) {
-                        Ok(alt_pending) => {
+                    dispatcher(alt_req.clone_without_body()).map_or_else(
+                        |_| {
+                            Ok(QueuedElement::Content(Bytes::from_static(
+                                b"<!-- fragment request failed -->",
+                            )))
+                        },
+                        |alt_pending| {
                             let alt_fragment = Fragment {
                                 request: alt_req,
                                 alt: None,
@@ -728,11 +776,8 @@ impl Processor {
                                 pending_content: alt_pending,
                             };
                             Ok(QueuedElement::Include(Box::new(alt_fragment)))
-                        }
-                        Err(_) => Ok(QueuedElement::Content(Bytes::from_static(
-                            b"<!-- fragment request failed -->",
-                        ))),
-                    }
+                        },
+                    )
                 } else {
                     Ok(QueuedElement::Content(Bytes::from_static(
                         b"<!-- fragment request failed -->",
@@ -806,8 +851,8 @@ impl Processor {
         Ok(())
     }
 
-    /// Drain queue with efficient waiting using select()
-    /// Uses select() to process whichever pending request completes first
+    /// Drain queue with efficient waiting using `select()`
+    /// Uses `select()` to process whichever pending request completes first
     fn drain_queue(
         &mut self,
         output_writer: &mut impl Write,
@@ -910,10 +955,10 @@ impl Processor {
                 fragments_by_request.remove(completed_idx);
 
             // Update the completed fragment with the result
-            completed_fragment.pending_content = match result {
-                Ok(response) => PendingFragmentContent::CompletedRequest(response),
-                Err(_) => PendingFragmentContent::NoContent,
-            };
+            completed_fragment.pending_content = result.map_or_else(
+                |_| PendingFragmentContent::NoContent,
+                PendingFragmentContent::CompletedRequest,
+            );
 
             // Put remaining fragments back in queue (with their pending requests restored)
             for (pending_req, (_idx, mut fragment)) in
@@ -1011,7 +1056,7 @@ impl Processor {
 
     /// Process an include from the queue (wait and write, handle alt)
     fn process_include_from_queue(
-        &mut self,
+        &self,
         fragment: Fragment,
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
@@ -1039,10 +1084,9 @@ impl Processor {
         } else if let Some(alt_src) = fragment.alt {
             // Try alt
             debug!("Main request failed, trying alt");
-            let alt_interpolated = try_evaluate_interpolated_string(&alt_src, &mut self.ctx)?;
             let alt_req = build_fragment_request(
                 self.ctx.get_request().clone_without_body(),
-                &alt_interpolated,
+                &alt_src,
                 self.configuration.is_escaped_content,
             )?;
 
@@ -1135,87 +1179,4 @@ fn build_fragment_request(mut request: Request, url: &Bytes, is_escaped: bool) -
     Ok(request)
 }
 
-/// Processes Bytes containing interpolated expressions
-///
-/// This function evaluates expressions like $(HTTP_HOST) in text content and
-/// provides the processed segments to the caller through a callback function.
-/// ZERO-COPY: Works directly with Bytes references.
-///
-/// # Arguments
-/// * `input` - The input Bytes containing potential interpolated expressions
-/// * `ctx` - Evaluation context containing variables and state
-/// * `segment_handler` - A function that handles each segment (raw text or evaluated expression)
-///
-/// # Returns
-/// * `Result<()>` - Success or error during processing
-///
-pub fn process_interpolated_chars<F>(
-    input: &Bytes,
-    ctx: &mut EvalContext,
-    mut segment_handler: F,
-) -> Result<()>
-where
-    F: FnMut(Bytes) -> Result<()>,
-{
-    // Parse the input with interpolated expressions using nom parser
-    let elements = match crate::parser::parse_interpolated_string(input) {
-        Ok((_, elements)) => elements,
-        Err(_) => {
-            // If parsing fails, treat the whole input as text
-            segment_handler(input.clone())?;
-            return Ok(());
-        }
-    };
-
-    // Process each element
-    for element in elements {
-        match element {
-            parser_types::Element::Text(text) => {
-                segment_handler(text)?;
-            }
-            parser_types::Element::Expr(expr) => {
-                // Evaluate the expression using eval_expr
-                match crate::expression::eval_expr(expr, ctx) {
-                    Ok(value) => segment_handler(value.to_bytes())?,
-                    Err(e) => {
-                        // Log the error but continue processing (same behavior as old code)
-                        debug!("Error while evaluating interpolated expression: {e}");
-                    }
-                }
-            }
-            _ => {
-                // Skip ESI tags (shouldn't happen in interpolated strings but handle gracefully)
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Evaluates all interpolated expressions and returns the complete result as Bytes
-///
-/// This is a convenience wrapper around `process_interpolated_chars` that collects
-/// all output into a single Bytes buffer.
-/// ZERO-COPY: Returns Bytes that may reference the original buffer.
-///
-/// # Arguments
-/// * `input` - The input Bytes containing potential interpolated expressions
-/// * `ctx` - Evaluation context containing variables and state
-///
-/// # Returns
-/// * `Result<Bytes>` - The fully processed content with all expressions evaluated
-///
-/// # Errors
-/// Returns error if expression evaluation fails
-///
-pub fn try_evaluate_interpolated_string(input: &Bytes, ctx: &mut EvalContext) -> Result<Bytes> {
-    let mut result = BytesMut::new();
-
-    process_interpolated_chars(input, ctx, |segment| {
-        result.extend_from_slice(&segment);
-        Ok(())
-    })?;
-
-    Ok(result.freeze())
-}
 // Helper Functions

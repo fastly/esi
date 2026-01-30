@@ -16,7 +16,10 @@ fn test_parse_basic_include() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
-        ) if src.as_ref() == b"https://example.com/hello" && alt.is_none() && !continue_on_error && params.is_empty())
+        ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "https://example.com/hello") 
+            && alt.is_none() 
+            && !continue_on_error 
+            && params.is_empty())
     });
 
     assert!(
@@ -36,7 +39,10 @@ fn test_parse_include_with_alt_and_onerror() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
-        ) if src.as_ref() == b"abc" && alt.as_ref().map(|a| a.as_ref()) == Some(&b"def"[..]) && *continue_on_error && params.is_empty())
+        ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "abc")
+            && matches!(alt, Some(esi::parser_types::Expr::String(Some(a))) if a == "def")
+            && *continue_on_error 
+            && params.is_empty())
     });
 
     assert!(
@@ -77,7 +83,10 @@ fn test_parse_include_with_onerror() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
-        ) if src.as_ref() == b"/_fragments/content.html" && alt.is_none() && *continue_on_error && params.is_empty())
+        ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "/_fragments/content.html")
+            && alt.is_none() 
+            && *continue_on_error 
+            && params.is_empty())
     });
 
     assert!(include_found, "Should find Include with onerror=continue");
@@ -96,12 +105,12 @@ fn test_parse_include_with_single_param() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
-        ) if src.as_ref() == b"/fragment" 
+        ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "/fragment")
             && alt.is_none() 
             && !continue_on_error 
             && params.len() == 1
             && params[0].0 == "foo"
-            && params[0].1 == "bar")
+            && matches!(&params[0].1, esi::parser_types::Expr::String(Some(v)) if v == "bar"))
     });
 
     assert!(include_found, "Should find Include with one param");
@@ -122,13 +131,13 @@ fn test_parse_include_with_multiple_params() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
-        ) if src.as_ref() == b"/fragment" 
-            && alt.as_ref().map(|a| a.as_ref()) == Some(&b"/fallback"[..])
+        ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "/fragment")
+            && matches!(alt, Some(esi::parser_types::Expr::String(Some(a))) if a == "/fallback")
             && *continue_on_error 
             && params.len() == 3
-            && params[0] == ("user".to_string(), "alice".to_string())
-            && params[1] == ("role".to_string(), "admin".to_string())
-            && params[2] == ("id".to_string(), "123".to_string()))
+            && params[0].0 == "user" && matches!(&params[0].1, esi::parser_types::Expr::String(Some(v)) if v == "alice")
+            && params[1].0 == "role" && matches!(&params[1].1, esi::parser_types::Expr::String(Some(v)) if v == "admin")
+            && params[2].0 == "id" && matches!(&params[2].1, esi::parser_types::Expr::Integer(123)))
     });
 
     assert!(include_found, "Should find Include with multiple params");
@@ -145,10 +154,73 @@ fn test_parse_include_self_closing_has_no_params() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
             esi::parser_types::Tag::Include { src, params, .. }
-        ) if src.as_ref() == b"/test" && params.is_empty())
+        ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "/test") && params.is_empty())
     });
 
     assert!(include_found, "Self-closing include should have no params");
+}
+
+#[test]
+fn test_parse_include_with_query_string_variable() {
+    // Example from Akamai ESI spec
+    // Mixed text+variable interpolation is now properly parsed at parse-time
+    let input =
+        br#"<esi:include src="http://search.akamai.com/search?query=$(QUERY_STRING{'query'})"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    // The src is parsed as Interpolated with text and expression parts
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
+            esi::parser_types::Tag::Include { src, .. }
+        ) if matches!(src, esi::parser_types::Expr::Interpolated(_)))
+    });
+
+    assert!(include_found, "Should find Include with interpolated src");
+}
+
+#[test]
+fn test_parse_param_value_with_variable_expression() {
+    let input = br#"<esi:assign name="var1" value="'variable_2'"/>
+<esi:include src="a.xml">
+<esi:param name="foo" value="$(var1)"/>
+</esi:include>"#;
+    let bytes = Bytes::from_static(input);
+    let result = parse_complete(&bytes);
+
+    assert!(
+        result.is_ok(),
+        "Should parse successfully: {:?}",
+        result.err()
+    );
+
+    let (remaining, elements) = result.unwrap();
+    assert_eq!(remaining, b"");
+
+    // Check what the param value looks like
+    let include_found = elements.iter().find_map(|element| {
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Include { params, .. }) =
+            element
+        {
+            Some(params)
+        } else {
+            None
+        }
+    });
+
+    assert!(include_found.is_some(), "Should find include");
+    let params = include_found.unwrap();
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0].0, "foo");
+
+    // Now the value is parsed as a Variable expression!
+    println!("Param value: {:?}", params[0].1);
+    assert!(
+        matches!(&params[0].1, esi::parser_types::Expr::Variable(name, _, _) if name == "var1"),
+        "Param value should be parsed as a Variable expression"
+    );
 }
 
 #[test]
@@ -181,7 +253,7 @@ fn test_parse_try_with_attempt_and_except() {
                 attempt_elements.iter().any(|c| {
                     matches!(c, esi::parser_types::Element::Esi(
                         esi::parser_types::Tag::Include { src, .. }
-                    ) if src.as_ref() == b"/abc")
+                    ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "/abc"))
                 })
             });
 
@@ -189,7 +261,7 @@ fn test_parse_try_with_attempt_and_except() {
             let except_has_xyz = except_events.iter().any(|c| {
                 matches!(c, esi::parser_types::Element::Esi(
                     esi::parser_types::Tag::Include { src, .. }
-                ) if src.as_ref() == b"/xyz")
+                ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "/xyz"))
             });
 
             attempt_has_abc && except_has_xyz
@@ -239,7 +311,7 @@ fn test_parse_nested_try() {
                 attempt_elements.iter().any(|c| {
                     matches!(c, esi::parser_types::Element::Esi(
                         esi::parser_types::Tag::Include { src, .. }
-                    ) if src.as_ref() == b"/abc")
+                    ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "/abc"))
                 })
             });
 
@@ -257,7 +329,7 @@ fn test_parse_nested_try() {
             let has_xyz = except_events.iter().any(|c| {
                 matches!(c, esi::parser_types::Element::Esi(
                     esi::parser_types::Tag::Include { src, .. }
-                ) if src.as_ref() == b"/xyz")
+                ) if matches!(src, esi::parser_types::Expr::String(Some(s)) if s == "/xyz"))
             });
 
             has_abc && has_nested_try && has_xyz

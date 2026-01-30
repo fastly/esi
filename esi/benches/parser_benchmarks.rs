@@ -284,7 +284,7 @@ fn benchmark_interpolated_strings(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(name), &string, |b, string| {
             b.iter(|| {
                 let bytes = Bytes::from(*string);
-                let result = esi::parse_interpolated_string(black_box(&bytes)).unwrap();
+                let result = esi::interpolated_content(black_box(&bytes)).unwrap();
                 black_box(result);
             });
         });

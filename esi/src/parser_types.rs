@@ -11,10 +11,10 @@ pub struct WhenBranch {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Tag {
     Include {
-        src: Bytes,
-        alt: Option<Bytes>,
+        src: Expr,
+        alt: Option<Expr>,
         continue_on_error: bool,
-        params: Vec<(String, String)>,
+        params: Vec<(String, Expr)>,
     },
     Try {
         attempt_events: Vec<Vec<Element>>,
