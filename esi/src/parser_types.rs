@@ -14,6 +14,7 @@ pub enum Tag {
         src: Bytes,
         alt: Option<Bytes>,
         continue_on_error: bool,
+        params: Vec<(String, String)>,
     },
     Try {
         attempt_events: Vec<Vec<Element>>,

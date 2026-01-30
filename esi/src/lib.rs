@@ -471,8 +471,10 @@ impl Processor {
                 src,
                 alt,
                 continue_on_error,
+                params: _,
             }) => {
                 // BLOCKING - dispatch and queue
+                // TODO: Pass params to dispatch_and_queue_include
                 self.dispatch_and_queue_include(&src, alt.as_ref(), continue_on_error, dispatcher)?;
             }
 
@@ -548,8 +550,10 @@ impl Processor {
                                 src,
                                 alt,
                                 continue_on_error,
+                                params: _,
                             }) => {
                                 // Dispatch the include and add to attempt queue
+                                // TODO: Pass params to dispatch_include_to_element
                                 let queued_element = self.dispatch_include_to_element(
                                     &src,
                                     alt.as_ref(),
@@ -634,8 +638,10 @@ impl Processor {
                             src,
                             alt,
                             continue_on_error,
+                            params: _,
                         }) => {
                             // Dispatch the include and add to except queue
+                            // TODO: Pass params to dispatch_include_to_element
                             let queued_element = self.dispatch_include_to_element(
                                 &src,
                                 alt.as_ref(),

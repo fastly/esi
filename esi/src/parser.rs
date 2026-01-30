@@ -11,7 +11,7 @@ use nom::character::complete::multispace0;
 use nom::branch::alt;
 use nom::combinator::{map, map_res, not, opt, peek, recognize};
 use nom::error::Error;
-use nom::multi::{fold_many0, separated_list0};
+use nom::multi::{fold_many0, many0, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 use std::collections::HashMap;
@@ -694,14 +694,15 @@ fn esi_text<'a>(
     )(input)
 }
 fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
+    alt((esi_include_self_closing, esi_include_with_params))(input)
+}
+
+fn esi_include_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     map(
         delimited(
             streaming_bytes::tag(b"<esi:include"),
             attributes,
-            preceded(
-                streaming_char::multispace0,
-                alt((closing_bracket, self_closing)),
-            ),
+            preceded(streaming_char::multispace0, self_closing),
         ),
         |mut attrs| {
             let src = attrs.remove("src").map(Bytes::from).unwrap_or_default();
@@ -715,7 +716,58 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
                 src,
                 alt,
                 continue_on_error,
+                params: Vec::new(),
             }))
+        },
+    )(input)
+}
+
+fn esi_include_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
+    map(
+        tuple((
+            delimited(
+                streaming_bytes::tag(b"<esi:include"),
+                attributes,
+                preceded(streaming_char::multispace0, closing_bracket),
+            ),
+            many0(preceded(streaming_char::multispace0, esi_param)),
+            preceded(
+                streaming_char::multispace0,
+                streaming_bytes::tag(&b"</esi:include>"[..]),
+            ),
+        )),
+        |(mut attrs, params, _)| {
+            let src = attrs.remove("src").map(Bytes::from).unwrap_or_default();
+            let alt = attrs.remove("alt").map(Bytes::from);
+            let continue_on_error = attrs
+                .get("onerror")
+                .map(|s| s == "continue")
+                .unwrap_or(false);
+
+            ParseResult::Single(Element::Esi(Tag::Include {
+                src,
+                alt,
+                continue_on_error,
+                params,
+            }))
+        },
+    )(input)
+}
+
+fn esi_param(input: &[u8]) -> IResult<&[u8], (String, String), Error<&[u8]>> {
+    map(
+        delimited(
+            streaming_bytes::tag(b"<esi:param"),
+            attributes,
+            preceded(
+                streaming_char::multispace0,
+                alt((closing_bracket, self_closing)),
+            ),
+        ),
+        |mut attrs| {
+            let name = attrs.remove("name").unwrap_or_default();
+            let value = attrs.remove("value").unwrap_or_default();
+            (name, value)
         },
     )(input)
 }

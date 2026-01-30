@@ -15,8 +15,8 @@ fn test_parse_basic_include() {
     // Find the Include tag
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Include { src, alt, continue_on_error }
-        ) if src.as_ref() == b"https://example.com/hello" && alt.is_none() && !continue_on_error)
+            esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
+        ) if src.as_ref() == b"https://example.com/hello" && alt.is_none() && !continue_on_error && params.is_empty())
     });
 
     assert!(
@@ -35,8 +35,8 @@ fn test_parse_include_with_alt_and_onerror() {
 
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Include { src, alt, continue_on_error }
-        ) if src.as_ref() == b"abc" && alt.as_ref().map(|a| a.as_ref()) == Some(&b"def"[..]) && *continue_on_error)
+            esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
+        ) if src.as_ref() == b"abc" && alt.as_ref().map(|a| a.as_ref()) == Some(&b"def"[..]) && *continue_on_error && params.is_empty())
     });
 
     assert!(
@@ -58,8 +58,8 @@ fn test_parse_open_include() {
 
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Chunk::Esi(
-            esi::parser_types::Tag::Include { src, alt, continue_on_error }
-        ) if src == "abc" && alt == &Some("def".to_string()) && *continue_on_error)
+            esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
+        ) if src == "abc" && alt == &Some("def".to_string()) && *continue_on_error && params.is_empty())
     });
 
     assert!(include_found, "Should parse open-close include tag");
@@ -76,11 +76,79 @@ fn test_parse_include_with_onerror() {
 
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Include { src, alt, continue_on_error }
-        ) if src.as_ref() == b"/_fragments/content.html" && alt.is_none() && *continue_on_error)
+            esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
+        ) if src.as_ref() == b"/_fragments/content.html" && alt.is_none() && *continue_on_error && params.is_empty())
     });
 
     assert!(include_found, "Should find Include with onerror=continue");
+}
+
+#[test]
+fn test_parse_include_with_single_param() {
+    let input = br#"<esi:include src="/fragment">
+    <esi:param name="foo" value="bar"/>
+</esi:include>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
+            esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
+        ) if src.as_ref() == b"/fragment" 
+            && alt.is_none() 
+            && !continue_on_error 
+            && params.len() == 1
+            && params[0].0 == "foo"
+            && params[0].1 == "bar")
+    });
+
+    assert!(include_found, "Should find Include with one param");
+}
+
+#[test]
+fn test_parse_include_with_multiple_params() {
+    let input = br#"<esi:include src="/fragment" alt="/fallback" onerror="continue">
+    <esi:param name="user" value="alice"/>
+    <esi:param name="role" value="admin"/>
+    <esi:param name="id" value="123"/>
+</esi:include>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
+            esi::parser_types::Tag::Include { src, alt, continue_on_error, params }
+        ) if src.as_ref() == b"/fragment" 
+            && alt.as_ref().map(|a| a.as_ref()) == Some(&b"/fallback"[..])
+            && *continue_on_error 
+            && params.len() == 3
+            && params[0] == ("user".to_string(), "alice".to_string())
+            && params[1] == ("role".to_string(), "admin".to_string())
+            && params[2] == ("id".to_string(), "123".to_string()))
+    });
+
+    assert!(include_found, "Should find Include with multiple params");
+}
+
+#[test]
+fn test_parse_include_self_closing_has_no_params() {
+    let input = br#"<esi:include src="/test"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
+            esi::parser_types::Tag::Include { src, params, .. }
+        ) if src.as_ref() == b"/test" && params.is_empty())
+    });
+
+    assert!(include_found, "Self-closing include should have no params");
 }
 
 #[test]
