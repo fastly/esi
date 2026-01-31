@@ -473,16 +473,9 @@ impl Processor {
                 params,
             }) => {
                 // BLOCKING - dispatch and queue
-                // Evaluate src and alt expressions to get actual URLs
-                let src_bytes = self.evaluate_expr_to_bytes(src)?;
-                let alt_bytes = alt.map(|e| self.evaluate_expr_to_bytes(e)).transpose()?;
-                self.dispatch_and_queue_include(
-                    &src_bytes,
-                    alt_bytes.as_ref(),
-                    continue_on_error,
-                    &params,
-                    dispatcher,
-                )?;
+                let queued_element =
+                    self.process_include_tag(src, alt, continue_on_error, params, dispatcher)?;
+                self.queue.push_back(queued_element);
             }
 
             Element::Esi(Tag::Choose {
@@ -560,15 +553,11 @@ impl Processor {
                                 params,
                             }) => {
                                 // Dispatch the include and add to attempt queue
-                                // Evaluate src and alt expressions to get actual URLs
-                                let src_bytes = self.evaluate_expr_to_bytes(src)?;
-                                let alt_bytes =
-                                    alt.map(|e| self.evaluate_expr_to_bytes(e)).transpose()?;
-                                let queued_element = self.dispatch_include_to_element(
-                                    &src_bytes,
-                                    alt_bytes.as_ref(),
+                                let queued_element = self.process_include_tag(
+                                    src,
+                                    alt,
                                     continue_on_error,
-                                    &params,
+                                    params,
                                     dispatcher,
                                 )?;
                                 attempt_queue.push(queued_element);
@@ -652,15 +641,11 @@ impl Processor {
                             params,
                         }) => {
                             // Dispatch the include and add to except queue
-                            // Evaluate src and alt expressions to get actual URLs
-                            let src_bytes = self.evaluate_expr_to_bytes(src)?;
-                            let alt_bytes =
-                                alt.map(|e| self.evaluate_expr_to_bytes(e)).transpose()?;
-                            let queued_element = self.dispatch_include_to_element(
-                                &src_bytes,
-                                alt_bytes.as_ref(),
+                            let queued_element = self.process_include_tag(
+                                src,
+                                alt,
                                 continue_on_error,
-                                &params,
+                                params,
                                 dispatcher,
                             )?;
                             except_queue.push(queued_element);
@@ -694,19 +679,27 @@ impl Processor {
         Ok(result.to_bytes())
     }
 
-    /// Dispatch an include and add to queue
-    fn dispatch_and_queue_include(
+    /// Helper to evaluate Include expressions and dispatch the request
+    /// Returns a QueuedElement ready to be added to any queue (main/attempt/except)
+    fn process_include_tag(
         &mut self,
-        src: &Bytes,
-        alt: Option<&Bytes>,
+        src: Expr,
+        alt: Option<Expr>,
         continue_on_error: bool,
-        params: &[(String, Expr)],
+        params: Vec<(String, Expr)>,
         dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<()> {
-        let queued_element =
-            self.dispatch_include_to_element(src, alt, continue_on_error, params, dispatcher)?;
-        self.queue.push_back(queued_element);
-        Ok(())
+    ) -> Result<QueuedElement> {
+        // Evaluate src and alt expressions to get actual URLs
+        let src_bytes = self.evaluate_expr_to_bytes(src)?;
+        let alt_bytes = alt.map(|e| self.evaluate_expr_to_bytes(e)).transpose()?;
+
+        self.dispatch_include_to_element(
+            &src_bytes,
+            alt_bytes.as_ref(),
+            continue_on_error,
+            &params,
+            dispatcher,
+        )
     }
 
     /// Dispatch an include and return a QueuedElement (for flexible queue insertion)
@@ -722,17 +715,12 @@ impl Processor {
         // Evaluate params and append to URL
         let mut url = String::from_utf8_lossy(src).into_owned();
         if !params.is_empty() {
-            let separator = if url.contains('?') { '&' } else { '?' };
-            let mut first = true;
+            let mut separator = if url.contains('?') { '&' } else { '?' };
             for (name, value_expr) in params {
                 let value = self.evaluate_expr_to_bytes(value_expr.clone())?;
                 let value_str = String::from_utf8_lossy(&value);
-                if first && separator == '?' {
-                    url.push_str(&format!("?{}={}", name, value_str));
-                } else {
-                    url.push_str(&format!("&{}={}", name, value_str));
-                }
-                first = false;
+                url.push_str(&format!("{}{}={}", separator, name, value_str));
+                separator = '&';
             }
         }
         let final_src = Bytes::from(url);

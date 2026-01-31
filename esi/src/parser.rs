@@ -301,54 +301,46 @@ fn assign_attributes_short(attrs: HashMap<String, String>) -> ParseResult {
 ///   "$(VARIABLE)" -> Expr::Variable("VARIABLE", ...)
 ///   "http://example.com?q=$(QUERY_STRING{'query'})" -> Expr::Interpolated([Text, Expr])
 fn parse_attr_as_expr(value_str: String) -> Expr {
-    // Fast-path: empty string (#4)
+    // Fast-path: empty string
     if value_str.is_empty() {
         return Expr::String(Some(String::new()));
     }
 
-    // Fast-path: plain string without expressions
-    // Skip if: contains $, starts with quote, or is all digits (could be Integer)
-    // This handles most URLs/paths and avoids String->Bytes->String conversion (#2)
-    let is_potentially_numeric = value_str.bytes().all(|b| b.is_ascii_digit() || b == b'-');
+    // Fast-path: plain string without special chars
+    // This handles most URLs/paths and avoids any parsing overhead
     if !value_str.contains('$')
         && !value_str.starts_with('\'')
         && !value_str.starts_with('"')
-        && !is_potentially_numeric
+        && !value_str.bytes().all(|b| b.is_ascii_digit() || b == b'-')
     {
         return Expr::String(Some(value_str));
     }
 
-    // Try to parse as pure ESI expression first (variables/functions/quoted strings/integers)
-    if let Ok((remaining, expr)) = parse_expression(&value_str) {
-        // Only accept if we consumed the entire string (pure expression)
-        if remaining.is_empty() {
-            return expr;
-        }
-    }
-
-    // Not a pure expression - try interpolation (mixed text + expressions)
+    // Primary path: use interpolated_content which handles:
+    // - Pure expressions: $(VAR), function(...), 123, 'quoted'
+    // - Mixed content: prefix$(VAR), $(A)$(B), text $(VAR) more
     let bytes = Bytes::from(value_str);
     match interpolated_content(&bytes) {
-        Ok((_, elements)) if elements.len() == 1 => {
-            // Single element - unwrap it
-            match elements.into_iter().next().unwrap() {
-                Element::Expr(expr) => expr,
-                Element::Text(text) => {
-                    // Plain text - convert to string expression
-                    Expr::String(Some(String::from_utf8_lossy(&text).into_owned()))
+        Ok((remaining, elements)) if remaining.is_empty() => {
+            // Successfully parsed entire input
+            if elements.len() == 1 {
+                match elements.into_iter().next().unwrap() {
+                    Element::Expr(expr) => expr,
+                    Element::Text(text) => Expr::String(Some(String::from_utf8_lossy(&text).into_owned())),
+                    _ => Expr::String(Some(String::from_utf8_lossy(&bytes).into_owned())),
                 }
-                _ => {
-                    // Fallback: reconstruct string from bytes
-                    Expr::String(Some(String::from_utf8_lossy(&bytes).into_owned()))
-                }
+            } else if !elements.is_empty() {
+                // Multiple elements - this is interpolation
+                Expr::Interpolated(elements)
+            } else {
+                // Empty elements - treat as empty string
+                Expr::String(Some(String::new()))
             }
         }
-        Ok((_, elements)) if !elements.is_empty() => {
-            // Multiple elements - this is interpolation
-            Expr::Interpolated(elements)
-        }
         _ => {
-            // Parse failed or empty
+            // Parse failed or didn't consume everything
+            // This shouldn't happen for src/alt/param attributes in practice,
+            // but keep as fallback
             Expr::String(Some(String::from_utf8_lossy(&bytes).into_owned()))
         }
     }
@@ -1263,9 +1255,10 @@ fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
 }
 
 fn interpolated_expression(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
-    map(alt((esi_function, esi_variable)), |expr| {
-        ParseResult::Single(Element::Expr(expr))
-    })(input)
+    map(
+        alt((esi_function, esi_variable, integer, string)),
+        |expr| ParseResult::Single(Element::Expr(expr)),
+    )(input)
 }
 
 fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
