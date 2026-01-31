@@ -203,9 +203,9 @@ fn process_include_with_query_string_interpolation() -> Result<(), Error> {
                 correct_fragment_request_made_clone.store(contains_api_key, Ordering::SeqCst);
 
                 // Return a mock response for the fragment request
-                Ok(esi::PendingFragmentContent::CompletedRequest(
+                Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
                     Response::from_body("fragment content"),
-                ))
+                )))
             }),
             None,
         )
@@ -381,9 +381,9 @@ fn test_configuration_is_escaped_content() {
     let captured_url_clone = captured_url.clone();
     let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
         *captured_url_clone.borrow_mut() = req.get_url_str().to_string();
-        Ok(esi::PendingFragmentContent::CompletedRequest(
+        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
             fastly::Response::from_body("fragment content"),
-        ))
+        )))
     };
 
     let processor = Processor::new(
@@ -421,9 +421,9 @@ fn test_configuration_is_escaped_content_disabled() {
     let captured_url_clone = captured_url.clone();
     let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
         *captured_url_clone.borrow_mut() = req.get_url_str().to_string();
-        Ok(esi::PendingFragmentContent::CompletedRequest(
+        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
             fastly::Response::from_body("fragment content"),
-        ))
+        )))
     };
 
     let processor = Processor::new(
@@ -458,7 +458,9 @@ fn test_process_fragment_response_callback() {
     let dispatcher = |_req: Request| -> esi::Result<esi::PendingFragmentContent> {
         let mut resp = fastly::Response::from_body("original content");
         resp.set_header("X-Custom-Header", "original-value");
-        Ok(esi::PendingFragmentContent::CompletedRequest(resp))
+        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+            resp,
+        )))
     };
 
     // Response processor that modifies the response
@@ -528,9 +530,9 @@ fn test_process_fragment_response_on_alt() {
             ))
         } else {
             // Alt request succeeds
-            Ok(esi::PendingFragmentContent::CompletedRequest(
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
                 fastly::Response::from_body("alt content"),
-            ))
+            )))
         }
     };
 
@@ -587,9 +589,9 @@ fn test_process_fragment_response_error_handling() {
 
     // Dispatcher returns a response
     let dispatcher = |_req: Request| -> esi::Result<esi::PendingFragmentContent> {
-        Ok(esi::PendingFragmentContent::CompletedRequest(
+        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
             fastly::Response::from_body("content"),
-        ))
+        )))
     };
 
     // Response processor that returns an error
@@ -653,9 +655,9 @@ fn test_alt_url_with_interpolation() {
         } else {
             // Alt request succeeds - capture the URL
             *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();
-            Ok(esi::PendingFragmentContent::CompletedRequest(
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
                 fastly::Response::from_body("alt content"),
-            ))
+            )))
         }
     };
 
@@ -713,9 +715,9 @@ fn test_alt_url_with_function_interpolation() {
         } else {
             // Alt request succeeds - capture the URL
             *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();
-            Ok(esi::PendingFragmentContent::CompletedRequest(
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
                 fastly::Response::from_body("alt with function"),
-            ))
+            )))
         }
     };
 

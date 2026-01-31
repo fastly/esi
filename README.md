@@ -21,6 +21,10 @@ This implementation also includes an expression interpreter and library of funct
 
 ## Example Usage
 
+### Streaming Processing (Recommended)
+
+The recommended approach uses streaming to process the document as it arrives, minimizing memory usage and latency:
+
 ```rust,no_run
 use fastly::{http::StatusCode, mime, Error, Request, Response};
 
@@ -51,8 +55,9 @@ fn handle_request(req: Request) -> Result<(), Error> {
             esi::Configuration::default()
         );
 
+        // Stream the ESI response directly to the client
         processor.process_response(
-            // The ESI source document. Note that the body will be consumed.
+            // The ESI source document. Body will be consumed and streamed.
             &mut beresp,
             // Optionally provide a template for the client response.
             Some(Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML)),
@@ -77,6 +82,37 @@ fn handle_request(req: Request) -> Result<(), Error> {
         // Otherwise, we can just return the response.
         beresp.send_to_client();
     }
+
+    Ok(())
+}
+```
+
+### Custom Stream Processing
+
+For advanced use cases, you can process any `BufRead` source and write to any `Write` destination:
+
+```rust,no_run
+use std::io::{BufReader, Write};
+use esi::{Processor, Configuration};
+
+fn process_custom_stream(
+    input: impl std::io::Read,
+    output: &mut impl Write,
+) -> Result<(), esi::ExecutionError> {
+    let processor = Processor::new(None, Configuration::default());
+
+    // Process from any readable source
+    let reader = BufReader::new(input);
+
+    processor.process_document(
+        reader,
+        output,
+        Some(&|req| {
+            // Custom fragment dispatcher
+            Ok(req.send_async("backend")?.into())
+        }),
+        None,
+    )?;
 
     Ok(())
 }

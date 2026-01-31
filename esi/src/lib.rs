@@ -29,20 +29,20 @@ type FragmentResponseProcessor = dyn Fn(&mut Request, Response) -> Result<Respon
 
 /// Representation of a fragment that is either being fetched, has already been fetched (or generated synthetically), or skipped.
 pub enum PendingFragmentContent {
-    PendingRequest(PendingRequest),
-    CompletedRequest(Response),
+    PendingRequest(Box<PendingRequest>),
+    CompletedRequest(Box<Response>),
     NoContent,
 }
 
 impl From<PendingRequest> for PendingFragmentContent {
     fn from(value: PendingRequest) -> Self {
-        Self::PendingRequest(value)
+        Self::PendingRequest(Box::new(value))
     }
 }
 
 impl From<Response> for PendingFragmentContent {
     fn from(value: Response) -> Self {
-        Self::CompletedRequest(value)
+        Self::CompletedRequest(Box::new(value))
     }
 }
 
@@ -79,12 +79,13 @@ impl PendingFragmentContent {
     pub fn poll(self) -> Self {
         match self {
             Self::PendingRequest(pending_request) => match pending_request.poll() {
-                PollResult::Done(result) => {
-                    result.map_or_else(|_| Self::NoContent, Self::CompletedRequest)
-                }
+                PollResult::Done(result) => result.map_or_else(
+                    |_| Self::NoContent,
+                    |resp| Self::CompletedRequest(Box::new(resp)),
+                ),
                 PollResult::Pending(pending_request) => {
                     // Still pending - put it back
-                    Self::PendingRequest(pending_request)
+                    Self::PendingRequest(Box::new(pending_request))
                 }
             },
             // Already completed - return as-is
@@ -93,7 +94,7 @@ impl PendingFragmentContent {
     }
 
     /// Check if the content is ready (completed or no content)
-    pub fn is_ready(&self) -> bool {
+    pub const fn is_ready(&self) -> bool {
         !matches!(self, Self::PendingRequest(_))
     }
 
@@ -103,7 +104,7 @@ impl PendingFragmentContent {
             Self::PendingRequest(pending_request) => pending_request.wait().map_err(|e| {
                 ESIError::ExpressionError(format!("Fragment request wait failed: {}", e))
             }),
-            Self::CompletedRequest(response) => Ok(response),
+            Self::CompletedRequest(response) => Ok(*response),
             Self::NoContent => Ok(Response::from_status(StatusCode::NO_CONTENT)),
         }
     }
@@ -435,7 +436,7 @@ impl Processor {
 
             Element::Expr(expr) => {
                 // Evaluate and treat as non-blocking content
-                match expression::eval_expr(expr, &mut self.ctx) {
+                match expression::eval_expr(&expr, &mut self.ctx) {
                     Ok(val) if !matches!(val, expression::Value::Null) => {
                         let bytes = val.to_bytes();
                         if !bytes.is_empty() {
@@ -452,7 +453,7 @@ impl Processor {
 
             Element::Esi(Tag::Assign { name, value }) => {
                 // Non-blocking - just update context
-                let val = expression::eval_expr(value, &mut self.ctx)
+                let val = expression::eval_expr(&value, &mut self.ctx)
                     .unwrap_or(expression::Value::Text("".into()));
                 self.ctx.set_variable(&name, None, val);
             }
@@ -490,7 +491,7 @@ impl Processor {
                         self.ctx.set_match_name(match_name);
                     }
 
-                    match expression::eval_expr(when_branch.test, &mut self.ctx) {
+                    match expression::eval_expr(&when_branch.test, &mut self.ctx) {
                         Ok(test_result) if test_result.to_bool() => {
                             // This branch matches - recursively process it
                             for elem in when_branch.content {
@@ -532,7 +533,7 @@ impl Processor {
                                 attempt_queue.push(QueuedElement::Content(html));
                             }
                             Element::Expr(expr) => {
-                                match expression::eval_expr(expr, &mut self.ctx) {
+                                match expression::eval_expr(&expr, &mut self.ctx) {
                                     Ok(value) => {
                                         if !matches!(value, expression::Value::Null) {
                                             let bytes = value.to_bytes();
@@ -573,7 +574,7 @@ impl Processor {
                                         self.ctx.set_match_name(match_name);
                                     }
                                     let test_result =
-                                        expression::eval_expr(when_branch.test, &mut self.ctx)?;
+                                        expression::eval_expr(&when_branch.test, &mut self.ctx)?;
                                     if test_result.to_bool() {
                                         chose_branch = true;
                                         for elem in when_branch.content {
@@ -621,7 +622,7 @@ impl Processor {
                         Element::Html(html) => {
                             except_queue.push(QueuedElement::Content(html));
                         }
-                        Element::Expr(expr) => match expression::eval_expr(expr, &mut self.ctx) {
+                        Element::Expr(expr) => match expression::eval_expr(&expr, &mut self.ctx) {
                             Ok(value) => {
                                 if !matches!(value, expression::Value::Null) {
                                     let bytes = value.to_bytes();
@@ -669,10 +670,10 @@ impl Processor {
 
     /// Evaluate an Expr to a Bytes value for use in includes
     /// Handles variable resolution, function calls, and string interpolation
-    fn evaluate_expr_to_bytes(&mut self, expr: Expr) -> Result<Bytes> {
+    fn evaluate_expr_to_bytes(&mut self, expr: &Expr) -> Result<Bytes> {
         use crate::expression::eval_expr;
 
-        // Evaluate the expression to get a Value (no clone needed - we own it)
+        // Evaluate the expression to get a Value
         let result = eval_expr(expr, &mut self.ctx)?;
 
         // Convert the Value to Bytes using the built-in to_bytes method
@@ -690,8 +691,11 @@ impl Processor {
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<QueuedElement> {
         // Evaluate src and alt expressions to get actual URLs
-        let src_bytes = self.evaluate_expr_to_bytes(src)?;
-        let alt_bytes = alt.map(|e| self.evaluate_expr_to_bytes(e)).transpose()?;
+        let src_bytes = self.evaluate_expr_to_bytes(&src)?;
+        let alt_bytes = alt
+            .as_ref()
+            .map(|e| self.evaluate_expr_to_bytes(e))
+            .transpose()?;
 
         self.dispatch_include_to_element(
             &src_bytes,
@@ -715,11 +719,17 @@ impl Processor {
         // Evaluate params and append to URL
         let mut url = String::from_utf8_lossy(src).into_owned();
         if !params.is_empty() {
+            // Pre-allocate capacity: estimate ~20 chars per param (name + value + separators)
+            url.reserve(params.len() * 20);
             let mut separator = if url.contains('?') { '&' } else { '?' };
             for (name, value_expr) in params {
-                let value = self.evaluate_expr_to_bytes(value_expr.clone())?;
+                let value = self.evaluate_expr_to_bytes(value_expr)?;
                 let value_str = String::from_utf8_lossy(&value);
-                url.push_str(&format!("{}{}={}", separator, name, value_str));
+                // Direct string building is more efficient than format!
+                url.push(separator);
+                url.push_str(name);
+                url.push('=');
+                url.push_str(&value_str);
                 separator = '&';
             }
         }
@@ -925,7 +935,7 @@ impl Processor {
                     &mut fragment.pending_content,
                     PendingFragmentContent::NoContent,
                 ) {
-                    pending_reqs.push(pending_req);
+                    pending_reqs.push(*pending_req);
                     fragments_by_request.push((idx, fragment));
                 }
             }
@@ -945,14 +955,15 @@ impl Processor {
             // Update the completed fragment with the result
             completed_fragment.pending_content = result.map_or_else(
                 |_| PendingFragmentContent::NoContent,
-                PendingFragmentContent::CompletedRequest,
+                |resp| PendingFragmentContent::CompletedRequest(Box::new(resp)),
             );
 
             // Put remaining fragments back in queue (with their pending requests restored)
             for (pending_req, (_idx, mut fragment)) in
                 remaining.into_iter().zip(fragments_by_request)
             {
-                fragment.pending_content = PendingFragmentContent::PendingRequest(pending_req);
+                fragment.pending_content =
+                    PendingFragmentContent::PendingRequest(Box::new(pending_req));
                 self.queue.push_back(QueuedElement::Include(fragment));
             }
 
@@ -1122,7 +1133,9 @@ fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
         .unwrap_or_else(|| panic!("no host in request: {}", req.get_url()))
         .to_string();
     let pending_req = req.send_async(backend)?;
-    Ok(PendingFragmentContent::PendingRequest(pending_req))
+    Ok(PendingFragmentContent::PendingRequest(Box::new(
+        pending_req,
+    )))
 }
 
 // Helper function to build a fragment request from a URL

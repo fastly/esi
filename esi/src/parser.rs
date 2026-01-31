@@ -139,6 +139,7 @@ where
 // ============================================================================
 
 /// Parse input bytes into ESI elements using TRUE STREAMING parsers
+///
 /// Returns Incomplete when more data is needed - this is proper streaming behavior
 /// lib.rs must handle Incomplete by reading more data into the buffer
 /// ZERO-COPY: Returns Bytes slices that reference the original buffer (no copying!)
@@ -147,6 +148,7 @@ pub fn parse(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
 }
 
 /// Parse complete document (treats Incomplete as EOF and converts to text)
+///
 /// Wrapper for complete input (tests) - treats Incomplete as "done parsing"
 /// ZERO-COPY: Returns Bytes slices that reference the original buffer (no copying!)
 pub fn parse_complete(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
@@ -202,37 +204,15 @@ fn interpolated_text<'a>(
 /// ZERO-COPY: Accepts &Bytes and returns Bytes slices that reference the original
 pub fn interpolated_content(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     // NOTE: This function parses complete strings (like attribute values), not streaming input
-    // So we need to manually accumulate results and handle Incomplete as EOF
-    let bytes = input.as_ref();
-    let mut result = Vec::new();
-    let mut remaining = bytes;
-
-    loop {
-        match alt((interpolated_expression, |i| interpolated_text(input, i)))(remaining) {
-            Ok((rest, parse_result)) => {
-                parse_result.append_to(&mut result);
-                if rest.is_empty() {
-                    // Parsed everything
-                    return Ok((b"", result));
-                }
-                remaining = rest;
-            }
-            Err(nom::Err::Incomplete(_)) => {
-                // Streaming parser needs more data, but we have complete input
-                // If we haven't consumed anything yet and have input, treat it all as text - ZERO COPY!
-                if result.is_empty() && !remaining.is_empty() {
-                    result.push(Element::Text(slice_as_bytes(input, remaining)));
-                    return Ok((b"", result));
-                }
-                // Otherwise we've parsed what we can
-                return Ok((remaining, result));
-            }
-            Err(e) => {
-                // Real parse error - propagate it
-                return Err(e);
-            }
-        }
-    }
+    // Uses fold_many0 to accumulate text and expression elements
+    fold_many0(
+        |i| alt((interpolated_expression, |ii| interpolated_text(input, ii)))(i),
+        Vec::new,
+        |mut acc: Vec<Element>, item: ParseResult| {
+            item.append_to(&mut acc);
+            acc
+        },
+    )(input.as_ref())
 }
 
 /// Zero-copy element parser - dispatches to text or tag_dispatch
@@ -321,28 +301,22 @@ fn parse_attr_as_expr(value_str: String) -> Expr {
     // - Mixed content: prefix$(VAR), $(A)$(B), text $(VAR) more
     let bytes = Bytes::from(value_str);
     match interpolated_content(&bytes) {
-        Ok((remaining, elements)) if remaining.is_empty() => {
-            // Successfully parsed entire input
+        Ok(([], elements)) => {
             if elements.len() == 1 {
                 match elements.into_iter().next().unwrap() {
                     Element::Expr(expr) => expr,
-                    Element::Text(text) => Expr::String(Some(String::from_utf8_lossy(&text).into_owned())),
+                    Element::Text(text) => {
+                        Expr::String(Some(String::from_utf8_lossy(&text).into_owned()))
+                    }
                     _ => Expr::String(Some(String::from_utf8_lossy(&bytes).into_owned())),
                 }
             } else if !elements.is_empty() {
-                // Multiple elements - this is interpolation
                 Expr::Interpolated(elements)
             } else {
-                // Empty elements - treat as empty string
                 Expr::String(Some(String::new()))
             }
         }
-        _ => {
-            // Parse failed or didn't consume everything
-            // This shouldn't happen for src/alt/param attributes in practice,
-            // but keep as fallback
-            Expr::String(Some(String::from_utf8_lossy(&bytes).into_owned()))
-        }
+        _ => Expr::String(Some(String::from_utf8_lossy(&bytes).into_owned())),
     }
 }
 
@@ -882,29 +856,29 @@ fn single_quote(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 }
 
 #[inline]
-fn is_closing_bracket(b: u8) -> bool {
+const fn is_closing_bracket(b: u8) -> bool {
     b == b'>'
 }
 
 #[inline]
-fn is_double_quote(b: u8) -> bool {
+const fn is_double_quote(b: u8) -> bool {
     b == b'\"'
 }
 
 #[inline]
-fn is_single_quote(b: u8) -> bool {
+const fn is_single_quote(b: u8) -> bool {
     b == b'\''
 }
 
 /// Check if byte can start an HTML/XML tag name (including special constructs like <!--, <!DOCTYPE, <![CDATA[)
 #[inline]
-fn is_tag_start(b: u8) -> bool {
+const fn is_tag_start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'!'
 }
 
 /// Check if byte can continue an HTML/XML tag name
 #[inline]
-fn is_tag_cont(b: u8) -> bool {
+const fn is_tag_cont(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'[')
 }
 
@@ -1090,22 +1064,22 @@ fn text<'a>(original: &Bytes, input: &'a [u8]) -> IResult<&'a [u8], ParseResult,
 
 /// Check if byte is the opening bracket '<'
 #[inline]
-fn is_opening_bracket(b: u8) -> bool {
+const fn is_opening_bracket(b: u8) -> bool {
     b == b'<'
 }
 
 /// Check if byte is a dollar sign '$'
 #[inline]
-fn is_dollar(b: u8) -> bool {
+const fn is_dollar(b: u8) -> bool {
     b == b'$'
 }
 #[inline]
-fn is_alphanumeric_or_underscore(c: u8) -> bool {
+const fn is_alphanumeric_or_underscore(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
 }
 
 #[inline]
-fn is_lower_alphanumeric_or_underscore(c: u8) -> bool {
+const fn is_lower_alphanumeric_or_underscore(c: u8) -> bool {
     c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_'
 }
 
@@ -1255,10 +1229,9 @@ fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
 }
 
 fn interpolated_expression(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
-    map(
-        alt((esi_function, esi_variable, integer, string)),
-        |expr| ParseResult::Single(Element::Expr(expr)),
-    )(input)
+    map(alt((esi_function, esi_variable, integer, string)), |expr| {
+        ParseResult::Single(Element::Expr(expr))
+    })(input)
 }
 
 fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {

@@ -19,15 +19,15 @@ use crate::{functions, parser_types, ExecutionError, Result};
 ///
 /// # Returns
 /// * `Result<Value>` - The evaluated expression result or an error
-pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Value> {
+pub fn eval_expr(expr: &parser_types::Expr, ctx: &mut EvalContext) -> Result<Value> {
     match expr {
-        parser_types::Expr::Integer(i) => Ok(Value::Integer(i)),
-        parser_types::Expr::String(Some(s)) => Ok(Value::Text(Bytes::from(s))),
+        parser_types::Expr::Integer(i) => Ok(Value::Integer(*i)),
+        parser_types::Expr::String(Some(s)) => Ok(Value::Text(Bytes::from(s.clone()))),
         parser_types::Expr::String(None) => Ok(Value::Text(Bytes::new())),
         parser_types::Expr::Variable(name, key, default) => {
             // Evaluate the key expression if present
             let evaluated_key = if let Some(key_expr) = key {
-                let key_result = eval_expr(*key_expr, ctx)?;
+                let key_result = eval_expr(key_expr, ctx)?;
                 Some(key_result.to_string())
             } else {
                 None
@@ -38,7 +38,7 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
             // If value is Null and we have a default, evaluate and use the default
             if matches!(value, Value::Null) {
                 if let Some(default_expr) = default {
-                    return eval_expr(*default_expr, ctx);
+                    return eval_expr(default_expr, ctx);
                 }
             }
 
@@ -49,15 +49,15 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
             operator,
             right,
         } => {
-            let left_val = eval_expr(*left, ctx)?;
-            let right_val = eval_expr(*right, ctx)?;
+            let left_val = eval_expr(left, ctx)?;
+            let right_val = eval_expr(right, ctx)?;
 
             match operator {
                 parser_types::Operator::Matches | parser_types::Operator::MatchesInsensitive => {
                     let test = left_val.to_string();
                     let pattern = right_val.to_string();
 
-                    let re = if operator == parser_types::Operator::Matches {
+                    let re = if *operator == parser_types::Operator::Matches {
                         RegexBuilder::new(&pattern).build()?
                     } else {
                         RegexBuilder::new(&pattern).case_insensitive(true).build()?
@@ -142,7 +142,7 @@ pub fn eval_expr(expr: parser_types::Expr, ctx: &mut EvalContext) -> Result<Valu
             call_dispatch(&func_name, &values)
         }
         parser_types::Expr::Not(expr) => {
-            let inner_value = eval_expr(*expr, ctx)?;
+            let inner_value = eval_expr(expr, ctx)?;
             Ok(Value::Boolean(!inner_value.to_bool()))
         }
         parser_types::Expr::Interpolated(elements) => {
@@ -269,7 +269,7 @@ impl EvalContext {
         self.request = request;
     }
 
-    pub fn get_request(&self) -> &Request {
+    pub const fn get_request(&self) -> &Request {
         &self.request
     }
 }
@@ -299,7 +299,7 @@ pub enum Value {
 }
 
 impl Value {
-    pub(crate) fn to_bool(&self) -> bool {
+    pub(crate) const fn to_bool(&self) -> bool {
         match self {
             &Self::Integer(n) => !matches!(n, 0),
             Self::Text(s) => !s.is_empty(),
@@ -385,7 +385,7 @@ mod tests {
         let (_, expr) = crate::parser::parse_expression(raw_expr).map_err(|e| {
             ExecutionError::ExpressionError(format!("Failed to parse expression: {e}"))
         })?;
-        eval_expr(expr, ctx).map_err(|e| {
+        eval_expr(&expr, ctx).map_err(|e| {
             ExecutionError::ExpressionError(format!(
                 "Error occurred during expression evaluation: {e}"
             ))

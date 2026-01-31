@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use esi::{parse, parse_complete};
-use nom;
 
 /// Tests to validate streaming parser behavior and the theory about delimited content
 ///
@@ -280,12 +279,12 @@ fn test_parse_complete_on_actually_complete_input() {
     match result {
         Ok((remaining, elements)) => {
             assert!(
-                remaining.len() == 0,
+                remaining.is_empty(),
                 "Complete input should be fully consumed, but {} bytes remain",
                 remaining.len()
             );
             assert!(
-                elements.len() >= 1,
+                !elements.is_empty(),
                 "Should have parsed at least one element"
             );
         }
@@ -782,10 +781,7 @@ fn test_streaming_handles_incomplete_attributes() {
     let complete_input: &[u8] = b"\"incomplete_attribute_value\"";
     let retry_result: nom::IResult<&[u8], &[u8], nom::error::Error<&[u8]>> =
         delimited(tag(b"\""), is_not(&b"\""[..]), tag(b"\""))(complete_input);
-    assert!(
-        matches!(retry_result, Ok(_)),
-        "Should succeed with complete input"
-    );
+    assert!(retry_result.is_ok(), "Should succeed with complete input");
 
     // Test 4: ESI parser with incomplete attribute should return Incomplete
     let esi_input: &[u8] = b"<esi:choose>\n    <esi:when test=\"";

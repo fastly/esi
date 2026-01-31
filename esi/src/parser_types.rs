@@ -65,7 +65,7 @@ pub enum Expr {
     Interpolated(Vec<Element>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Operator {
     Matches,
     MatchesInsensitive,
