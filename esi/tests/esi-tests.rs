@@ -28,8 +28,8 @@ fn process_esi_document(input: &str, req: Request) -> Result<String, Error> {
     let mut output = Vec::new();
 
     // Create the processor and process the document
-    let processor = Processor::new(Some(req), Configuration::default());
-    processor.process_document(reader, &mut output, None, None)?;
+    let mut processor = Processor::new(Some(req), Configuration::default());
+    processor.process_stream(reader, &mut output, None, None)?;
 
     // Convert the output to a string
     let result = String::from_utf8(output)
@@ -37,6 +37,63 @@ fn process_esi_document(input: &str, req: Request) -> Result<String, Error> {
 
     debug!("Processed result: {result:?}");
     Ok(result)
+}
+
+#[test]
+fn test_response_overrides_applied() {
+    init_logs();
+
+    // Test $set_response_code
+    let body_override = r#"<esi:vars>$set_response_code(404, 'oops')</esi:vars>"#;
+    let reader = std::io::BufReader::new(std::io::Cursor::new(body_override.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(
+        Some(Request::get("http://example.com")),
+        Configuration::default(),
+    );
+
+    processor
+        .process_stream(reader, &mut output, None, None)
+        .expect("Processing should succeed");
+
+    // Check the response status was set
+    assert_eq!(processor.context().response_status(), Some(404));
+    // Check the body override was set
+    assert_eq!(
+        processor
+            .context()
+            .response_body_override()
+            .map(|b| String::from_utf8_lossy(b).to_string()),
+        Some("oops".to_string())
+    );
+
+    // Test $set_redirect
+    let redirect_doc = r#"<esi:vars>$set_redirect('http://example.com/next')</esi:vars>"#;
+    let redirect_reader = std::io::BufReader::new(std::io::Cursor::new(redirect_doc.as_bytes()));
+    let mut redirect_output = Vec::new();
+    let mut redirect_processor = Processor::new(
+        Some(Request::get("http://example.com")),
+        Configuration::default(),
+    );
+
+    redirect_processor
+        .process_stream(redirect_reader, &mut redirect_output, None, None)
+        .expect("Processing should succeed");
+
+    // Check redirect status was set
+    assert_eq!(redirect_processor.context().response_status(), Some(302));
+    // Check Location header was set
+    let headers = redirect_processor.context().response_headers();
+    let location = headers.iter().find(|(name, _)| name == "Location");
+    assert_eq!(
+        location.map(|(_, v)| v.as_str()),
+        Some("http://example.com/next")
+    );
+    // Check body override was cleared (redirect should not have body)
+    assert!(redirect_processor
+        .context()
+        .response_body_override()
+        .is_none());
 }
 
 // Bareword in subfield position with QUERY_STRING
@@ -197,7 +254,8 @@ fn process_include_with_query_string_interpolation() -> Result<(), Error> {
             Some(&move |fragment_req: Request| {
                 // Check that the fragment request URL contains the interpolated apiKey
                 let url = fragment_req.get_url();
-                let contains_api_key = url.to_string().contains("apiKey=value");
+                let url_str = url.to_string();
+                let contains_api_key = url_str.contains("apiKey=value");
 
                 // Store the result in our atomic boolean
                 correct_fragment_request_made_clone.store(contains_api_key, Ordering::SeqCst);
@@ -341,6 +399,50 @@ fn test_negation_in_vars() {
 }
 
 #[test]
+fn test_exists_in_when() {
+    let input = r#"
+        <esi:assign name="foo" value="'bar'" />
+        <esi:choose>
+            <esi:when test="$exists($(foo))">
+                present
+            </esi:when>
+            <esi:when test="$is_empty($(foo))">
+                empty
+            </esi:when>
+            <esi:otherwise>
+                missing
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+
+    let req = Request::get("http://example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(result.trim(), "present");
+}
+
+#[test]
+fn test_is_empty_in_when() {
+    let input = r#"
+        <esi:assign name="foo" value="" />
+        <esi:choose>
+            <esi:when test="$exists($(foo))">
+                present
+            </esi:when>
+            <esi:when test="$is_empty($(foo))">
+                empty
+            </esi:when>
+            <esi:otherwise>
+                missing
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+
+    let req = Request::get("http://example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(result.trim(), "empty");
+}
+
+#[test]
 fn test_choose_with_esi_tags_in_otherwise() {
     init_logs();
     let input = r#"
@@ -386,13 +488,13 @@ fn test_configuration_is_escaped_content() {
         )))
     };
 
-    let processor = Processor::new(
+    let mut processor = Processor::new(
         Some(Request::get("http://example.com/")),
         Configuration::default(), // is_escaped_content = true by default
     );
 
     processor
-        .process_document(reader, &mut output, Some(&dispatcher), None)
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
         .expect("Processing should succeed");
 
     // With is_escaped_content=true, &amp; should be decoded to &
@@ -426,13 +528,13 @@ fn test_configuration_is_escaped_content_disabled() {
         )))
     };
 
-    let processor = Processor::new(
+    let mut processor = Processor::new(
         Some(Request::get("http://example.com/")),
         Configuration::default().with_escaped(false), // Disable HTML entity decoding
     );
 
     processor
-        .process_document(reader, &mut output, Some(&dispatcher), None)
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
         .expect("Processing should succeed");
 
     // With is_escaped_content=false, &amp; should NOT be decoded
@@ -478,13 +580,13 @@ fn test_process_fragment_response_callback() {
             Ok(resp)
         };
 
-    let processor = Processor::new(
+    let mut processor = Processor::new(
         Some(Request::get("http://example.com/")),
         Configuration::default(),
     );
 
     processor
-        .process_document(
+        .process_stream(
             reader,
             &mut output,
             Some(&dispatcher),
@@ -550,13 +652,13 @@ fn test_process_fragment_response_on_alt() {
             Ok(resp)
         };
 
-    let processor = Processor::new(
+    let mut processor = Processor::new(
         Some(Request::get("http://example.com/")),
         Configuration::default(),
     );
 
     processor
-        .process_document(
+        .process_stream(
             reader,
             &mut output,
             Some(&dispatcher),
@@ -602,12 +704,12 @@ fn test_process_fragment_response_error_handling() {
             ))
         };
 
-    let processor = Processor::new(
+    let mut processor = Processor::new(
         Some(Request::get("http://example.com/")),
         Configuration::default(),
     );
 
-    let result = processor.process_document(
+    let result = processor.process_stream(
         reader,
         &mut output,
         Some(&dispatcher),
@@ -661,13 +763,13 @@ fn test_alt_url_with_interpolation() {
         }
     };
 
-    let processor = Processor::new(
+    let mut processor = Processor::new(
         Some(Request::get("http://example.com/?fallback_id=12345")),
         Configuration::default(),
     );
 
     processor
-        .process_document(reader, &mut output, Some(&dispatcher), None)
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
         .expect("Processing should succeed");
 
     let result = String::from_utf8(output).unwrap();
@@ -724,10 +826,10 @@ fn test_alt_url_with_function_interpolation() {
     let mut req = Request::get("http://Example.COM/");
     req.set_header("Host", "Example.COM");
 
-    let processor = Processor::new(Some(req), Configuration::default());
+    let mut processor = Processor::new(Some(req), Configuration::default());
 
     processor
-        .process_document(reader, &mut output, Some(&dispatcher), None)
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
         .expect("Processing should succeed");
 
     let result = String::from_utf8(output).unwrap();
@@ -801,5 +903,528 @@ fn test_streaming_input_with_small_chunks() {
     assert!(
         result.contains("test"),
         "Should contain assigned variable value"
+    );
+}
+// Test foreach with a list variable
+#[test]
+fn test_foreach_with_list() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="nums" value="$string_split('1,2,3', ',')" />
+        <esi:foreach collection="nums" item="n">[$(n)]</esi:foreach>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert!(
+        result.contains("[1][2][3]"),
+        "Should iterate through list items"
+    );
+}
+
+// Test foreach with default item variable name
+#[test]
+fn test_foreach_default_item_name() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="items" value="$string_split('a,b', ',')" />
+        <esi:foreach collection="items">$(item)</esi:foreach>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert!(result.contains("ab"), "Should use default 'item' variable");
+}
+
+// Test foreach with break
+#[test]
+fn test_foreach_with_break() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="nums" value="$string_split('1,2,3,4,5', ',')" />
+        <esi:foreach collection="nums" item="n"><esi:choose>
+            <esi:when test="$(n) == '3'"><esi:break /></esi:when>
+            <esi:otherwise>[$(n)]</esi:otherwise>
+        </esi:choose></esi:foreach>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    let trimmed = result.trim();
+    assert!(trimmed.contains("[1]"), "Should have first item");
+    assert!(trimmed.contains("[2]"), "Should have second item");
+    assert!(!trimmed.contains("[3]"), "Should break before third item");
+    assert!(!trimmed.contains("[4]"), "Should not have fourth item");
+}
+
+// Test foreach with dictionary
+#[test]
+fn test_foreach_with_dict() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="dict" value="$(QUERY_STRING)" />
+        <esi:foreach collection="dict" item="val">x</esi:foreach>
+    "#;
+    let req = Request::get("http://example.com/test?a=1&b=2");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert!(result.contains("xx"), "Should iterate through dict values");
+}
+
+// Test foreach with dictionary literal
+#[test]
+fn test_foreach_dict_literal() {
+    init_logs();
+    let input = r#"A list of Fruits: <esi:foreach collection="{1:'apples',2:'oranges',3:'bananas',4:'grapefruits'}" item="item">$(item) -- $(item{0}) = $(item{1})<br>
+</esi:foreach>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Should contain all fruit entries
+    assert!(result.contains("apples"), "Should have apples");
+    assert!(result.contains("oranges"), "Should have oranges");
+    assert!(result.contains("bananas"), "Should have bananas");
+    assert!(result.contains("grapefruits"), "Should have grapefruits");
+
+    // Should have key-value access
+    assert!(result.contains(" -- "), "Should have separator");
+    assert!(result.contains(" = "), "Should have equals");
+
+    // Verify specific key-value pairs
+    assert!(result.contains("1 = apples"), "Should have key 1 = apples");
+    assert!(
+        result.contains("2 = oranges"),
+        "Should have key 2 = oranges"
+    );
+    assert!(
+        result.contains("3 = bananas"),
+        "Should have key 3 = bananas"
+    );
+    assert!(
+        result.contains("4 = grapefruits"),
+        "Should have key 4 = grapefruits"
+    );
+}
+
+// Test nested foreach with break - ensure break only affects inner loop
+#[test]
+fn test_nested_foreach_with_break() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="outer" value="['A','B','C']" />
+        <esi:assign name="inner" value="['1','2','3']" />
+        <esi:foreach collection="outer" item="o">
+Outer[$(o)]:
+<esi:foreach collection="inner" item="i"><esi:choose>
+<esi:when test="$(i) == '2'"><esi:break /></esi:when>
+<esi:otherwise>$(o)-$(i) </esi:otherwise>
+</esi:choose></esi:foreach>
+</esi:foreach>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Each outer iteration should show inner loop breaking after first item
+    assert!(result.contains("Outer[A]:"), "Should have outer A");
+    assert!(result.contains("Outer[B]:"), "Should have outer B");
+    assert!(result.contains("Outer[C]:"), "Should have outer C");
+
+    // Inner loop should process first item for each outer iteration
+    assert!(result.contains("A-1"), "Should have A-1");
+    assert!(result.contains("B-1"), "Should have B-1");
+    assert!(result.contains("C-1"), "Should have C-1");
+
+    // Inner loop should break before second item (when i == '2')
+    assert!(!result.contains("A-2"), "Should NOT have A-2 (broke)");
+    assert!(!result.contains("B-2"), "Should NOT have B-2 (broke)");
+    assert!(!result.contains("C-2"), "Should NOT have C-2 (broke)");
+
+    // Inner loop should not reach third item
+    assert!(!result.contains("A-3"), "Should NOT have A-3");
+    assert!(!result.contains("B-3"), "Should NOT have B-3");
+    assert!(!result.contains("C-3"), "Should NOT have C-3");
+}
+
+// Test simpler dict literal with assign
+#[test]
+fn test_simple_dict_literal() {
+    init_logs();
+    let input =
+        r#"<esi:assign name="test" value="{1:'a',2:'b'}" /><esi:vars>Result: $(test)</esi:vars>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // The dict should have been assigned and displayed
+    assert!(result.contains("Result:"), "Should have result label");
+    assert!(
+        !result.contains("$(test)"),
+        "Variable should be substituted"
+    );
+    assert!(result.contains("1=a"), "Should have key-value pair 1=a");
+    assert!(result.contains("2=b"), "Should have key-value pair 2=b");
+}
+
+// Test list literal - basic
+#[test]
+fn test_simple_list_literal() {
+    init_logs();
+    let input =
+        r#"<esi:foreach item="x" collection="[1,2,3]"><esi:vars>$(x),</esi:vars></esi:foreach>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(result.contains("1"), "Should have 1");
+    assert!(result.contains("2"), "Should have 2");
+    assert!(result.contains("3"), "Should have 3");
+}
+
+// Test list literal with strings
+#[test]
+fn test_string_list_literal() {
+    init_logs();
+    let input = r#"<esi:foreach item="x" collection="['a','b','c']"><esi:vars>$(x),</esi:vars></esi:foreach>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(result.contains("a"), "Should have a");
+    assert!(result.contains("b"), "Should have b");
+    assert!(result.contains("c"), "Should have c");
+}
+
+// Test nested foreach with list literals and break
+#[test]
+fn test_list_literal_nested_foreach() {
+    init_logs();
+    let input = r#"<esi:foreach item="bar" collection="[1,2,3]">
+[<esi:foreach item="foo" collection="['a','b','c']">
+<esi:vars>$(foo)</esi:vars><esi:break/>
+</esi:foreach>]<esi:vars>$(bar) </esi:vars>
+</esi:foreach>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Remove whitespace for easier testing
+    let clean = result.replace(char::is_whitespace, "");
+
+    // Should show [a]1, [a]2, [a]3 (break after first 'a' in each inner loop)
+    assert!(clean.contains("[a]1"), "Should have [a]1");
+    assert!(clean.contains("[a]2"), "Should have [a]2");
+    assert!(clean.contains("[a]3"), "Should have [a]3");
+
+    // Should NOT have b or c due to break
+    assert!(
+        !result.contains("b"),
+        "Should not have 'b' - break should prevent it"
+    );
+    assert!(
+        !result.contains("c"),
+        "Should not have 'c' - break should prevent it"
+    );
+}
+
+// Test list subscript assignment - from ESI spec
+#[test]
+fn test_list_subscript_assignment() {
+    init_logs();
+    let input = r#"<esi:assign name="colors" value="[ 'red', 'blue', 'green' ]"/>
+<esi:assign name="colors{0}" value="purple"/>
+<esi:vars>$(colors)</esi:vars>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Should output the list with first element replaced
+    assert!(result.contains("purple"), "Should have purple");
+    assert!(result.contains("blue"), "Should have blue");
+    assert!(result.contains("green"), "Should have green");
+    assert!(
+        !result.contains("red"),
+        "Should not have red - it was replaced"
+    );
+}
+
+// Test dictionary subscript assignment - from ESI spec
+#[test]
+fn test_dict_subscript_assignment() {
+    init_logs();
+    let input = r#"<esi:assign name="ages" value="{ 'bob' : 34, 'joan' : 27, 'ed' : 23 }"/>
+<esi:assign name="ages{joan}" value="28"/>
+<esi:vars>$(ages)</esi:vars>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Should have joan's age updated to 28
+    assert!(result.contains("joan"), "Should have joan key");
+    assert!(result.contains("28"), "Should have updated value 28");
+    assert!(!result.contains("27"), "Should not have old value 27");
+    assert!(result.contains("bob"), "Should have bob key");
+    assert!(result.contains("34"), "Should have bob's value");
+    assert!(result.contains("ed"), "Should have ed key");
+    assert!(result.contains("23"), "Should have ed's value");
+}
+
+// Test dictionary subscript assignment with expression - from ESI spec
+// TODO: This requires implementing subscript notation in variable expressions $(ages{joan})
+#[test]
+#[ignore]
+fn test_dict_subscript_assignment_with_expression() {
+    init_logs();
+    let input = r#"<esi:assign name="ages" value="{ 'bob' : 34, 'joan' : 27, 'ed' : 23 }"/>
+<esi:assign name="ages{joan}" value="$(ages{joan}) + 1"/>
+<esi:vars>$(ages)</esi:vars>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Should have joan's age incremented to 28
+    assert!(result.contains("28"), "Should have incremented value 28");
+    assert!(!result.contains("27"), "Should not have old value 27");
+}
+
+// Test nested foreach loops
+#[test]
+fn test_foreach_nested() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="outer" value="$string_split('A,B,C', ',')" />
+        <esi:assign name="inner" value="$string_split('1,2,3', ',')" />
+        <esi:foreach collection="outer" item="letter">
+            <esi:foreach collection="inner" item="number">$(letter)$(number) </esi:foreach>
+        </esi:foreach>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Each outer iteration should produce 3 inner iterations
+    assert!(result.contains("A1"), "Should have A1");
+    assert!(result.contains("A2"), "Should have A2");
+    assert!(result.contains("A3"), "Should have A3");
+    assert!(result.contains("B1"), "Should have B1");
+    assert!(result.contains("B2"), "Should have B2");
+    assert!(result.contains("B3"), "Should have B3");
+    assert!(result.contains("C1"), "Should have C1");
+    assert!(result.contains("C2"), "Should have C2");
+    assert!(result.contains("C3"), "Should have C3");
+}
+
+// Test nested foreach with break only affects inner loop
+#[test]
+fn test_foreach_nested_break_inner_only() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="outer" value="$string_split('X,Y', ',')" />
+        <esi:assign name="inner" value="$string_split('1,2,3', ',')" />
+        <esi:foreach collection="outer" item="letter">
+            [<esi:foreach collection="inner" item="num"><esi:choose>
+                <esi:when test="$(num) == '2'"><esi:break /></esi:when>
+                <esi:otherwise>$(letter)$(num)</esi:otherwise>
+            </esi:choose></esi:foreach>]
+        </esi:foreach>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Each outer iteration should produce X1, then break at 2
+    assert!(result.contains("X1"), "Should have X1 before break");
+    assert!(!result.contains("X2"), "Should not have X2 (break)");
+    assert!(!result.contains("X3"), "Should not have X3 (after break)");
+
+    // Second outer iteration should also produce Y1, then break at 2
+    assert!(
+        result.contains("Y1"),
+        "Should have Y1 (outer loop continues)"
+    );
+    assert!(!result.contains("Y2"), "Should not have Y2 (break)");
+    assert!(!result.contains("Y3"), "Should not have Y3 (after break)");
+}
+
+// Test that assigning to non-existent list index fails per ESI spec
+#[test]
+fn test_list_index_must_exist() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="colors" value="['red', 'blue', 'green']" />
+        <esi:assign name="colors{3}" value="'yellow'" />
+        <esi:vars>$(colors{3})</esi:vars>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req);
+
+    // Should fail because index 3 doesn't exist (only 0, 1, 2)
+    assert!(
+        result.is_err(),
+        "Should error on out-of-bounds list assignment"
+    );
+}
+
+// Test that you can assign to existing list indices
+#[test]
+fn test_list_index_assignment_when_exists() {
+    init_logs();
+    let input = r#"
+        <esi:comment value="Create a list of size 4" />
+        <esi:assign name="newlist" value="[ 0, 0, 0, 0 ]" />
+        <esi:assign name="newlist{0}" value="'yellow'" />
+        <esi:vars>$(newlist{0})</esi:vars>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(
+        result.contains("yellow"),
+        "Should assign to existing list index"
+    );
+}
+
+// Test that dictionary keys can be created on the fly
+#[test]
+fn test_dict_keys_created_on_fly() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="ages{'bob'}" value="34" />
+        <esi:assign name="ages{'joan'}" value="28" />
+        <esi:vars>bob:$(ages{'bob'}), joan:$(ages{'joan'})</esi:vars>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(
+        result.contains("bob:34"),
+        "Should create dict keys on the fly. Got: {}",
+        result
+    );
+    assert!(
+        result.contains("joan:28"),
+        "Should create multiple dict keys. Got: {}",
+        result
+    );
+}
+
+// Test that you cannot assign string key to a list
+#[test]
+fn test_cannot_assign_string_key_to_list() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="colors" value="['red', 'blue']" />
+        <esi:assign name="colors{joe}" value="'black'" />
+        <esi:vars>$(colors{joe})</esi:vars>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req);
+
+    // Should fail because can't assign string key to list
+    assert!(
+        result.is_err(),
+        "Should error when assigning string key to list"
+    );
+}
+
+// Test nested lists work correctly
+#[test]
+fn test_nested_lists() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="complex" value="[ 'one', [ 'a', 'x', 'c' ], 'three' ]" />
+        <esi:assign name="inner" value="$(complex{1})" />
+        <esi:vars>$(complex{0}),$(inner{1}),$(complex{2})</esi:vars>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(result.contains("one"), "Should access first element");
+    assert!(result.contains("x"), "Should access nested list element");
+    assert!(result.contains("three"), "Should access third element");
+}
+
+// Test has operator - case-sensitive substring matching
+#[test]
+fn test_has_operator() {
+    init_logs();
+    let input = r#"
+        <esi:choose>
+            <esi:when test="'Hello World' has 'World'">found</esi:when>
+            <esi:otherwise>not found</esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert!(
+        result.contains("found"),
+        "Should find 'World' in 'Hello World'"
+    );
+
+    // Test case sensitivity - should NOT match
+    let input2 = r#"
+        <esi:choose>
+            <esi:when test="'Hello World' has 'world'">found</esi:when>
+            <esi:otherwise>not found</esi:otherwise>
+        </esi:choose>
+    "#;
+    let req2 = Request::get("http://example.com/test");
+    let result2 = process_esi_document(input2, req2).expect("Processing should succeed");
+    assert!(
+        result2.contains("not found"),
+        "Should NOT find 'world' (wrong case)"
+    );
+}
+
+// Test has_i operator - case-insensitive substring matching
+#[test]
+fn test_has_i_operator() {
+    init_logs();
+    let input = r#"
+        <esi:choose>
+            <esi:when test="'Hello World' has_i 'world'">found</esi:when>
+            <esi:otherwise>not found</esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert!(
+        result.contains("found"),
+        "Should find 'world' case-insensitively"
+    );
+
+    // Test with different case variations
+    let input2 = r#"
+        <esi:choose>
+            <esi:when test="'HELLO WORLD' has_i 'HeLLo'">found</esi:when>
+            <esi:otherwise>not found</esi:otherwise>
+        </esi:choose>
+    "#;
+    let req2 = Request::get("http://example.com/test");
+    let result2 = process_esi_document(input2, req2).expect("Processing should succeed");
+    assert!(result2.contains("found"), "Should match case-insensitively");
+}
+
+// Test has with HTTP_COOKIE variable (from ESI spec example)
+#[test]
+fn test_has_with_cookie_variable() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="test_cookie" value="'first_name=Sam&last_name=Samuelson'" />
+        <esi:choose>
+            <esi:when test="$(test_cookie) has 'Sam'">has Sam</esi:when>
+            <esi:otherwise>no Sam</esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert!(
+        result.contains("has Sam"),
+        "Should find Sam in cookie string"
+    );
+}
+
+// Test has_i with subscript access (from ESI spec example)
+#[test]
+fn test_has_i_with_subscript() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="cookies" value="{'first_name':'Sam','last_name':'Smith'}" />
+        <esi:choose>
+            <esi:when test="$(cookies{'first_name'}) has_i 'sam'">matched</esi:when>
+            <esi:otherwise>not matched</esi:otherwise>
+        </esi:choose>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert!(
+        result.contains("matched"),
+        "Should match 'sam' case-insensitively in 'Sam'"
     );
 }

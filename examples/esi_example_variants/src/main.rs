@@ -35,7 +35,7 @@ fn main() {
         .get_content_type()
         .is_some_and(|c| c.subtype() == mime::HTML)
     {
-        let processor = esi::Processor::new(Some(req), esi::Configuration::default());
+        let mut processor = esi::Processor::new(Some(req), esi::Configuration::default());
 
         // Create a response to send the headers to the client
         let resp = Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML);
@@ -45,7 +45,7 @@ fn main() {
 
         // Process the ESI document, modifying fragment URLs to add variant parameter
         let reader = std::io::BufReader::new(beresp.take_body());
-        let result = processor.process_document(
+        let result = processor.process_stream(
             reader,
             &mut output_writer,
             Some(&|req| {

@@ -54,6 +54,10 @@ pub enum ExecutionError {
     /// An error occurred while executing a function in an eval context
     #[error("failed to execute a function: `{0}`")]
     FunctionError(String),
+
+    /// An error occurred during variable assignment (e.g., out of bounds, type mismatch)
+    #[error("variable assignment error: `{0}`")]
+    VariableError(String),
 }
 
 pub type Result<T> = std::result::Result<T, ExecutionError>;

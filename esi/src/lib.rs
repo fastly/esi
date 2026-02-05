@@ -13,7 +13,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use fastly::http::request::{PendingRequest, PollResult};
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Request, Response};
-use log::{debug, error};
+use log::debug;
 use std::collections::VecDeque;
 use std::io::{BufRead, Write};
 
@@ -158,14 +158,49 @@ impl Processor {
         }
     }
 
+    /// Get the evaluation context (for testing)
+    ///
+    /// Provides access to the processor's internal state including variables,
+    /// response headers, status code, and body overrides set by ESI functions.
+    pub fn context(&self) -> &EvalContext {
+        &self.ctx
+    }
+
     /// Process a response body as an ESI document. Consumes the response body.
     ///
     /// This method processes ESI directives in the response body while streaming the output to the client,
     /// minimizing memory usage for large responses. It handles ESI includes, conditionals, and variable
     /// substitution according to the ESI specification.
     ///
+    /// ## Response Manipulation Functions
+    ///
+    /// ESI functions can modify the response that gets sent to the client:
+    ///
+    /// ### `$add_header(name, value)`
+    /// Adds a custom header to the response:
+    /// ```text
+    /// <esi:vars>$add_header('X-Custom-Header', 'my-value')</esi:vars>
+    /// ```
+    ///
+    /// ### `$set_response_code(code [, body])`
+    /// Sets the HTTP status code and optionally replaces the response body:
+    /// ```text
+    /// <esi:vars>$set_response_code(404, 'Page not found')</esi:vars>
+    /// ```
+    ///
+    /// ### `$set_redirect(url [, code])`
+    /// Sets up an HTTP redirect (default 302):
+    /// ```text
+    /// <esi:vars>$set_redirect('https://example.com/new-page')</esi:vars>
+    /// <esi:vars>$set_redirect('https://example.com/moved', 301)</esi:vars>
+    /// ```
+    ///
+    /// **Note:** These functions modify the response metadata that `process_response` will use
+    /// when sending the response to the client. The headers, status code, and body override are
+    /// buffered during processing and applied when the response is sent.
+    ///
     /// # Arguments
-    /// * `src_document` - Source HTTP response containing ESI markup to process
+    /// * `src_stream` - Source HTTP response containing ESI markup to process
     /// * `client_response_metadata` - Optional response metadata (headers, status) to send to client
     /// * `dispatch_fragment_request` - Optional callback for customizing fragment request handling
     /// * `process_fragment_response` - Optional callback for processing fragment responses
@@ -188,7 +223,7 @@ impl Processor {
     /// // Define a simple fragment dispatcher
     /// fn default_fragment_dispatcher(req: fastly::Request) -> esi::Result<esi::PendingFragmentContent> {
     ///     Ok(esi::PendingFragmentContent::CompletedRequest(
-    ///         fastly::Response::from_body("Fragment content")
+    ///         Box::new(fastly::Response::from_body("Fragment content"))
     ///     ))
     /// }
     /// // Process the response, streaming the resulting document directly to the client
@@ -207,43 +242,57 @@ impl Processor {
     /// * Stream writing fails
     /// * Fragment requests fail
     pub fn process_response(
-        self,
-        src_document: &mut Response,
+        mut self,
+        src_stream: &mut Response,
         client_response_metadata: Option<Response>,
         dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
-        // Create a response to send the headers to the client
-        let resp = client_response_metadata.unwrap_or_else(|| {
+        let mut output = Vec::new();
+
+        self.process_stream(
+            src_stream.take_body(),
+            &mut output,
+            dispatch_fragment_request,
+            process_fragment_response,
+        )?;
+
+        let mut resp = client_response_metadata.unwrap_or_else(|| {
             Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML)
         });
 
-        // Send the response headers to the client and open an output stream
-        let mut output_writer = resp.stream_to_client();
-
-        match self.process_document(
-            src_document.take_body(),
-            &mut output_writer,
-            dispatch_fragment_request,
-            process_fragment_response,
-        ) {
-            Ok(()) => {
-                output_writer.finish()?;
-                Ok(())
-            }
-            Err(err) => {
-                error!("error processing ESI document: {err}");
-                Err(err)
-            }
+        for (name, value) in self.ctx.response_headers() {
+            resp.set_header(name, value);
         }
+
+        if let Some(status) = self.ctx.response_status() {
+            let status_code = StatusCode::from_u16(status as u16).map_err(|_| {
+                ExecutionError::FunctionError("set_response_code: invalid status code".to_string())
+            })?;
+            resp.set_status(status_code);
+        }
+
+        let body_bytes = self
+            .ctx
+            .response_body_override()
+            .cloned()
+            .unwrap_or_else(|| Bytes::from(output));
+
+        resp.set_body(body_bytes.to_vec());
+        resp.send_to_client();
+        Ok(())
     }
 
-    /// Process an ESI document with industry-grade streaming architecture
+    /// Process an ESI stream with industry-grade streaming architecture
+    ///
+    /// This is the low-level streaming API that processes ESI markup from any
+    /// `BufRead` source to any `Write` destination. For processing Fastly responses,
+    /// use [`process_response`](Self::process_response) instead.
     ///
     /// This method implements **three levels of streaming** for optimal performance:
     ///
     /// ## 1. Chunked Input Reading (Memory Efficient)
-    /// - Reads source document in 8KB chunks from BufRead
+    /// - Reads source stream in 8KB chunks from BufRead
     /// - Accumulates chunks until parser can make progress
     /// - Prevents loading entire document into memory at once
     /// - Bounded memory growth with incremental processing
@@ -251,7 +300,7 @@ impl Processor {
     /// ## 2. Streaming Output (Low Latency)
     /// - Writes processed content immediately as elements are parsed
     /// - Non-blocking poll checks for completed fragments
-    /// - Output reaches client with minimal delay
+    /// - Output reaches destination with minimal delay
     /// - No buffering of final output
     ///
     /// ## 3. Streaming Fragments (Maximum Parallelism)
@@ -272,7 +321,7 @@ impl Processor {
     /// then processing parsed elements immediately while retaining unparsed remainder.
     ///
     /// # Arguments
-    /// * `src_document` - BufRead source containing ESI markup (streams in chunks)
+    /// * `src_stream` - BufRead source containing ESI markup (streams in chunks)
     /// * `output_writer` - Writer to stream processed output to (writes immediately)
     /// * `dispatch_fragment_request` - Optional handler for fragment requests
     /// * `process_fragment_response` - Optional processor for fragment responses
@@ -286,9 +335,9 @@ impl Processor {
     /// * Fragment requests fail (unless `continue_on_error` is set)
     /// * Input reading or output writing fails
     /// * Invalid UTF-8 encoding encountered
-    pub fn process_document(
-        mut self,
-        mut src_document: impl BufRead,
+    pub fn process_stream(
+        &mut self,
+        mut src_stream: impl BufRead,
         output_writer: &mut impl Write,
         dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
         process_fragment_response: Option<&FragmentResponseProcessor>,
@@ -318,7 +367,7 @@ impl Processor {
             }
             // Read more data if we haven't hit EOF yet
             if !eof {
-                match src_document.read(&mut read_buf) {
+                match src_stream.read(&mut read_buf) {
                     Ok(0) => {
                         // EOF reached - parser can now make final decisions
                         eof = true;
@@ -351,7 +400,9 @@ impl Processor {
                 Ok((remaining, elements)) => {
                     // Successfully parsed some elements
                     for element in elements {
-                        self.process_element_streaming(element, output_writer, dispatcher)?;
+                        let _ =
+                            self.process_element_streaming(element, output_writer, dispatcher)?;
+                        // Note: breaks at top-level are ignored
                         // After each element, check if any queued includes are ready (non-blocking poll)
                         self.process_ready_queue_items(
                             output_writer,
@@ -419,7 +470,7 @@ impl Processor {
         element: parser_types::Element,
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         use parser_types::{Element, Tag};
 
         match element {
@@ -432,6 +483,7 @@ impl Processor {
                     // Blocked - queue it
                     self.queue.push_back(QueuedElement::Content(text));
                 }
+                Ok(false)
             }
 
             Element::Expr(expr) => {
@@ -449,22 +501,42 @@ impl Processor {
                     }
                     _ => {} // Skip null or error
                 }
+                Ok(false)
             }
 
-            Element::Esi(Tag::Assign { name, value }) => {
+            Element::Esi(Tag::Assign {
+                name,
+                subscript,
+                value,
+            }) => {
                 // Non-blocking - just update context
                 let val = expression::eval_expr(&value, &mut self.ctx)
                     .unwrap_or(expression::Value::Text("".into()));
-                self.ctx.set_variable(&name, None, val);
+
+                if let Some(subscript_expr) = subscript {
+                    // Subscript assignment: modify existing collection
+                    // Evaluate the subscript expression to get the key/index
+                    if let Ok(subscript_val) = expression::eval_expr(&subscript_expr, &mut self.ctx)
+                    {
+                        let key_str = subscript_val.to_string();
+                        self.ctx.set_variable(&name, Some(&key_str), val)?;
+                    }
+                } else {
+                    // Regular assignment without subscript
+                    self.ctx.set_variable(&name, None, val)?;
+                }
+                Ok(false)
             }
 
             Element::Esi(Tag::Vars { name: Some(n) }) => {
                 // Non-blocking - just update context
                 self.ctx.set_match_name(&n);
+                Ok(false)
             }
 
             Element::Esi(Tag::Vars { name: None }) => {
                 // No-op when name is None
+                Ok(false)
             }
 
             Element::Esi(Tag::Include {
@@ -477,6 +549,7 @@ impl Processor {
                 let queued_element =
                     self.process_include_tag(src, alt, continue_on_error, params, dispatcher)?;
                 self.queue.push_back(queued_element);
+                Ok(false)
             }
 
             Element::Esi(Tag::Choose {
@@ -495,7 +568,14 @@ impl Processor {
                         Ok(test_result) if test_result.to_bool() => {
                             // This branch matches - recursively process it
                             for elem in when_branch.content {
-                                self.process_element_streaming(elem, output_writer, dispatcher)?;
+                                let break_encountered = self.process_element_streaming(
+                                    elem,
+                                    output_writer,
+                                    dispatcher,
+                                )?;
+                                if break_encountered {
+                                    return Ok(true); // Propagate break signal
+                                }
                             }
                             chose_branch = true;
                             break;
@@ -507,9 +587,14 @@ impl Processor {
                 // No when matched - process otherwise
                 if !chose_branch {
                     for elem in otherwise_events {
-                        self.process_element_streaming(elem, output_writer, dispatcher)?;
+                        let break_encountered =
+                            self.process_element_streaming(elem, output_writer, dispatcher)?;
+                        if break_encountered {
+                            return Ok(true); // Propagate break signal
+                        }
                     }
                 }
+                Ok(false)
             }
 
             Element::Esi(Tag::Try {
@@ -583,6 +668,7 @@ impl Processor {
                                                 output_writer,
                                                 dispatcher,
                                             )?;
+                                            // Note: breaks within try blocks don't propagate out
                                         }
                                         break;
                                     }
@@ -594,6 +680,7 @@ impl Processor {
                                             output_writer,
                                             dispatcher,
                                         )?;
+                                        // Note: breaks within try blocks don't propagate out
                                     }
                                 }
                             }
@@ -604,6 +691,7 @@ impl Processor {
                                     output_writer,
                                     dispatcher,
                                 )?;
+                                // Note: breaks within try blocks don't propagate out
                             }
                             _ => {}
                         }
@@ -660,12 +748,66 @@ impl Processor {
                     attempt_elements: attempt_queues,
                     except_elements: except_queue,
                 });
+                Ok(false)
             }
 
-            _ => {} // Other standalone tags shouldn't appear
-        }
+            Element::Esi(Tag::Foreach {
+                collection,
+                item,
+                content,
+            }) => {
+                // Evaluate the collection expression
+                let collection_value = expression::eval_expr(&collection, &mut self.ctx)
+                    .unwrap_or(expression::Value::Null);
 
-        Ok(())
+                // Convert to a list if needed
+                let items = match &collection_value {
+                    expression::Value::List(items) => items.clone(),
+                    expression::Value::Dict(map) => {
+                        // Convert dict entries to a list of 2-element lists [key, value]
+                        map.iter()
+                            .map(|(k, v)| {
+                                expression::Value::List(vec![
+                                    expression::Value::Text(k.clone().into()),
+                                    v.clone(),
+                                ])
+                            })
+                            .collect()
+                    }
+                    expression::Value::Null => Vec::new(),
+                    other => vec![other.clone()], // Treat single values as a list of one
+                };
+
+                // Default item variable name if not specified
+                let item_var = item.unwrap_or_else(|| "item".to_string());
+
+                // Iterate through items
+                'foreach_loop: for item_value in items {
+                    // Set the item variable
+                    self.ctx.set_variable(&item_var, None, item_value)?;
+
+                    // Process content for this iteration
+                    for elem in content.iter() {
+                        let break_encountered = self.process_element_streaming(
+                            elem.clone(),
+                            output_writer,
+                            dispatcher,
+                        )?;
+                        if break_encountered {
+                            break 'foreach_loop;
+                        }
+                    }
+                }
+                Ok(false)
+            }
+
+            Element::Esi(Tag::Break) => {
+                // Signal break to enclosing foreach
+                Ok(true)
+            }
+
+            _ => Ok(false), // Other standalone tags shouldn't appear
+        }
     }
 
     /// Evaluate an Expr to a Bytes value for use in includes

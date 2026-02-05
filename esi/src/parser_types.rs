@@ -22,6 +22,7 @@ pub enum Tag {
     },
     Assign {
         name: String,
+        subscript: Option<Expr>,
         value: Expr,
     },
     Vars {
@@ -38,6 +39,12 @@ pub enum Tag {
     Attempt(Vec<Element>),
     Except(Vec<Element>),
     Otherwise,
+    Foreach {
+        collection: Expr,
+        item: Option<String>,
+        content: Vec<Element>,
+    },
+    Break,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -63,12 +70,18 @@ pub enum Expr {
     /// Represents a compound expression with interpolated text and expressions
     /// Used for cases like: <esi:assign name="x">prefix$(VAR)suffix</esi:assign>
     Interpolated(Vec<Element>),
+    /// Dictionary literal: {key:value, key:value}
+    DictLiteral(Vec<(Expr, Expr)>),
+    /// List literal: [value, value]
+    ListLiteral(Vec<Expr>),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Operator {
     Matches,
     MatchesInsensitive,
+    Has,
+    HasInsensitive,
     Equals,
     NotEquals,
     LessThan,

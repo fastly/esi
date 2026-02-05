@@ -200,13 +200,28 @@ fn interpolated_text<'a>(
     )(input)
 }
 
+// Complete version for attribute value parsing - doesn't return Incomplete
+fn interpolated_text_complete<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    map(
+        recognize(take_while1(|c: u8| !is_opening_bracket(c) && !is_dollar(c))),
+        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
+    )(input)
+}
+
 /// Parses a string that may contain interpolated expressions like $(VAR)
 /// ZERO-COPY: Accepts &Bytes and returns Bytes slices that reference the original
 pub fn interpolated_content(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     // NOTE: This function parses complete strings (like attribute values), not streaming input
-    // Uses fold_many0 to accumulate text and expression elements
+    // Uses fold_many0 with COMPLETE parsers to avoid Incomplete errors at string boundaries
     fold_many0(
-        |i| alt((interpolated_expression, |ii| interpolated_text(input, ii)))(i),
+        |i| {
+            alt((interpolated_expression, |ii| {
+                interpolated_text_complete(input, ii)
+            }))(i)
+        },
         Vec::new,
         |mut acc: Vec<Element>, item: ParseResult| {
             item.append_to(&mut acc);
@@ -250,6 +265,100 @@ fn tag_content<'a>(
     )(input)
 }
 
+/// Validates a variable name according to ESI spec:
+/// - Up to 256 alphanumeric characters (A-Z, a-z, 0-9)
+/// - Can include underscores (_)
+/// - Cannot start with $ (dollar sign) or digit
+/// - First character must be alphabetic (A-Z, a-z)
+/// - Can include subscript notation with braces {} containing expressions
+fn is_valid_variable_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 256 {
+        return false;
+    }
+
+    // Check if there's a subscript by finding opening brace
+    if let Some(brace_pos) = name.find('{') {
+        // Has subscript - validate base name and check brace matching
+        let base_name = &name[..brace_pos];
+
+        // Validate base name strictly (alphanumeric + underscore, starting with alpha)
+        if !is_valid_base_variable_name(base_name) {
+            return false;
+        }
+
+        // Check that subscript has matching closing brace
+        if !name.ends_with('}') {
+            return false;
+        }
+
+        // Subscript content (between braces) can contain any characters for expressions
+        // We don't validate it here - expression parser will handle it
+        true
+    } else {
+        // No subscript - validate as a simple variable name
+        is_valid_base_variable_name(name)
+    }
+}
+
+/// Validates a base variable name (without subscripts):
+/// - Must start with alphabetic character
+/// - Can only contain alphanumeric characters and underscores
+fn is_valid_base_variable_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+
+    let mut chars = name.chars();
+
+    // First character must be alphabetic
+    if let Some(first) = chars.next() {
+        if !first.is_ascii_alphabetic() {
+            return false;
+        }
+    } else {
+        return false;
+    }
+
+    // Remaining characters must be alphanumeric or underscore
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+// Parse variable name with optional subscript like "colors{0}" or "ages{joan}"
+fn parse_variable_name_with_subscript(name: &str) -> (String, Option<Expr>) {
+    if let Some(brace_pos) = name.find('{') {
+        if name.ends_with('}') {
+            let var_name = &name[..brace_pos];
+            let subscript_str = &name[brace_pos + 1..name.len() - 1];
+
+            // Try to parse the subscript as an expression
+            // Check different patterns:
+            let subscript_expr = subscript_str.parse::<i32>().map_or_else(
+                |_| {
+                    if subscript_str
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        // Bare identifier like "joan" - treat as string literal key
+                        Some(Expr::String(Some(subscript_str.to_string())))
+                    } else if let Ok((_, expr)) = parse_expression(subscript_str) {
+                        // Successfully parsed as expression (e.g., "'key'", "$(var)", complex expression)
+                        Some(expr)
+                    } else {
+                        // Failed to parse - ignore subscript
+                        None
+                    }
+                },
+                |num| Some(Expr::Integer(num)),
+            );
+
+            if let Some(expr) = subscript_expr {
+                return (var_name.to_string(), Some(expr));
+            }
+        }
+    }
+    (name.to_string(), None)
+}
+
 fn esi_assign<'a>(
     original: &Bytes,
     input: &'a [u8],
@@ -259,6 +368,17 @@ fn esi_assign<'a>(
 
 fn assign_attributes_short(attrs: HashMap<String, String>) -> ParseResult {
     let name = attrs.get("name").cloned().unwrap_or_default();
+
+    // Validate variable name according to ESI spec
+    if !is_valid_variable_name(&name) {
+        // Invalid name - silently drop this tag per ESI spec for invalid constructs
+        // ParseResult::Empty causes the parser to consume the tag but emit nothing
+        return ParseResult::Empty;
+    }
+
+    // Parse name and optional subscript (e.g., "colors{0}" or "ages{joan}")
+    let (var_name, subscript) = parse_variable_name_with_subscript(&name);
+
     let value_str = attrs.get("value").cloned().unwrap_or_default();
 
     // Per ESI spec, short form value attribute contains an expression
@@ -271,7 +391,11 @@ fn assign_attributes_short(attrs: HashMap<String, String>) -> ParseResult {
         }
     };
 
-    ParseResult::Single(Element::Esi(Tag::Assign { name, value }))
+    ParseResult::Single(Element::Esi(Tag::Assign {
+        name: var_name,
+        subscript,
+        value,
+    }))
 }
 
 /// Parse an attribute value as an ESI expression
@@ -281,24 +405,40 @@ fn assign_attributes_short(attrs: HashMap<String, String>) -> ParseResult {
 ///   "$(VARIABLE)" -> Expr::Variable("VARIABLE", ...)
 ///   "http://example.com?q=$(QUERY_STRING{'query'})" -> Expr::Interpolated([Text, Expr])
 fn parse_attr_as_expr(value_str: String) -> Expr {
+    parse_attr_as_expr_with_context(value_str, false)
+}
+
+fn parse_attr_as_expr_with_context(value_str: String, bare_id_as_variable: bool) -> Expr {
     // Fast-path: empty string
     if value_str.is_empty() {
         return Expr::String(Some(String::new()));
     }
 
-    // Fast-path: plain string without special chars
-    // This handles most URLs/paths and avoids any parsing overhead
-    if !value_str.contains('$')
-        && !value_str.starts_with('\'')
-        && !value_str.starts_with('"')
-        && !value_str.bytes().all(|b| b.is_ascii_digit() || b == b'-')
-    {
-        return Expr::String(Some(value_str));
+    // Try to parse as pure ESI expression first (variables/functions/quoted strings/integers/dict/list literals)
+    if let Ok((remaining, expr)) = parse_expression(&value_str) {
+        // Only accept if we consumed the entire string (pure expression)
+        if remaining.is_empty() {
+            return expr;
+        }
     }
 
-    // Primary path: use interpolated_content which handles:
-    // - Pure expressions: $(VAR), function(...), 123, 'quoted'
-    // - Mixed content: prefix$(VAR), $(A)$(B), text $(VAR) more
+    // Special case: bare identifier (e.g., "items" for collection="items")
+    // Whether to treat as variable depends on context
+    if bare_id_as_variable {
+        let is_bare_identifier = value_str
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && value_str
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+
+        if is_bare_identifier {
+            return Expr::Variable(value_str, None, None);
+        }
+    }
+
+    // Not a pure expression - try interpolation (mixed text + expressions)
     let bytes = Bytes::from(value_str);
     match interpolated_content(&bytes) {
         Ok(([], elements)) => {
@@ -322,6 +462,16 @@ fn parse_attr_as_expr(value_str: String) -> Expr {
 
 fn assign_long(attrs: HashMap<String, String>, mut content: Vec<Element>) -> ParseResult {
     let name = attrs.get("name").cloned().unwrap_or_default();
+
+    // Validate variable name according to ESI spec
+    if !is_valid_variable_name(&name) {
+        // Invalid name - silently drop this tag per ESI spec for invalid constructs
+        // ParseResult::Empty causes the parser to consume the tag but emit nothing
+        return ParseResult::Empty;
+    }
+
+    // Parse name and optional subscript (e.g., "colors{0}" or "ages{joan}")
+    let (var_name, subscript) = parse_variable_name_with_subscript(&name);
 
     // Per ESI spec, long form value comes from content between tags
     // Content is already parsed as Vec<Element> (can be text, expressions, etc.)
@@ -354,7 +504,11 @@ fn assign_long(attrs: HashMap<String, String>, mut content: Vec<Element>) -> Par
         Expr::Interpolated(content)
     };
 
-    ParseResult::Single(Element::Esi(Tag::Assign { name, value }))
+    ParseResult::Single(Element::Esi(Tag::Assign {
+        name: var_name,
+        subscript,
+        value,
+    }))
 }
 
 fn esi_assign_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
@@ -494,6 +648,47 @@ fn esi_when<'a>(
             result.extend(content);
             ParseResult::Multiple(result)
         },
+    )(input)
+}
+
+/// Parse <esi:foreach collection="..." item="...">...</esi:foreach>
+fn esi_foreach<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    map(
+        tuple((
+            delimited(
+                streaming_bytes::tag(b"<esi:foreach"),
+                attributes,
+                preceded(streaming_char::multispace0, closing_bracket),
+            ),
+            |i| tag_content(original, i),
+            streaming_bytes::tag(b"</esi:foreach>"),
+        )),
+        |(attrs, content, _)| {
+            let collection_str = attrs.get("collection").cloned().unwrap_or_default();
+            let collection = parse_attr_as_expr_with_context(collection_str, true);
+            let item = attrs.get("item").cloned();
+
+            ParseResult::Single(Element::Esi(Tag::Foreach {
+                collection,
+                item,
+                content,
+            }))
+        },
+    )(input)
+}
+
+/// Parse <esi:break />
+fn esi_break(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
+    map(
+        delimited(
+            streaming_bytes::tag(b"<esi:break"),
+            streaming_char::multispace0,
+            self_closing,
+        ),
+        |_| ParseResult::Single(Element::Esi(Tag::Break)),
     )(input)
 }
 
@@ -945,6 +1140,8 @@ fn tag_handler<'a>(
                 b"esi:otherwise" => esi_otherwise(original, start),
                 b"esi:attempt" => esi_attempt(original, start),
                 b"esi:except" => esi_except(original, start),
+                b"esi:foreach" => esi_foreach(original, start),
+                b"esi:break" => esi_break(start),
 
                 // Special HTML tags - pass start to re-parse from beginning
                 // (script needs to check attributes, so easier to re-parse than continue)
@@ -1217,6 +1414,8 @@ fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
         // Try longer operators first
         map(tag(b"matches_i"), |_| Operator::MatchesInsensitive),
         map(tag(b"matches"), |_| Operator::Matches),
+        map(tag(b"has_i"), |_| Operator::HasInsensitive),
+        map(tag(b"has"), |_| Operator::Has),
         map(tag(b"=="), |_| Operator::Equals),
         map(tag(b"!="), |_| Operator::NotEquals),
         map(tag(b"<="), |_| Operator::LessThanOrEqual),
@@ -1229,9 +1428,48 @@ fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
 }
 
 fn interpolated_expression(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
-    map(alt((esi_function, esi_variable, integer, string)), |expr| {
-        ParseResult::Single(Element::Expr(expr))
-    })(input)
+    map(
+        alt((
+            dict_literal,
+            list_literal,
+            esi_function,
+            esi_variable,
+            integer,
+            string,
+        )),
+        |expr| ParseResult::Single(Element::Expr(expr)),
+    )(input)
+}
+
+fn dict_literal(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+    map(
+        delimited(
+            tag(b"{"),
+            separated_list0(
+                tuple((multispace0, tag(b","), multispace0)),
+                tuple((
+                    delimited(multispace0, primary_expr, multispace0),
+                    preceded(tag(b":"), delimited(multispace0, primary_expr, multispace0)),
+                )),
+            ),
+            preceded(multispace0, tag(b"}")),
+        ),
+        Expr::DictLiteral,
+    )(input)
+}
+
+fn list_literal(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+    map(
+        delimited(
+            tag(b"["),
+            separated_list0(
+                tuple((multispace0, tag(b","), multispace0)),
+                delimited(multispace0, primary_expr, multispace0),
+            ),
+            preceded(multispace0, tag(b"]")),
+        ),
+        Expr::ListLiteral,
+    )(input)
 }
 
 fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
@@ -1247,6 +1485,10 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
             delimited(multispace0, expr, multispace0),
             tag(b")"),
         ),
+        // Parse dictionary literal: {key:value, key:value}
+        dict_literal,
+        // Parse list literal: [value, value]
+        list_literal,
         // Parse basic expressions
         esi_function,
         esi_variable,
@@ -1673,6 +1915,27 @@ exception!
             "Should parse >= operator: {:?}",
             result2.err()
         );
+
+        // Test has operator
+        let input3 = b"<esi:choose><esi:when test=\"$(USER_AGENT) has 'Mobile'\">yes</esi:when></esi:choose>";
+        let bytes3 = Bytes::from_static(input3);
+        let result3 = parse_complete(&bytes3);
+        assert!(
+            result3.is_ok(),
+            "Should parse 'has' operator: {:?}",
+            result3.err()
+        );
+
+        // Test has_i operator
+        let input4 =
+            b"<esi:choose><esi:when test=\"$(COOKIE) has_i 'sam'\">yes</esi:when></esi:choose>";
+        let bytes4 = Bytes::from_static(input4);
+        let result4 = parse_complete(&bytes4);
+        assert!(
+            result4.is_ok(),
+            "Should parse 'has_i' operator: {:?}",
+            result4.err()
+        );
     }
 
     #[test]
@@ -1749,13 +2012,228 @@ exception!
         let (rest, elements) = parse_complete(&bytes2).unwrap();
         assert_eq!(rest.len(), 0, "Should parse completely");
         assert_eq!(elements.len(), 1);
-        if let Element::Esi(Tag::Assign { name, value }) = &elements[0] {
+        if let Element::Esi(Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = &elements[0]
+        {
             assert_eq!(name, "foo");
             assert_eq!(value, &Expr::String(Some("bar".to_string())));
         } else {
             panic!("Expected Assign tag");
         }
     }
+
+    #[test]
+    fn test_assign_valid_variable_names() {
+        // Valid names
+        let valid_cases: Vec<&[u8]> = vec![
+            b"<esi:assign name=\"valid_name\" value=\"test\"/>",
+            b"<esi:assign name=\"a\" value=\"test\"/>",
+            b"<esi:assign name=\"Z\" value=\"test\"/>",
+            b"<esi:assign name=\"var123\" value=\"test\"/>",
+            b"<esi:assign name=\"my_var_123\" value=\"test\"/>",
+            b"<esi:assign name=\"CamelCase\" value=\"test\"/>",
+        ];
+
+        for input in valid_cases {
+            let bytes = Bytes::copy_from_slice(input);
+            let result = parse_complete(&bytes);
+            assert!(
+                result.is_ok(),
+                "Should parse valid name: {:?}",
+                std::str::from_utf8(input)
+            );
+            let (_, elements) = result.unwrap();
+            let has_assign = elements
+                .iter()
+                .any(|e| matches!(e, Element::Esi(Tag::Assign { .. })));
+            assert!(
+                has_assign,
+                "Should have Assign tag for: {:?}",
+                std::str::from_utf8(input)
+            );
+        }
+    }
+
+    #[test]
+    fn test_assign_invalid_variable_names() {
+        // Invalid names should be rejected (treated as empty/skipped)
+        let invalid_cases: Vec<&[u8]> = vec![
+            b"<esi:assign name=\"$invalid\" value=\"test\"/>", // starts with $
+            b"<esi:assign name=\"123invalid\" value=\"test\"/>", // starts with digit
+            b"<esi:assign name=\"_invalid\" value=\"test\"/>", // starts with underscore
+            b"<esi:assign name=\"invalid-name\" value=\"test\"/>", // contains dash
+            b"<esi:assign name=\"invalid.name\" value=\"test\"/>", // contains dot
+            b"<esi:assign name=\"invalid name\" value=\"test\"/>", // contains space
+            b"<esi:assign name=\"\" value=\"test\"/>",         // empty name
+        ];
+
+        for input in invalid_cases {
+            let bytes = Bytes::copy_from_slice(input);
+            let result = parse_complete(&bytes);
+            assert!(
+                result.is_ok(),
+                "Should parse (but skip invalid): {:?}",
+                std::str::from_utf8(input)
+            );
+            let (_, elements) = result.unwrap();
+            let has_assign = elements
+                .iter()
+                .any(|e| matches!(e, Element::Esi(Tag::Assign { .. })));
+            assert!(
+                !has_assign,
+                "Should NOT have Assign tag for invalid name: {:?}",
+                std::str::from_utf8(input)
+            );
+        }
+    }
+
+    #[test]
+    fn test_assign_name_length_limit() {
+        // Test 256 character limit
+        let valid_256 = format!(r#"<esi:assign name="a{}" value="test"/>"#, "b".repeat(255));
+        let bytes = Bytes::from(valid_256.clone());
+        let result = parse_complete(&bytes);
+        assert!(result.is_ok(), "Should parse 256 char name");
+        let (_, elements) = result.unwrap();
+        let has_assign = elements
+            .iter()
+            .any(|e| matches!(e, Element::Esi(Tag::Assign { .. })));
+        assert!(has_assign, "Should have Assign tag for 256 char name");
+
+        // Test 257 characters (should be invalid)
+        let invalid_257 = format!(r#"<esi:assign name="a{}" value="test"/>"#, "b".repeat(256));
+        let bytes = Bytes::from(invalid_257);
+        let result = parse_complete(&bytes);
+        assert!(result.is_ok(), "Should parse (but skip)");
+        let (_, elements) = result.unwrap();
+        let has_assign = elements
+            .iter()
+            .any(|e| matches!(e, Element::Esi(Tag::Assign { .. })));
+        assert!(!has_assign, "Should NOT have Assign tag for 257 char name");
+    }
+
+    #[test]
+    fn test_assign_long_form_invalid_name() {
+        // Long form with invalid name should also be rejected
+        let input = b"<esi:assign name=\"$invalid\">test value</esi:assign>";
+        let bytes = Bytes::copy_from_slice(input);
+        let result = parse_complete(&bytes);
+        assert!(result.is_ok(), "Should parse");
+        let (_, elements) = result.unwrap();
+        let has_assign = elements
+            .iter()
+            .any(|e| matches!(e, Element::Esi(Tag::Assign { .. })));
+        assert!(
+            !has_assign,
+            "Should NOT have Assign tag for invalid name in long form"
+        );
+    }
+
+    #[test]
+    fn test_assign_with_subscript() {
+        // Test subscript assignment parsing with bare identifier
+        let input = b"<esi:assign name=\"ages{joan}\" value=\"28\"/>";
+        let bytes = Bytes::copy_from_slice(input);
+        let result = parse_complete(&bytes);
+        assert!(result.is_ok(), "Should parse");
+        let (_, elements) = result.unwrap();
+        assert_eq!(elements.len(), 1);
+
+        match &elements[0] {
+            Element::Esi(Tag::Assign {
+                name,
+                subscript,
+                value,
+            }) => {
+                assert_eq!(name, "ages");
+                assert!(subscript.is_some(), "Should have subscript");
+                if let Some(sub) = subscript {
+                    // Should be a string literal "joan"
+                    assert!(matches!(sub, Expr::String(Some(s)) if s == "joan"));
+                }
+                assert!(matches!(value, Expr::Integer(28)));
+            }
+            _ => panic!("Expected Assign tag"),
+        }
+
+        // Test with another bare identifier
+        let input2 = b"<esi:assign name=\"ages{bob}\" value=\"34\"/>";
+        let bytes2 = Bytes::copy_from_slice(input2);
+        let result2 = parse_complete(&bytes2);
+        assert!(result2.is_ok(), "Should parse");
+        let (_, elements2) = result2.unwrap();
+        assert_eq!(elements2.len(), 1);
+
+        match &elements2[0] {
+            Element::Esi(Tag::Assign {
+                name,
+                subscript,
+                value,
+            }) => {
+                assert_eq!(name, "ages");
+                assert!(subscript.is_some(), "Should have subscript");
+                if let Some(sub) = subscript {
+                    // Should be a string literal "bob"
+                    assert!(
+                        matches!(sub, Expr::String(Some(s)) if s == "bob"),
+                        "Subscript should be 'bob', got {:?}",
+                        sub
+                    );
+                }
+                assert!(matches!(value, Expr::Integer(34)));
+            }
+            _ => panic!("Expected Assign tag"),
+        }
+    }
+
+    #[test]
+    fn test_assign_with_quoted_subscript() {
+        // Test ESI spec-compliant subscript with quoted strings in assignment
+        let input = b"<esi:assign name=\"ages{'joan'}\" value=\"28\"/>";
+        let bytes = Bytes::copy_from_slice(input);
+        let result = parse_complete(&bytes);
+
+        assert!(
+            result.is_ok(),
+            "Should parse spec-compliant quoted subscript"
+        );
+        let (_, elements) = result.unwrap();
+        assert_eq!(elements.len(), 1, "Should have exactly 1 element");
+
+        match &elements[0] {
+            Element::Esi(Tag::Assign {
+                name,
+                subscript,
+                value,
+            }) => {
+                assert_eq!(name, "ages");
+                assert!(subscript.is_some(), "Should have subscript");
+                if let Some(sub) = subscript {
+                    // Should be a string literal "joan"
+                    assert!(
+                        matches!(sub, Expr::String(Some(s)) if s == "joan"),
+                        "Subscript should be 'joan', got {:?}",
+                        sub
+                    );
+                }
+                assert!(matches!(value, Expr::Integer(28)));
+            }
+            other => panic!("Expected Assign tag, got {:?}", other),
+        }
+
+        // Test with multiple quoted subscripts
+        let input2 = b"<esi:assign name=\"data{'key1'}\" value=\"${'value1'}\"/>";
+        let bytes2 = Bytes::copy_from_slice(input2);
+        let result2 = parse_complete(&bytes2);
+        assert!(
+            result2.is_ok(),
+            "Should parse assignment with quoted subscript and quoted value"
+        );
+    }
+
     #[test]
     fn test_unclosed_script_tag() {
         // Unclosed script tag - should handle gracefully
@@ -1814,5 +2292,91 @@ exception!
             &elements[0],
             Element::Html(h) if h.as_ref() == b"<!-- this is a comment -->"
         ));
+    }
+
+    #[test]
+    fn test_parse_foreach() {
+        let input = b"<esi:foreach collection=\"items\" item=\"x\">Item: $(x)</esi:foreach>";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+
+        match &elements[0] {
+            Element::Esi(Tag::Foreach {
+                collection,
+                item,
+                content,
+            }) => {
+                assert!(matches!(collection, Expr::Variable(name, None, None) if name == "items"));
+                assert_eq!(item.as_deref(), Some("x"));
+                assert!(!content.is_empty());
+            }
+            other => panic!("Expected Foreach tag, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_foreach_no_item() {
+        let input = b"<esi:foreach collection=\"mylist\">Value: $(item)</esi:foreach>";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+
+        match &elements[0] {
+            Element::Esi(Tag::Foreach {
+                collection,
+                item,
+                content,
+            }) => {
+                assert!(matches!(collection, Expr::Variable(name, None, None) if name == "mylist"));
+                assert_eq!(item, &None);
+                assert!(!content.is_empty());
+            }
+            other => panic!("Expected Foreach tag, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_break() {
+        let input = b"<esi:break />";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+        assert!(matches!(&elements[0], Element::Esi(Tag::Break)));
+    }
+
+    #[test]
+    fn test_parse_foreach_with_break() {
+        let input = b"<esi:foreach collection=\"items\"><esi:break /></esi:foreach>";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+
+        match &elements[0] {
+            Element::Esi(Tag::Foreach {
+                collection,
+                content,
+                ..
+            }) => {
+                assert!(matches!(collection, Expr::Variable(name, None, None) if name == "items"));
+                assert_eq!(content.len(), 1);
+                assert!(matches!(&content[0], Element::Esi(Tag::Break)));
+            }
+            other => panic!("Expected Foreach tag, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dict_literal() {
+        let input = b"{1:'apple',2:'orange'}";
+        let result = dict_literal(input);
+        assert!(result.is_ok(), "Dict literal should parse: {:?}", result);
+        let (rest, expr) = result.unwrap();
+        assert_eq!(rest, b"");
+        assert!(matches!(expr, Expr::DictLiteral(_)));
     }
 }

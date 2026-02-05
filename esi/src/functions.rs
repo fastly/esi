@@ -1,11 +1,17 @@
-use crate::{expression::Value, ExecutionError, Result};
-use std::convert::TryFrom;
+use crate::{expression::EvalContext, expression::Value, ExecutionError, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use rand::Rng;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn lower(args: &[Value]) -> Result<Value> {
     if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(
-            "wrong number of arguments to 'lower'".to_string(),
-        ));
+        return Err(ExecutionError::FunctionError(format!(
+            "lower: expected 1 argument, got {}",
+            args.len()
+        )));
     }
 
     // If the argument is Null, return Null (don't convert to "null" string)
@@ -13,14 +19,24 @@ pub fn lower(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
+    // Fast path: mutate a copy of the bytes in-place for ASCII lowering to avoid String allocs
+    if let Value::Text(bytes) = &args[0] {
+        let mut buf = bytes.to_vec();
+        for b in &mut buf {
+            *b = b.to_ascii_lowercase();
+        }
+        return Ok(Value::Text(buf.into()));
+    }
+
     Ok(Value::Text(args[0].to_string().to_lowercase().into()))
 }
 
 pub fn html_encode(args: &[Value]) -> Result<Value> {
     if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(
-            "wrong number of arguments to 'html_encode'".to_string(),
-        ));
+        return Err(ExecutionError::FunctionError(format!(
+            "html_encode: expected 1 argument, got {}",
+            args.len()
+        )));
     }
 
     let encoded =
@@ -28,11 +44,791 @@ pub fn html_encode(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(encoded.into()))
 }
 
+pub fn html_decode(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "html_decode: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    let decoded = html_escape::decode_html_entities(args[0].to_string().as_str()).to_string();
+    Ok(Value::Text(decoded.into()))
+}
+
+pub fn convert_to_unicode(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "convert_to_unicode: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if let Value::Text(b) = &args[0] {
+        return Ok(Value::Text(b.clone()));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    Ok(Value::Text(args[0].to_string().into()))
+}
+
+pub fn convert_from_unicode(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "convert_from_unicode: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if let Value::Text(b) = &args[0] {
+        return Ok(Value::Text(b.clone()));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    Ok(Value::Text(args[0].to_string().into()))
+}
+
+pub fn set_response_code(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(ExecutionError::FunctionError(format!(
+            "set_response_code: expected 1-2 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    let status = parse_i64("set_response_code", &args[0])?;
+    if !(100..=599).contains(&status) {
+        return Err(ExecutionError::FunctionError(
+            "set_response_code: invalid status code".to_string(),
+        ));
+    }
+
+    ctx.set_response_status(status as i32);
+
+    if let Some(body_val) = args.get(1) {
+        if matches!(body_val, Value::Null) {
+            ctx.set_response_body_override(None);
+        } else {
+            ctx.set_response_body_override(Some(Bytes::from(body_val.to_string())));
+        }
+    }
+
+    Ok(Value::Null)
+}
+
+pub fn set_redirect(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "set_redirect: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    let location = args[0].to_string();
+    ctx.set_response_status(302);
+    ctx.add_response_header("Location".to_string(), location);
+    ctx.set_response_body_override(None);
+
+    Ok(Value::Null)
+}
+
+pub fn upper(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "upper: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    // Fast path: mutate a copy of the bytes in-place for ASCII upper to avoid String allocs
+    if let Value::Text(bytes) = &args[0] {
+        let mut buf = bytes.to_vec();
+        for b in &mut buf {
+            *b = b.to_ascii_uppercase();
+        }
+        return Ok(Value::Text(buf.into()));
+    }
+
+    Ok(Value::Text(args[0].to_string().to_uppercase().into()))
+}
+
+pub fn to_str(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "str: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    Ok(Value::Text(args[0].to_string().into()))
+}
+
+pub fn lstrip(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "lstrip: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    // Zero-copy trim on valid UTF-8 text by slicing the original Bytes
+    if let Value::Text(bytes) = &args[0] {
+        if let Ok(s) = std::str::from_utf8(bytes.as_ref()) {
+            let trimmed = s.trim_start();
+            let start = s.len() - trimmed.len();
+            return Ok(Value::Text(bytes.slice(start..bytes.len())));
+        }
+    }
+
+    let s = args[0].to_string();
+    Ok(Value::Text(s.trim_start().to_string().into()))
+}
+
+pub fn rstrip(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "rstrip: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    // Zero-copy trim on valid UTF-8 text by slicing the original Bytes
+    if let Value::Text(bytes) = &args[0] {
+        if let Ok(s) = std::str::from_utf8(bytes.as_ref()) {
+            let trimmed = s.trim_end();
+            let end = trimmed.len();
+            return Ok(Value::Text(bytes.slice(0..end)));
+        }
+    }
+
+    let s = args[0].to_string();
+    Ok(Value::Text(s.trim_end().to_string().into()))
+}
+
+pub fn strip(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "strip: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    // Zero-copy trim on valid UTF-8 text by slicing the original Bytes
+    if let Value::Text(bytes) = &args[0] {
+        if let Ok(s) = std::str::from_utf8(bytes.as_ref()) {
+            let trimmed_start = s.trim_start();
+            let start = s.len() - trimmed_start.len();
+            let trimmed = trimmed_start.trim_end();
+            let end = start + trimmed.len();
+            return Ok(Value::Text(bytes.slice(start..end)));
+        }
+    }
+
+    let s = args[0].to_string();
+    Ok(Value::Text(s.trim().to_string().into()))
+}
+
+pub fn dollar(args: &[Value]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(ExecutionError::FunctionError(format!(
+            "dollar: expected 0 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    Ok(Value::Text(Bytes::from("$")))
+}
+
+pub fn dquote(args: &[Value]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(ExecutionError::FunctionError(format!(
+            "dquote: expected 0 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    Ok(Value::Text(Bytes::from("\"")))
+}
+
+pub fn squote(args: &[Value]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(ExecutionError::FunctionError(format!(
+            "squote: expected 0 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    Ok(Value::Text(Bytes::from("'")))
+}
+
+pub fn base64_encode(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "base64_encode: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    let encoded = STANDARD.encode(args[0].to_string().as_bytes());
+    Ok(Value::Text(encoded.into()))
+}
+
+pub fn url_encode(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "url_encode: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    let encoded = utf8_percent_encode(&args[0].to_string(), NON_ALPHANUMERIC).to_string();
+    Ok(Value::Text(encoded.into()))
+}
+
+pub fn url_decode(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "url_decode: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    let input = args[0].to_string();
+    let decoded = percent_decode_str(&input)
+        .decode_utf8()
+        .map_err(|_| ExecutionError::FunctionError("invalid UTF-8 in 'url_decode'".to_string()))?;
+
+    Ok(Value::Text(Bytes::from(decoded.to_string())))
+}
+
+fn parse_i64(name: &str, v: &Value) -> Result<i64> {
+    match v {
+        Value::Integer(i) => Ok(*i as i64),
+        Value::Text(b) => std::str::from_utf8(b)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .ok_or_else(|| ExecutionError::FunctionError(format!("{name}: invalid integer"))),
+        Value::Null => Ok(0),
+        _ => Err(ExecutionError::FunctionError(format!(
+            "{name}: invalid integer"
+        ))),
+    }
+}
+
+fn parse_str<'a>(name: &str, v: &'a Value) -> Result<&'a str> {
+    if let Value::Text(b) = v {
+        std::str::from_utf8(b)
+            .map_err(|_| ExecutionError::FunctionError(format!("{name}: invalid string")))
+    } else {
+        Err(ExecutionError::FunctionError(format!(
+            "{name}: invalid string"
+        )))
+    }
+}
+
+pub fn len(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "len: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    let count = match &args[0] {
+        Value::Null => 0,
+        Value::Text(b) => String::from_utf8_lossy(b).chars().count() as i32,
+        Value::List(items) => items.len() as i32,
+        Value::Dict(map) => map.len() as i32,
+        other => other.to_string().chars().count() as i32,
+    };
+
+    Ok(Value::Integer(count))
+}
+
+fn parse_positive_bound(name: &str, v: &Value) -> Result<i32> {
+    let n = parse_i64(name, v)?;
+    if n <= 0 || n > i32::MAX as i64 {
+        return Err(ExecutionError::FunctionError(format!(
+            "{name}: invalid bound"
+        )));
+    }
+    Ok(n as i32)
+}
+
+pub fn int(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "int: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if let Value::Integer(i) = args[0] {
+        return Ok(Value::Integer(i));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Integer(0));
+    }
+
+    let parsed = args[0].to_string().trim().parse::<i32>().unwrap_or(0);
+    Ok(Value::Integer(parsed))
+}
+
+pub fn exists(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "exists: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    let exists = match &args[0] {
+        Value::Null => false,
+        Value::Text(b) => !b.is_empty(),
+        Value::List(items) => !items.is_empty(),
+        Value::Dict(map) => !map.is_empty(),
+        _ => true,
+    };
+
+    Ok(Value::Boolean(exists))
+}
+
+pub fn is_empty(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "is_empty: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    match &args[0] {
+        Value::Null => Ok(Value::Boolean(false)),
+        Value::Text(b) => Ok(Value::Boolean(b.is_empty())),
+        Value::List(items) => Ok(Value::Boolean(items.is_empty())),
+        Value::Dict(map) => Ok(Value::Boolean(map.is_empty())),
+        _ => Ok(Value::Boolean(false)),
+    }
+}
+
+pub fn index(args: &[Value]) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(ExecutionError::FunctionError(format!(
+            "index: expected 2 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) || matches!(args[1], Value::Null) {
+        return Ok(Value::Integer(-1));
+    }
+
+    let hay = args[0].to_string();
+    let needle = args[1].to_string();
+
+    if needle.is_empty() {
+        return Ok(Value::Integer(0));
+    }
+
+    hay.find(&needle).map_or_else(
+        || Ok(Value::Integer(-1)),
+        |byte_idx| {
+            let pos = hay[..byte_idx].chars().count() as i32;
+            Ok(Value::Integer(pos))
+        },
+    )
+}
+
+pub fn rindex(args: &[Value]) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(ExecutionError::FunctionError(format!(
+            "rindex: expected 2 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) || matches!(args[1], Value::Null) {
+        return Ok(Value::Integer(-1));
+    }
+
+    let hay = args[0].to_string();
+    let needle = args[1].to_string();
+
+    if needle.is_empty() {
+        return Ok(Value::Integer(hay.chars().count() as i32));
+    }
+
+    hay.rfind(&needle).map_or_else(
+        || Ok(Value::Integer(-1)),
+        |byte_idx| {
+            let pos = hay[..byte_idx].chars().count() as i32;
+            Ok(Value::Integer(pos))
+        },
+    )
+}
+
+pub fn md5_digest(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "md5_digest: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let input = args[0].to_string();
+    let digest = md5::compute(input.as_bytes());
+    let hex = format!("{:x}", digest);
+    Ok(Value::Text(hex.into()))
+}
+
+pub fn time(args: &[Value]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(ExecutionError::FunctionError(format!(
+            "time: expected 0 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ExecutionError::FunctionError("system time before UNIX_EPOCH".to_string()))?
+        .as_secs();
+
+    let clamped = secs.min(i32::MAX as u64) as i32;
+    Ok(Value::Integer(clamped))
+}
+
+pub fn http_time(args: &[Value]) -> Result<Value> {
+    if args.len() > 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "http_time: expected 0-1 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    let secs = if args.is_empty() || matches!(args[0], Value::Null) {
+        Utc::now().timestamp()
+    } else {
+        parse_i64("http_time", &args[0])?
+    };
+
+    let dt = DateTime::<Utc>::from_timestamp(secs, 0)
+        .ok_or_else(|| ExecutionError::FunctionError("http_time: invalid timestamp".to_string()))?;
+
+    let formatted = dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    Ok(Value::Text(Bytes::from(formatted)))
+}
+
+pub fn strftime(args: &[Value]) -> Result<Value> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(ExecutionError::FunctionError(format!(
+            "strftime: expected 1-2 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    let fmt = parse_str("strftime", &args[0])?;
+
+    let secs = match args.get(1) {
+        None => Utc::now().timestamp(),
+        Some(Value::Null) => Utc::now().timestamp(),
+        Some(v) => parse_i64("strftime", v)?,
+    };
+
+    let dt = DateTime::<Utc>::from_timestamp(secs, 0)
+        .ok_or_else(|| ExecutionError::FunctionError("strftime: invalid timestamp".to_string()))?;
+
+    Ok(Value::Text(Bytes::from(dt.format(fmt).to_string())))
+}
+
+pub fn rand(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
+    let bound = match args.len() {
+        0 => 100_000_000i32,
+        1 => parse_positive_bound("rand", &args[0])?,
+        _ => {
+            return Err(ExecutionError::FunctionError(
+                "rand expects 0 or 1 argument".to_string(),
+            ))
+        }
+    };
+
+    let mut rng = rand::thread_rng();
+    let v: i32 = rng.gen_range(0..bound);
+    ctx.set_last_rand(v);
+    Ok(Value::Integer(v))
+}
+
+pub fn last_rand(args: &[Value], ctx: &EvalContext) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(ExecutionError::FunctionError(
+            "last_rand expects no arguments".to_string(),
+        ));
+    }
+
+    Ok(ctx.last_rand().map_or_else(|| Value::Null, Value::Integer))
+}
+
+pub fn bin_int(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "bin_int: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    let value = match args[0] {
+        Value::Integer(i) => i,
+        _ => {
+            return Err(ExecutionError::FunctionError(
+                "incorrect type passed to 'bin_int'".to_string(),
+            ))
+        }
+    };
+
+    let bytes = value.to_le_bytes();
+    Ok(Value::Text(Bytes::copy_from_slice(&bytes)))
+}
+
+pub fn substr(args: &[Value]) -> Result<Value> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(ExecutionError::FunctionError(format!(
+            "substr: expected 2-3 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let s = args[0].to_string();
+    let start_i = match args[1] {
+        Value::Integer(i) => i,
+        _ => {
+            return Err(ExecutionError::FunctionError(
+                "incorrect type for 'substr' start".to_string(),
+            ))
+        }
+    };
+
+    let end_i: Option<i32> = match args.get(2) {
+        None => None,
+        Some(Value::Integer(j)) => Some(*j),
+        Some(_) => {
+            return Err(ExecutionError::FunctionError(
+                "incorrect type for 'substr' end".to_string(),
+            ))
+        }
+    };
+
+    // Work in chars to respect the spec's character indexing semantics
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len() as i32;
+
+    let start = if start_i < 0 {
+        (len + start_i).max(0)
+    } else {
+        start_i.min(len)
+    } as usize;
+
+    let end = match end_i {
+        None => len,
+        Some(j) if j < 0 => (len + j).max(0),
+        Some(j) => j.min(len),
+    } as usize;
+
+    if end < start {
+        return Ok(Value::Text(Bytes::new()));
+    }
+
+    let slice: String = chars[start..end].iter().collect();
+    Ok(Value::Text(slice.into()))
+}
+
+pub fn add_header(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(ExecutionError::FunctionError(format!(
+            "add_header: expected 2 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    let name = args[0].to_string();
+    let value = args[1].to_string();
+    ctx.add_response_header(name, value);
+
+    Ok(Value::Null)
+}
+
+pub fn string_split(args: &[Value]) -> Result<Value> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(ExecutionError::FunctionError(
+            "wrong number of arguments to 'string_split'".to_string(),
+        ));
+    }
+
+    let source = args[0].to_string();
+    let sep = match args.get(1) {
+        None | Some(Value::Null) => " ".to_string(),
+        Some(v) => v.to_string(),
+    };
+
+    let max_splits = match args.get(2) {
+        None | Some(Value::Null) => None,
+        Some(Value::Integer(n)) => Some(*n),
+        Some(_) => {
+            return Err(ExecutionError::FunctionError(
+                "string_split: invalid max_sep".to_string(),
+            ))
+        }
+    };
+
+    // If max_splits is provided and non-positive, do not split
+    if let Some(n) = max_splits {
+        if n <= 0 {
+            return Ok(Value::List(vec![Value::Text(source.into())]));
+        }
+    }
+
+    let parts: Vec<String> = if sep.is_empty() {
+        let mut out = Vec::new();
+        let mut splits_done = 0usize;
+        let limit = max_splits.map(|n| n as usize);
+
+        let mut chars = source.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if let Some(limit) = limit {
+                if splits_done >= limit {
+                    let mut rest = String::new();
+                    rest.push(ch);
+                    for c in chars.by_ref() {
+                        rest.push(c);
+                    }
+                    out.push(rest);
+                    return Ok(Value::List(
+                        out.into_iter().map(|s| Value::Text(s.into())).collect(),
+                    ));
+                }
+            }
+
+            out.push(ch.to_string());
+            splits_done += 1;
+        }
+
+        out
+    } else {
+        let iter = max_splits.map_or_else(
+            || source.split(&sep).map(|s| s.to_string()).collect(),
+            |n| {
+                source
+                    .splitn(n as usize + 1, &sep)
+                    .map(|s| s.to_string())
+                    .collect()
+            },
+        );
+        iter
+    };
+
+    let values = parts.into_iter().map(|s| Value::Text(s.into())).collect();
+    Ok(Value::List(values))
+}
+
+pub fn join(args: &[Value]) -> Result<Value> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(ExecutionError::FunctionError(format!(
+            "join: expected 1-2 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    let sep = match args.get(1) {
+        None | Some(Value::Null) => " ".to_string(),
+        Some(v) => v.to_string(),
+    };
+
+    let list = match &args[0] {
+        Value::List(items) => items,
+        _ => {
+            return Err(ExecutionError::FunctionError(
+                "join expects a list as first argument".to_string(),
+            ))
+        }
+    };
+
+    let mut out = String::new();
+    for (i, v) in list.iter().enumerate() {
+        if i > 0 {
+            out.push_str(&sep);
+        }
+        out.push_str(&v.to_string());
+    }
+
+    Ok(Value::Text(out.into()))
+}
+
+pub fn list_delitem(args: &[Value]) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(ExecutionError::FunctionError(format!(
+            "list_delitem: expected 2 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    let list = match &args[0] {
+        Value::List(items) => items.clone(),
+        Value::Null => Vec::new(),
+        _ => {
+            return Err(ExecutionError::FunctionError(
+                "list_delitem expects a list as first argument".to_string(),
+            ))
+        }
+    };
+
+    let idx = parse_i64("list_delitem", &args[1])?;
+    if idx < 0 {
+        return Ok(Value::List(list));
+    }
+
+    let mut items = list;
+    if (idx as usize) < items.len() {
+        items.remove(idx as usize);
+    }
+
+    Ok(Value::List(items))
+}
+
 pub fn replace(args: &[Value]) -> Result<Value> {
     if args.len() < 3 || args.len() > 4 {
-        return Err(ExecutionError::FunctionError(
-            "wrong number of arguments to 'replace'".to_string(),
-        ));
+        return Err(ExecutionError::FunctionError(format!(
+            "replace: expected 3-4 arguments, got {}",
+            args.len()
+        )));
     }
     let Value::Text(haystack) = &args[0] else {
         return Err(ExecutionError::FunctionError(
@@ -50,17 +846,18 @@ pub fn replace(args: &[Value]) -> Result<Value> {
         ));
     };
 
-    // Convert Bytes to strings for replacement
-    let haystack_str = String::from_utf8_lossy(haystack.as_ref());
-    let needle_str = String::from_utf8_lossy(needle.as_ref());
-    let replacement_str = String::from_utf8_lossy(replacement.as_ref());
+    let hay = haystack.as_ref();
+    let needle = needle.as_ref();
+    let replacement = replacement.as_ref();
 
-    // count is optional, default to usize::MAX
+    // count is optional, default to usize::MAX; non-positive counts mean "no replacements"
     let count = match args.get(3) {
-        Some(Value::Integer(count)) => {
-            // cap count to usize::MAX
-            let count: usize = usize::try_from(*count).unwrap_or(usize::MAX);
-            count
+        Some(Value::Integer(n)) => {
+            if *n <= 0 {
+                0
+            } else {
+                *n as usize
+            }
         }
         Some(_) => {
             return Err(ExecutionError::FunctionError(
@@ -69,16 +866,33 @@ pub fn replace(args: &[Value]) -> Result<Value> {
         }
         None => usize::MAX,
     };
-    Ok(Value::Text(
-        haystack_str
-            .replacen(needle_str.as_ref(), replacement_str.as_ref(), count)
-            .into(),
-    ))
+
+    if needle.is_empty() {
+        return Ok(Value::Text(Bytes::copy_from_slice(hay)));
+    }
+
+    let mut out = Vec::with_capacity(hay.len());
+    let mut i = 0usize;
+    let mut replaced = 0usize;
+    while i + needle.len() <= hay.len() {
+        if replaced < count && hay[i..i + needle.len()] == *needle {
+            out.extend_from_slice(replacement);
+            i += needle.len();
+            replaced += 1;
+        } else {
+            out.push(hay[i]);
+            i += 1;
+        }
+    }
+
+    out.extend_from_slice(&hay[i..]);
+    Ok(Value::Text(out.into()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_lower() {
@@ -98,7 +912,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("wrong number of arguments to 'lower'".to_string())
+                ExecutionError::FunctionError("lower: expected 1 argument, got 2".to_string())
                     .to_string()
             ),
         }
@@ -123,7 +937,705 @@ mod tests {
             Err(err) => assert_eq!(
                 err.to_string(),
                 ExecutionError::FunctionError(
-                    "wrong number of arguments to 'html_encode'".to_string()
+                    "html_encode: expected 1 argument, got 2".to_string()
+                )
+                .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_html_decode() {
+        match html_decode(&[Value::Text("&lt;div&gt;".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("<div>".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match html_decode(&[Value::Text("foo &amp; bar".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("foo & bar".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match html_decode(&[Value::Text("x".into()), Value::Text("extra".into())]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError(
+                    "html_decode: expected 1 argument, got 2".to_string()
+                )
+                .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_convert_unicode_passthrough() {
+        match convert_to_unicode(&[Value::Text("héllo".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("héllo".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match convert_from_unicode(&[Value::Text("héllo".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("héllo".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match convert_to_unicode(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Null),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match convert_from_unicode(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Null),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match convert_to_unicode(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError(
+                    "convert_to_unicode: expected 1 argument, got 0".to_string()
+                )
+                .to_string()
+            ),
+        }
+
+        match convert_from_unicode(&[Value::Integer(1), Value::Integer(2)]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError(
+                    "convert_from_unicode: expected 1 argument, got 2".to_string()
+                )
+                .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_upper() {
+        match upper(&[Value::Text("hello".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("HELLO".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match upper(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Null),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match upper(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("upper: expected 1 argument, got 0".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_to_str() {
+        match to_str(&[Value::Integer(42)]) {
+            Ok(value) => assert_eq!(value, Value::Text("42".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match to_str(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("str: expected 1 argument, got 0".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_literal_helpers() {
+        match dollar(&[]) {
+            Ok(value) => assert_eq!(value, Value::Text("$".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match dollar(&[Value::Text("x".into())]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("dollar: expected 0 arguments, got 1".to_string())
+                    .to_string()
+            ),
+        }
+
+        match dquote(&[]) {
+            Ok(value) => assert_eq!(value, Value::Text("\"".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match squote(&[]) {
+            Ok(value) => assert_eq!(value, Value::Text("'".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_strip_variants() {
+        match lstrip(&[Value::Text("  hello  ".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("hello  ".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match rstrip(&[Value::Text("  hello  ".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("  hello".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match strip(&[Value::Text("  hello  ".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("hello".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match strip(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Null),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match strip(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("strip: expected 1 argument, got 0".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_base64_encode() {
+        match base64_encode(&[Value::Text("hi".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("aGk=".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match base64_encode(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError(
+                    "base64_encode: expected 1 argument, got 0".to_string()
+                )
+                .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_url_encode_decode() {
+        match url_encode(&[Value::Text("a b".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("a%20b".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match url_decode(&[Value::Text("a%20b".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("a b".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_exists_is_empty() {
+        match exists(&[Value::Text("".into())]) {
+            Ok(value) => assert_eq!(value, Value::Boolean(false)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match is_empty(&[Value::Text("".into())]) {
+            Ok(value) => assert_eq!(value, Value::Boolean(true)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match exists(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Boolean(false)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match is_empty(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Boolean(false)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match is_empty(&[Value::Text("data".into())]) {
+            Ok(value) => assert_eq!(value, Value::Boolean(false)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match exists(&[Value::List(vec![Value::Integer(1)])]) {
+            Ok(value) => assert_eq!(value, Value::Boolean(true)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match is_empty(&[Value::List(Vec::new())]) {
+            Ok(value) => assert_eq!(value, Value::Boolean(true)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match exists(&[Value::Dict(Default::default())]) {
+            Ok(value) => assert_eq!(value, Value::Boolean(false)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match exists(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("exists: expected 1 argument, got 0".to_string())
+                    .to_string()
+            ),
+        }
+
+        match is_empty(&[Value::Text("x".into()), Value::Text("y".into())]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("is_empty: expected 1 argument, got 2".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_int() {
+        match int(&[Value::Text("7".into())]) {
+            Ok(value) => assert_eq!(value, Value::Integer(7)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match int(&[Value::Text(" 9 ".into())]) {
+            Ok(value) => assert_eq!(value, Value::Integer(9)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match int(&[Value::Text("abc".into())]) {
+            Ok(value) => assert_eq!(value, Value::Integer(0)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match int(&[Value::Integer(5)]) {
+            Ok(value) => assert_eq!(value, Value::Integer(5)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match int(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Integer(0)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match int(&[Value::Text("1".into()), Value::Text("extra".into())]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("int: expected 1 argument, got 2".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_len() {
+        match len(&[Value::Text("hello".into())]) {
+            Ok(value) => assert_eq!(value, Value::Integer(5)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match len(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Integer(0)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match len(&[Value::List(vec![Value::Integer(1), Value::Integer(2)])]) {
+            Ok(value) => assert_eq!(value, Value::Integer(2)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match len(&[Value::Dict(HashMap::from([
+            ("a".to_string(), Value::Integer(1)),
+            ("b".to_string(), Value::Integer(2)),
+        ]))]) {
+            Ok(value) => assert_eq!(value, Value::Integer(2)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match len(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("len: expected 1 argument, got 0".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_split_join_list_delitem() {
+        match string_split(&[Value::Text("a,b,c".into()), Value::Text(",".into())]) {
+            Ok(Value::List(items)) => assert_eq!(items.len(), 3),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        // default separator (space) and max_splits
+        match string_split(&[Value::Text("a b c".into())]) {
+            Ok(Value::List(items)) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], Value::Text("a".into()));
+                assert_eq!(items[1], Value::Text("b".into()));
+                assert_eq!(items[2], Value::Text("c".into()));
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match string_split(&[
+            Value::Text("a,b,c,d".into()),
+            Value::Text(",".into()),
+            Value::Integer(2),
+        ]) {
+            Ok(Value::List(items)) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], Value::Text("a".into()));
+                assert_eq!(items[1], Value::Text("b".into()));
+                assert_eq!(items[2], Value::Text("c,d".into()));
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        // empty separator splits to chars unless max_splits == 0
+        match string_split(&[Value::Text("abc".into()), Value::Text("".into())]) {
+            Ok(Value::List(items)) => {
+                let joined: String = items.iter().map(|v| v.to_string()).collect();
+                assert_eq!(joined, "abc");
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match string_split(&[
+            Value::Text("abc".into()),
+            Value::Text("".into()),
+            Value::Integer(0),
+        ]) {
+            Ok(Value::List(items)) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0], Value::Text("abc".into()));
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        let list_value = Value::List(vec![Value::Text("x".into()), Value::Text("y".into())]);
+        match join(&[list_value.clone(), Value::Text("-".into())]) {
+            Ok(Value::Text(out)) => assert_eq!(String::from_utf8_lossy(&out), "x-y"),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        // default separator is space
+        match join(&[list_value.clone()]) {
+            Ok(Value::Text(out)) => assert_eq!(String::from_utf8_lossy(&out), "x y"),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match list_delitem(&[list_value, Value::Integer(0)]) {
+            Ok(Value::List(items)) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0], Value::Text("y".into()));
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_index_rindex() {
+        match index(&[
+            Value::Text("hello world".into()),
+            Value::Text("world".into()),
+        ]) {
+            Ok(value) => assert_eq!(value, Value::Integer(6)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match rindex(&[Value::Text("ababa".into()), Value::Text("ba".into())]) {
+            Ok(value) => assert_eq!(value, Value::Integer(3)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match index(&[Value::Text("abc".into()), Value::Text("z".into())]) {
+            Ok(value) => assert_eq!(value, Value::Integer(-1)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match rindex(&[Value::Text("abc".into()), Value::Text("".into())]) {
+            Ok(value) => assert_eq!(value, Value::Integer(3)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match index(&[Value::Null, Value::Text("x".into())]) {
+            Ok(value) => assert_eq!(value, Value::Integer(-1)),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_bin_int() {
+        match bin_int(&[Value::Integer(0x12345678)]) {
+            Ok(Value::Text(bytes)) => assert_eq!(bytes.as_ref(), &[0x78, 0x56, 0x34, 0x12]),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match bin_int(&[Value::Integer(-1)]) {
+            Ok(Value::Text(bytes)) => assert_eq!(bytes.as_ref(), &[0xff, 0xff, 0xff, 0xff]),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        // Example from spec: X$bin_int(127)X -> 58 7F 00 00 00 58
+        let mut rendered = Vec::new();
+        rendered.push(b'X');
+        match bin_int(&[Value::Integer(127)]) {
+            Ok(Value::Text(bytes)) => rendered.extend_from_slice(bytes.as_ref()),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+        rendered.push(b'X');
+        assert_eq!(rendered, b"X\x7f\x00\x00\x00X");
+
+        match bin_int(&[Value::Text("not-int".into())]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("incorrect type passed to 'bin_int'".to_string())
+                    .to_string()
+            ),
+        }
+
+        match bin_int(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("bin_int: expected 1 argument, got 0".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_md5_digest() {
+        match md5_digest(&[Value::Text("hello".into())]) {
+            Ok(value) => assert_eq!(
+                value,
+                Value::Text("5d41402abc4b2a76b9719d911017c592".into())
+            ),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match md5_digest(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Null),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match md5_digest(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("md5_digest: expected 1 argument, got 0".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_time() {
+        match time(&[]) {
+            Ok(Value::Integer(n)) => assert!(n > 0),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match time(&[Value::Integer(1)]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("time: expected 0 arguments, got 1".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_http_time() {
+        match http_time(&[]) {
+            Ok(Value::Text(s)) => {
+                let trimmed = String::from_utf8_lossy(&s).trim().to_string();
+                assert!(trimmed.ends_with("GMT"));
+                chrono::DateTime::parse_from_rfc2822(&trimmed).unwrap();
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match http_time(&[Value::Integer(0)]) {
+            Ok(Value::Text(s)) => {
+                assert_eq!(String::from_utf8_lossy(&s), "Thu, 01 Jan 1970 00:00:00 GMT");
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match http_time(&[Value::Text("x".into())]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("http_time: invalid integer".to_string()).to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_strftime() {
+        match strftime(&[Value::Text("%Y-%m-%d".into()), Value::Integer(0)]) {
+            Ok(Value::Text(s)) => assert_eq!(String::from_utf8_lossy(&s), "1970-01-01"),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match strftime(&[Value::Text("%Y".into())]) {
+            Ok(Value::Text(s)) => {
+                let year = String::from_utf8_lossy(&s).trim().to_string();
+                assert_eq!(year.len(), 4);
+                year.parse::<i32>().unwrap();
+            }
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match strftime(&[Value::Text("%Y".into()), Value::Text("abc".into())]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("strftime: invalid integer".to_string()).to_string()
+            ),
+        }
+
+        match strftime(&[Value::Integer(1)]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("strftime: invalid string".to_string()).to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_rand_last_rand() {
+        let mut ctx = EvalContext::new();
+
+        match last_rand(&[], &ctx) {
+            Ok(Value::Null) => {}
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        let first = match rand(&[], &mut ctx) {
+            Ok(Value::Integer(v)) => v,
+            other => panic!("Unexpected result: {:?}", other),
+        };
+        assert!(first >= 0 && first < 100_000_000);
+
+        match last_rand(&[], &ctx) {
+            Ok(Value::Integer(v)) => assert_eq!(v, first),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        let second = match rand(&[Value::Integer(10)], &mut ctx) {
+            Ok(Value::Integer(v)) => v,
+            other => panic!("Unexpected result: {:?}", other),
+        };
+        assert!(second >= 0 && second < 10);
+
+        match last_rand(&[], &ctx) {
+            Ok(Value::Integer(v)) => assert_eq!(v, second),
+            other => panic!("Unexpected result: {:?}", other),
+        }
+
+        match rand(&[Value::Integer(0)], &mut ctx) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("rand: invalid bound".to_string()).to_string()
+            ),
+        }
+
+        match last_rand(&[Value::Integer(1)], &ctx) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("last_rand expects no arguments".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_substr() {
+        let s = Value::Text("whether tis nobler in the mind".into());
+
+        // start/end indices (end exclusive)
+        match substr(&[s.clone(), Value::Integer(0), Value::Integer(7)]) {
+            Ok(value) => assert_eq!(value, Value::Text("whether".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        // example: pick range that yields "nobler"
+        match substr(&[s.clone(), Value::Integer(12), Value::Integer(18)]) {
+            Ok(value) => assert_eq!(value, Value::Text("nobler".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        // omit end -> to end
+        match substr(&[s.clone(), Value::Integer(22)]) {
+            Ok(value) => assert_eq!(value, Value::Text("the mind".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        // negative end: drop last 5 chars
+        match substr(&[s.clone(), Value::Integer(0), Value::Integer(-5)]) {
+            Ok(value) => assert_eq!(value, Value::Text("whether tis nobler in the".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        // negative start, length to end
+        match substr(&[s.clone(), Value::Integer(-8)]) {
+            Ok(value) => assert_eq!(value, Value::Text("the mind".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        // negative start and negative end window
+        match substr(&[s, Value::Integer(-8), Value::Integer(-4)]) {
+            Ok(value) => assert_eq!(value, Value::Text("the ".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_add_header_stub() {
+        let mut ctx = EvalContext::new();
+        match add_header(
+            &[Value::Text("Name".into()), Value::Text("Value".into())],
+            &mut ctx,
+        ) {
+            Ok(value) => assert_eq!(value, Value::Null),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        assert_eq!(
+            ctx.response_headers(),
+            [("Name".to_string(), "Value".to_string())]
+        );
+
+        match add_header(&[Value::Text("OnlyOneArg".into())], &mut ctx) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError(
+                    "add_header: expected 2 arguments, got 1".to_string()
                 )
                 .to_string()
             ),
@@ -138,6 +1650,37 @@ mod tests {
             Value::Text("Rust".into()),
         ]) {
             Ok(value) => assert_eq!(value, Value::Text("hello Rust".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        };
+
+        // match spec example: first occurrence only
+        match replace(&[
+            Value::Text("abcdefabcde".into()),
+            Value::Text("abc".into()),
+            Value::Text("xyz".into()),
+            Value::Integer(1),
+        ]) {
+            Ok(value) => assert_eq!(value, Value::Text("xyzdefabcde".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        };
+
+        // zero or negative maxsplit -> no replacements
+        match replace(&[
+            Value::Text("abc".into()),
+            Value::Text("a".into()),
+            Value::Text("z".into()),
+            Value::Integer(0),
+        ]) {
+            Ok(value) => assert_eq!(value, Value::Text("abc".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        };
+        match replace(&[
+            Value::Text("abc".into()),
+            Value::Text("a".into()),
+            Value::Text("z".into()),
+            Value::Integer(-3),
+        ]) {
+            Ok(value) => assert_eq!(value, Value::Text("abc".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         };
 
@@ -165,7 +1708,7 @@ mod tests {
             Value::Text("hello world".into()),
             Value::Text("world".into()),
             Value::Text("Rust".into()),
-            Value::Integer(usize::MAX as i32),
+            Value::Integer(i32::MAX),
         ]) {
             Ok(value) => assert_eq!(value, Value::Text("hello Rust".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
@@ -192,9 +1735,80 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("wrong number of arguments to 'replace'".to_string())
+                ExecutionError::FunctionError("replace: expected 3-4 arguments, got 2".to_string())
                     .to_string()
             ),
         };
+    }
+
+    #[test]
+    fn test_set_response_code_and_redirect() {
+        let mut ctx = EvalContext::new();
+
+        match set_response_code(&[Value::Integer(404)], &mut ctx) {
+            Ok(Value::Null) => {}
+            other => panic!("Unexpected result: {:?}", other),
+        }
+        assert_eq!(ctx.response_status(), Some(404));
+        assert!(ctx.response_body_override().is_none());
+
+        match set_response_code(
+            &[Value::Integer(500), Value::Text("error body".into())],
+            &mut ctx,
+        ) {
+            Ok(Value::Null) => {}
+            other => panic!("Unexpected result: {:?}", other),
+        }
+        assert_eq!(ctx.response_status(), Some(500));
+        assert_eq!(
+            ctx.response_body_override()
+                .map(|b| String::from_utf8_lossy(b.as_ref()).to_string()),
+            Some("error body".to_string())
+        );
+
+        match set_response_code(&[Value::Integer(99)], &mut ctx) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("set_response_code: invalid status code".to_string())
+                    .to_string()
+            ),
+        }
+
+        match set_response_code(&[], &mut ctx) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError(
+                    "set_response_code: expected 1-2 arguments, got 0".to_string()
+                )
+                .to_string()
+            ),
+        }
+
+        match set_redirect(&[Value::Text("http://example.com".into())], &mut ctx) {
+            Ok(Value::Null) => {}
+            other => panic!("Unexpected result: {:?}", other),
+        }
+        assert_eq!(ctx.response_status(), Some(302));
+        assert_eq!(
+            ctx.response_headers().last(),
+            Some(&("Location".to_string(), "http://example.com".to_string()))
+        );
+        assert!(ctx.response_body_override().is_none());
+
+        match set_redirect(
+            &[Value::Text("a".into()), Value::Text("b".into())],
+            &mut ctx,
+        ) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError(
+                    "set_redirect: expected 1 argument, got 2".to_string()
+                )
+                .to_string()
+            ),
+        }
     }
 }

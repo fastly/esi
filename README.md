@@ -2,22 +2,111 @@
 
 This crate provides a streaming Edge Side Includes parser and executor designed for Fastly Compute.
 
-The implementation is a subset of the [ESI Language Specification 1.0](https://www.w3.org/TR/esi-lang/) supporting the following tags:
+The implementation is a subset of Akamai ESI 5.0 supporting the following tags:
 
 - `<esi:include>` (+ `alt`, `onerror="continue"`)
 - `<esi:try>` | `<esi:attempt>` | `<esi:except>`
-- `<esi:vars>` | `<esi:assign>`
+- `<esi:vars>` | `<esi:assign>` (with subscript support for dict/list assignment)
 - `<esi:choose>` | `<esi:when>` | `<esi:otherwise>`
+- `<esi:foreach>` | `<esi:break>` (loop over lists and dicts)
 - `<esi:comment>`
 - `<esi:remove>`
 
+**Note:** The following tags support nested ESI tags: `<esi:try>`, `<esi:attempt>`, `<esi:except>`, `<esi:choose>`, `<esi:when>`, `<esi:otherwise>`, `<esi:foreach>`, and `<esi:assign>` (long form only).
+
 Other tags will be ignored and served to the client as-is.
 
-This implementation also includes an expression interpreter and library of functions that can be used. Current functions include:
+### Expression Features
 
-- `$lower(string)`
-- `$html_encode(string)`
-- `$replace(haystack, needle, replacement [, count])`
+- **Integer literals**: `42`, `-10`, `0`
+- **String literals**: `'single quoted'`, `"double quoted"`, `'''triple quoted'''`
+- **Dict literals**: `{'key1': 'value1', 'key2': 'value2'}`
+- **List literals**: `['item1', 'item2', 'item3']`
+- **Nested structures**: Lists can be nested: `['one', ['a', 'b', 'c'], 'three']`
+- **Subscript assignment**: `<esi:assign name="dict{'key'}" value="val"/>` or `<esi:assign name="list{0}" value="val"/>`
+- **Subscript access**: `$(dict{'key'})` or `$(list{0})`
+- **Foreach loops**: Iterate over lists or dicts with `<esi:foreach>` and use `<esi:break>` to exit early
+- **Comparison operators**: `==`, `!=`, `<`, `>`, `<=`, `>=`, `has`, `has_i`, `matches`, `matches_i`
+  - `has` - Case-sensitive substring containment: `$(str) has 'substring'`
+  - `has_i` - Case-insensitive substring containment: `$(str) has_i 'substring'`
+  - `matches` - Case-sensitive regex matching: `$(str) matches 'pattern'`
+  - `matches_i` - Case-insensitive regex matching: `$(str) matches_i 'pattern'`
+- **Logical operators**: `&&` (and), `||` (or), `!` (not)
+
+### Function Library
+
+This implementation includes a comprehensive library of ESI functions:
+
+**String Manipulation:**
+
+- `$lower(string)` - Convert to lowercase
+- `$upper(string)` - Convert to uppercase
+- `$lstrip(string)`, `$rstrip(string)`, `$strip(string)` - Remove whitespace
+- `$substr(string, start [, length])` - Extract substring
+- `$replace(haystack, needle, replacement [, count])` - Replace occurrences
+- `$str(value)` - Convert to string
+- `$join(list, separator)` - Join list elements
+- `$string_split(string, delimiter [, maxsplit])` - Split string into list
+
+**Encoding/Decoding:**
+
+- `$html_encode(string)`, `$html_decode(string)` - HTML entity encoding
+- `$url_encode(string)`, `$url_decode(string)` - URL encoding
+- `$base64_encode(string)` - Base64 encoding
+- `$convert_to_unicode(string)`, `$convert_from_unicode(string)` - Unicode conversion
+
+**Quote Helpers:**
+
+- `$dollar()` - Returns `$`
+- `$dquote()` - Returns `"`
+- `$squote()` - Returns `'`
+
+**Type Conversion & Checks:**
+
+- `$int(value)` - Convert to integer
+- `$exists(value)` - Check if value exists
+- `$is_empty(value)` - Check if value is empty
+- `$len(value)` - Get length of string or list
+
+**List Operations:**
+
+- `$list_delitem(list, index)` - Remove item from list
+- `$index(string, substring)`, `$rindex(string, substring)` - Find substring position
+
+**Cryptographic:**
+
+- `$md5_digest(string)` - Generate MD5 hash
+
+**Time/Date:**
+
+- `$time()` - Current Unix timestamp
+- `$http_time(timestamp)` - Format timestamp as HTTP date
+- `$strftime(format, timestamp)` - Format timestamp with custom format
+- `$bin_int(binary_string)` - Convert binary string to integer
+
+**Random & Response:**
+
+- `$rand()` - Generate random number
+- `$last_rand()` - Get last generated random number
+
+**Response Manipulation:**
+
+These functions modify the HTTP response sent to the client:
+
+- `$add_header(name, value)` - Add a custom response header
+  ```html
+  <esi:vars>$add_header('X-Custom-Header', 'my-value')</esi:vars>
+  ```
+- `$set_response_code(code [, body])` - Set HTTP status code and optionally override response body
+  ```html
+  <esi:vars>$set_response_code(404, 'Page not found')</esi:vars>
+  ```
+- `$set_redirect(url [, code])` - Set HTTP redirect (default 302)
+  ```html
+  <esi:vars>$set_redirect('https://example.com/new-location')</esi:vars> <esi:vars>$set_redirect('https://example.com/moved', 301)</esi:vars>
+  ```
+
+**Note:** Response manipulation functions are buffered during ESI processing and applied when `process_response()` sends the final response to the client.
 
 ## Example Usage
 
@@ -99,12 +188,12 @@ fn process_custom_stream(
     input: impl std::io::Read,
     output: &mut impl Write,
 ) -> Result<(), esi::ExecutionError> {
-    let processor = Processor::new(None, Configuration::default());
+    let mut processor = Processor::new(None, Configuration::default());
 
     // Process from any readable source
     let reader = BufReader::new(input);
 
-    processor.process_document(
+    processor.process_stream(
         reader,
         output,
         Some(&|req| {

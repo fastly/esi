@@ -350,8 +350,11 @@ fn test_parse_assign() {
     assert_eq!(remaining, b"");
 
     let assign_found = elements.iter().any(|element| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign { name, value }) =
-            element
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = element
         {
             // Value is now a pre-parsed Expr
             // "bar" (not a valid ESI expression) becomes Expr::String(Some(ref s)) if s == "bar"
@@ -377,8 +380,11 @@ fn test_parse_assign_short_with_integer() {
     assert_eq!(remaining, b"");
 
     let assign_found = elements.iter().any(|element| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign { name, value }) =
-            element
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = element
         {
             *name == "count" && *value == esi::parser_types::Expr::Integer(123)
         } else {
@@ -399,7 +405,7 @@ fn test_parse_assign_short_with_variable() {
 
     let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Assign { name, value }
+            esi::parser_types::Tag::Assign { name, subscript: _, value }
         ) = element {
             *name == "copy" && matches!(value, esi::parser_types::Expr::Variable(ref n, None, None) if n == "HTTP_HOST")
         } else {
@@ -420,7 +426,7 @@ fn test_parse_assign_short_with_quoted_string() {
 
     let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Assign { name, value }
+            esi::parser_types::Tag::Assign { name, subscript: _, value }
         ) = element {
             *name == "text" && matches!(value, esi::parser_types::Expr::String(Some(ref s)) if s == "hello world")
         } else {
@@ -442,8 +448,11 @@ fn test_parse_assign_long_form() {
     assert_eq!(remaining, b"");
 
     let assign_found = elements.iter().any(|element| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign { name, value }) =
-            element
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = element
         {
             *name == "message" && matches!(value, esi::parser_types::Expr::String(Some(_)))
         } else {
@@ -464,7 +473,7 @@ fn test_parse_assign_long_with_variable() {
 
     let assign_found = elements.iter().any(|element| {
         if let esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Assign { name, value }
+            esi::parser_types::Tag::Assign { name, subscript: _, value }
         ) = element {
             *name == "host" && matches!(value, esi::parser_types::Expr::Variable(ref n, None, None) if n == "HTTP_HOST")
         } else {
@@ -484,8 +493,11 @@ fn test_parse_assign_with_function() {
     assert_eq!(remaining, b"");
 
     let assign_found = elements.iter().any(|element| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign { name, value }) =
-            element
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = element
         {
             *name == "result"
                 && matches!(value, esi::parser_types::Expr::Call(ref n, _) if n == "url_encode")
@@ -507,8 +519,11 @@ fn test_parse_assign_long_with_interpolation() {
     assert_eq!(remaining, b"");
 
     let assign_found = elements.iter().any(|element| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign { name, value }) =
-            element
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = element
         {
             if *name == "message" {
                 // Should be an Interpolated expression with multiple elements
@@ -565,8 +580,11 @@ fn test_parse_assign_long_with_multiple_variables() {
     assert_eq!(remaining, b"");
 
     let assign_found = elements.iter().any(|element| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign { name, value }) =
-            element
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = element
         {
             if *name == "full_name" {
                 // Should be an Interpolated expression
