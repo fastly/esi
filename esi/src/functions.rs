@@ -546,20 +546,19 @@ pub fn http_time(args: &[Value]) -> Result<Value> {
 }
 
 pub fn strftime(args: &[Value]) -> Result<Value> {
-    if args.is_empty() || args.len() > 2 {
+    if args.len() != 2 {
         return Err(ExecutionError::FunctionError(format!(
-            "strftime: expected 1-2 arguments, got {}",
+            "strftime: expected 2 arguments, got {}",
             args.len()
         )));
     }
 
-    let fmt = parse_str("strftime", &args[0])?;
-
-    let secs = match args.get(1) {
-        None => Utc::now().timestamp(),
-        Some(Value::Null) => Utc::now().timestamp(),
-        Some(v) => parse_i64("strftime", v)?,
+    let secs = match &args[0] {
+        Value::Null => Utc::now().timestamp(),
+        v => parse_i64("strftime", v)?,
     };
+
+    let fmt = parse_str("strftime", &args[1])?;
 
     let dt = DateTime::<Utc>::from_timestamp(secs, 0)
         .ok_or_else(|| ExecutionError::FunctionError("strftime: invalid timestamp".to_string()))?;
@@ -1493,21 +1492,36 @@ mod tests {
 
     #[test]
     fn test_strftime() {
-        match strftime(&[Value::Text("%Y-%m-%d".into()), Value::Integer(0)]) {
+        match strftime(&[Value::Integer(0), Value::Text("%Y-%m-%d".into())]) {
             Ok(Value::Text(s)) => assert_eq!(String::from_utf8_lossy(&s), "1970-01-01"),
             other => panic!("Unexpected result: {:?}", other),
         }
 
-        match strftime(&[Value::Text("%Y".into())]) {
+        // Test with the Akamai spec example format: $strftime($time(), '%a, %d %B %Y %H:%M:%S %Z')
+        // Using timestamp 994867136 = Wed, 11 July 2001 15:58:56 UTC
+        match strftime(&[
+            Value::Integer(994867136),
+            Value::Text("%a, %d %B %Y %H:%M:%S %Z".into()),
+        ]) {
             Ok(Value::Text(s)) => {
-                let year = String::from_utf8_lossy(&s).trim().to_string();
-                assert_eq!(year.len(), 4);
-                year.parse::<i32>().unwrap();
+                assert_eq!(
+                    String::from_utf8_lossy(&s),
+                    "Wed, 11 July 2001 15:58:56 UTC"
+                );
             }
             other => panic!("Unexpected result: {:?}", other),
         }
 
-        match strftime(&[Value::Text("%Y".into()), Value::Text("abc".into())]) {
+        match strftime(&[Value::Integer(0)]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("strftime: expected 2 arguments, got 1".to_string())
+                    .to_string()
+            ),
+        }
+
+        match strftime(&[Value::Text("abc".into()), Value::Text("%Y".into())]) {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
@@ -1515,7 +1529,7 @@ mod tests {
             ),
         }
 
-        match strftime(&[Value::Integer(1)]) {
+        match strftime(&[Value::Integer(1), Value::Integer(1)]) {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),

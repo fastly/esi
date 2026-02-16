@@ -81,7 +81,7 @@ This implementation includes a comprehensive library of ESI functions:
 
 - `$time()` - Current Unix timestamp
 - `$http_time(timestamp)` - Format timestamp as HTTP date
-- `$strftime(format, timestamp)` - Format timestamp with custom format
+- `$strftime(timestamp, format)` - Format timestamp with custom format
 - `$bin_int(binary_string)` - Convert binary string to integer
 
 **Random & Response:**
