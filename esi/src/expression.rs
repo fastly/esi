@@ -335,8 +335,8 @@ impl EvalContext {
                 let params_ref = self.get_query_params();
                 let params = params_ref.as_ref().unwrap();
 
-                match subkey {
-                    None => {
+                subkey.map_or_else(
+                    || {
                         // Return Dict of all query params when no subkey specified
                         if params.is_empty() {
                             Value::Null
@@ -354,19 +354,17 @@ impl EvalContext {
                             }
                             Value::Dict(dict)
                         }
-                    }
-                    Some(field) => {
-                        // Look up the field in parsed params
-                        match params.get(field) {
-                            None => Value::Null,
-                            Some(values) if values.is_empty() => Value::Null,
-                            Some(values) if values.len() == 1 => Value::Text(values[0].clone()),
-                            Some(values) => {
-                                Value::List(values.iter().map(|v| Value::Text(v.clone())).collect())
-                            }
+                    },
+                    // Look up the field in parsed params
+                    |field| match params.get(field) {
+                        None => Value::Null,
+                        Some(values) if values.is_empty() => Value::Null,
+                        Some(values) if values.len() == 1 => Value::Text(values[0].clone()),
+                        Some(values) => {
+                            Value::List(values.iter().map(|v| Value::Text(v.clone())).collect())
                         }
-                    }
-                }
+                    },
+                )
             }
             _ if key.starts_with("HTTP_") => {
                 let header = key.strip_prefix("HTTP_").unwrap_or_default();

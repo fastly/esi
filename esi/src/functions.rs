@@ -720,7 +720,7 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
         let mut splits_done = 0usize;
         let limit = max_splits.map(|n| n as usize);
 
-        let mut chars = source.chars().peekable();
+        let mut chars = source.chars();
         while let Some(ch) = chars.next() {
             if let Some(limit) = limit {
                 if splits_done >= limit {

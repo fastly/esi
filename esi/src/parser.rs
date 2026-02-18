@@ -1087,8 +1087,10 @@ fn tag_name(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     ))(input)
 }
 
-/// Parse a complete opening tag, returning (tag_name, remaining_after_tag, full_tag_slice)
+/// Parse a complete opening tag
+/// Returns (remaining_input, (tag_name, full_tag_slice))
 /// Only succeeds when we have a complete tag (ending with > or />)
+#[allow(clippy::type_complexity)]
 fn complete_opening_tag(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8]), Error<&[u8]>> {
     let start = input;
 
