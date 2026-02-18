@@ -1,9 +1,19 @@
+use crate::cache::CacheConfig;
+
 /// This struct is used to configure optional behaviour within the ESI processor.
 ///
 /// ## Usage Example
 /// ```rust,no_run
 /// let config = esi::Configuration::default()
-///     .with_namespace("app");
+///     .with_namespace("app")
+///     .with_caching(esi::cache::CacheConfig {
+///         is_rendered_cacheable: true,
+///         rendered_cache_control: true,
+///         rendered_ttl: Some(600),
+///         is_includes_cacheable: true,
+///         includes_default_ttl: Some(300),
+///         includes_force_ttl: None,
+///     });
 /// ```
 #[allow(clippy::return_self_not_must_use)]
 #[derive(Clone, Debug)]
@@ -12,6 +22,8 @@ pub struct Configuration {
     pub namespace: String,
     /// For working with non-HTML ESI templates, e.g. JSON files, this option allows you to disable the unescaping of URLs
     pub is_escaped_content: bool,
+    /// Cache configuration for ESI includes
+    pub cache: CacheConfig,
 }
 
 impl Default for Configuration {
@@ -19,6 +31,7 @@ impl Default for Configuration {
         Self {
             namespace: String::from("esi"),
             is_escaped_content: true,
+            cache: CacheConfig::default(),
         }
     }
 }
@@ -34,6 +47,12 @@ impl Configuration {
     /// For working with non-HTML ESI templates, eg JSON files, allows to disable URLs unescaping
     pub fn with_escaped(mut self, is_escaped: impl Into<bool>) -> Self {
         self.is_escaped_content = is_escaped.into();
+        self
+    }
+
+    /// Configure caching for ESI includes
+    pub const fn with_caching(mut self, cache: CacheConfig) -> Self {
+        self.cache = cache;
         self
     }
 }

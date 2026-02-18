@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod cache;
 mod config;
 mod error;
 mod expression;
@@ -162,7 +163,7 @@ impl Processor {
     ///
     /// Provides access to the processor's internal state including variables,
     /// response headers, status code, and body overrides set by ESI functions.
-    pub fn context(&self) -> &EvalContext {
+    pub const fn context(&self) -> &EvalContext {
         &self.ctx
     }
 
@@ -260,6 +261,16 @@ impl Processor {
         let mut resp = client_response_metadata.unwrap_or_else(|| {
             Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML)
         });
+
+        // Add Cache-Control header if configured to emit it
+        if self.configuration.cache.rendered_cache_control {
+            if let Some(cache_control_value) = self
+                .ctx
+                .cache_control_header(self.configuration.cache.rendered_ttl)
+            {
+                resp.set_header(header::CACHE_CONTROL, cache_control_value);
+            }
+        }
 
         for (name, value) in self.ctx.response_headers() {
             resp.set_header(name, value);
@@ -881,6 +892,7 @@ impl Processor {
             self.ctx.get_request().clone_without_body(),
             &final_src,
             self.configuration.is_escaped_content,
+            !self.configuration.cache.is_includes_cacheable,
         )?;
 
         match dispatcher(req.clone_without_body()) {
@@ -900,6 +912,7 @@ impl Processor {
                         self.ctx.get_request().clone_without_body(),
                         alt_src,
                         self.configuration.is_escaped_content,
+                        !self.configuration.cache.is_includes_cacheable,
                     )?;
 
                     dispatcher(alt_req.clone_without_body()).map_or_else(
@@ -1094,10 +1107,29 @@ impl Processor {
             let (_original_idx, mut completed_fragment) =
                 fragments_by_request.remove(completed_idx);
 
-            // Update the completed fragment with the result
+            // Update the completed fragment with the result and track TTL if rendered caching enabled
             completed_fragment.pending_content = result.map_or_else(
                 |_| PendingFragmentContent::NoContent,
-                |resp| PendingFragmentContent::CompletedRequest(Box::new(resp)),
+                |resp| {
+                    // Track TTL if we need it for rendered document (for tracking OR header emission)
+                    if self.configuration.cache.is_rendered_cacheable
+                        || self.configuration.cache.rendered_cache_control
+                    {
+                        match cache::calculate_ttl(&resp, &self.configuration.cache) {
+                            Ok(Some(ttl)) => {
+                                self.ctx.update_cache_min_ttl(ttl);
+                                debug!("Tracking TTL {} for rendered document", ttl);
+                            }
+                            Ok(None) => {
+                                debug!("Response not cacheable");
+                            }
+                            Err(e) => {
+                                debug!("Error calculating TTL: {:?}", e);
+                            }
+                        }
+                    }
+                    PendingFragmentContent::CompletedRequest(Box::new(resp))
+                },
             );
 
             // Put remaining fragments back in queue (with their pending requests restored)
@@ -1229,6 +1261,7 @@ impl Processor {
                 self.ctx.get_request().clone_without_body(),
                 &alt_src,
                 self.configuration.is_escaped_content,
+                !self.configuration.cache.is_includes_cacheable,
             )?;
 
             match dispatcher(alt_req.clone_without_body()) {
@@ -1283,7 +1316,12 @@ fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
 // Helper function to build a fragment request from a URL
 // For HTML content the URL is unescaped if it's escaped (default).
 // It can be disabled in the processor configuration for a non-HTML content.
-fn build_fragment_request(mut request: Request, url: &Bytes, is_escaped: bool) -> Result<Request> {
+fn build_fragment_request(
+    mut request: Request,
+    url: &Bytes,
+    is_escaped: bool,
+    set_pass: bool,
+) -> Result<Request> {
     // Convert Bytes to str for URL parsing
     let url_str = std::str::from_utf8(url)
         .map_err(|_| ExecutionError::ExpressionError("Invalid UTF-8 in URL".to_string()))?;
@@ -1318,6 +1356,11 @@ fn build_fragment_request(mut request: Request, url: &Bytes, is_escaped: bool) -
     let hostname = request.get_url().host().expect("no host").to_string();
 
     request.set_header(header::HOST, &hostname);
+
+    // Set pass option to bypass cache if requested
+    if set_pass {
+        request.set_pass(true);
+    }
 
     Ok(request)
 }
