@@ -475,6 +475,286 @@ impl Processor {
         Ok(())
     }
 
+    /// Handle text or HTML content elements
+    fn handle_content(&mut self, text: Bytes, output_writer: &mut impl Write) -> Result<bool> {
+        if self.queue.is_empty() {
+            // Not blocked - write immediately
+            output_writer.write_all(&text)?;
+        } else {
+            // Blocked - queue it
+            self.queue.push_back(QueuedElement::Content(text));
+        }
+        Ok(false)
+    }
+
+    /// Handle expression evaluation and output
+    fn handle_expr(&mut self, expr: Expr, output_writer: &mut impl Write) -> Result<bool> {
+        match expression::eval_expr(&expr, &mut self.ctx) {
+            Ok(val) if !matches!(val, expression::Value::Null) => {
+                let bytes = val.to_bytes();
+                if !bytes.is_empty() {
+                    if self.queue.is_empty() {
+                        output_writer.write_all(&bytes)?;
+                    } else {
+                        self.queue.push_back(QueuedElement::Content(bytes));
+                    }
+                }
+            }
+            _ => {} // Skip null or error
+        }
+        Ok(false)
+    }
+
+    /// Handle variable assignment
+    fn handle_assign(
+        &mut self,
+        name: String,
+        subscript: Option<Expr>,
+        value: Expr,
+    ) -> Result<bool> {
+        let val = expression::eval_expr(&value, &mut self.ctx)
+            .unwrap_or(expression::Value::Text("".into()));
+
+        if let Some(subscript_expr) = subscript {
+            // Subscript assignment: modify existing collection
+            if let Ok(subscript_val) = expression::eval_expr(&subscript_expr, &mut self.ctx) {
+                let key_str = subscript_val.to_string();
+                self.ctx.set_variable(&name, Some(&key_str), val)?;
+            }
+        } else {
+            // Regular assignment without subscript
+            self.ctx.set_variable(&name, None, val)?;
+        }
+        Ok(false)
+    }
+
+    /// Handle esi:vars tag (sets match name)
+    fn handle_vars(&mut self, name: Option<String>) -> Result<bool> {
+        if let Some(n) = name {
+            self.ctx.set_match_name(&n);
+        }
+        Ok(false)
+    }
+
+    /// Handle esi:include tag
+    fn handle_include(
+        &mut self,
+        src: Expr,
+        alt: Option<Expr>,
+        continue_on_error: bool,
+        params: Vec<(String, Expr)>,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<bool> {
+        let queued_element =
+            self.process_include_tag(src, alt, continue_on_error, params, dispatcher)?;
+        self.queue.push_back(queued_element);
+        Ok(false)
+    }
+
+    /// Handle esi:choose tag
+    fn handle_choose(
+        &mut self,
+        when_branches: Vec<parser_types::WhenBranch>,
+        otherwise_events: Vec<parser_types::Element>,
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<bool> {
+        let mut chose_branch = false;
+
+        for when_branch in when_branches {
+            if let Some(ref match_name) = when_branch.match_name {
+                self.ctx.set_match_name(match_name);
+            }
+
+            match expression::eval_expr(&when_branch.test, &mut self.ctx) {
+                Ok(test_result) if test_result.to_bool() => {
+                    // This branch matches - recursively process it
+                    for elem in when_branch.content {
+                        let break_encountered =
+                            self.process_element_streaming(elem, output_writer, dispatcher)?;
+                        if break_encountered {
+                            return Ok(true); // Propagate break signal
+                        }
+                    }
+                    chose_branch = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        // No when matched - process otherwise
+        if !chose_branch {
+            for elem in otherwise_events {
+                let break_encountered =
+                    self.process_element_streaming(elem, output_writer, dispatcher)?;
+                if break_encountered {
+                    return Ok(true); // Propagate break signal
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Handle esi:try tag with attempts and except clause
+    fn handle_try(
+        &mut self,
+        attempt_events: Vec<Vec<parser_types::Element>>,
+        except_events: Vec<parser_types::Element>,
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<bool> {
+        let mut attempt_queues = Vec::new();
+
+        for attempt in attempt_events {
+            let attempt_queue = self.build_attempt_queue(attempt, output_writer, dispatcher)?;
+            attempt_queues.push(attempt_queue);
+        }
+
+        // Process except clause elements
+        let except_queue = self.build_attempt_queue(except_events, output_writer, dispatcher)?;
+
+        // Add the try block to the queue with all attempts and except dispatched
+        self.queue.push_back(QueuedElement::Try {
+            attempt_elements: attempt_queues,
+            except_elements: except_queue,
+        });
+        Ok(false)
+    }
+
+    /// Build a queue for attempt or except blocks
+    fn build_attempt_queue(
+        &mut self,
+        elements: Vec<parser_types::Element>,
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<Vec<QueuedElement>> {
+        let mut queue = Vec::new();
+
+        for elem in elements {
+            match elem {
+                parser_types::Element::Text(text) => {
+                    queue.push(QueuedElement::Content(text));
+                }
+                parser_types::Element::Html(html) => {
+                    queue.push(QueuedElement::Content(html));
+                }
+                parser_types::Element::Expr(expr) => {
+                    match expression::eval_expr(&expr, &mut self.ctx) {
+                        Ok(value) => {
+                            if !matches!(value, expression::Value::Null) {
+                                let bytes = value.to_bytes();
+                                if !bytes.is_empty() {
+                                    queue.push(QueuedElement::Content(bytes));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("Expression evaluation failed: {:?}", e);
+                        }
+                    }
+                }
+                parser_types::Element::Esi(parser_types::Tag::Include {
+                    src,
+                    alt,
+                    continue_on_error,
+                    params,
+                }) => {
+                    // Dispatch the include and add to queue
+                    let queued_element =
+                        self.process_include_tag(src, alt, continue_on_error, params, dispatcher)?;
+                    queue.push(queued_element);
+                }
+                parser_types::Element::Esi(parser_types::Tag::Choose {
+                    when_branches,
+                    otherwise_events,
+                }) => {
+                    // Evaluate and process chosen branch inline
+                    let mut chose_branch = false;
+                    for when_branch in when_branches {
+                        if let Some(match_name) = &when_branch.match_name {
+                            self.ctx.set_match_name(match_name);
+                        }
+                        let test_result = expression::eval_expr(&when_branch.test, &mut self.ctx)?;
+                        if test_result.to_bool() {
+                            chose_branch = true;
+                            for elem in when_branch.content {
+                                self.process_element_streaming(elem, output_writer, dispatcher)?;
+                                // Note: breaks within try blocks don't propagate out
+                            }
+                            break;
+                        }
+                    }
+                    if !chose_branch {
+                        for elem in otherwise_events {
+                            self.process_element_streaming(elem, output_writer, dispatcher)?;
+                            // Note: breaks within try blocks don't propagate out
+                        }
+                    }
+                }
+                parser_types::Element::Esi(parser_types::Tag::Try { .. }) => {
+                    // Nested try blocks - process recursively
+                    self.process_element_streaming(elem.clone(), output_writer, dispatcher)?;
+                    // Note: breaks within try blocks don't propagate out
+                }
+                _ => {}
+            }
+        }
+
+        Ok(queue)
+    }
+
+    /// Handle esi:foreach tag
+    fn handle_foreach(
+        &mut self,
+        collection: Expr,
+        item: Option<String>,
+        content: Vec<parser_types::Element>,
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<bool> {
+        // Evaluate the collection expression
+        let collection_value =
+            expression::eval_expr(&collection, &mut self.ctx).unwrap_or(expression::Value::Null);
+
+        // Convert to a list if needed
+        let items = match &collection_value {
+            expression::Value::List(items) => items.clone(),
+            expression::Value::Dict(map) => {
+                // Convert dict entries to a list of 2-element lists [key, value]
+                map.iter()
+                    .map(|(k, v)| {
+                        expression::Value::List(vec![
+                            expression::Value::Text(k.clone().into()),
+                            v.clone(),
+                        ])
+                    })
+                    .collect()
+            }
+            expression::Value::Null => Vec::new(),
+            other => vec![other.clone()], // Treat single values as a list of one
+        };
+
+        // Default item variable name if not specified
+        let item_var = item.unwrap_or_else(|| "item".to_string());
+
+        // Iterate through items
+        'foreach_loop: for item_value in items {
+            // Set the item variable
+            self.ctx.set_variable(&item_var, None, item_value)?;
+
+            // Process content for this iteration
+            for elem in content.iter() {
+                let break_encountered =
+                    self.process_element_streaming(elem.clone(), output_writer, dispatcher)?;
+                if break_encountered {
+                    break 'foreach_loop;
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Process a single element in streaming mode
     fn process_element_streaming(
         &mut self,
@@ -485,337 +765,42 @@ impl Processor {
         use parser_types::{Element, Tag};
 
         match element {
-            Element::Text(text) | Element::Html(text) => {
-                // Non-blocking content
-                if self.queue.is_empty() {
-                    // Not blocked - write immediately
-                    output_writer.write_all(&text)?;
-                } else {
-                    // Blocked - queue it
-                    self.queue.push_back(QueuedElement::Content(text));
-                }
-                Ok(false)
-            }
+            Element::Text(text) | Element::Html(text) => self.handle_content(text, output_writer),
 
-            Element::Expr(expr) => {
-                // Evaluate and treat as non-blocking content
-                match expression::eval_expr(&expr, &mut self.ctx) {
-                    Ok(val) if !matches!(val, expression::Value::Null) => {
-                        let bytes = val.to_bytes();
-                        if !bytes.is_empty() {
-                            if self.queue.is_empty() {
-                                output_writer.write_all(&bytes)?;
-                            } else {
-                                self.queue.push_back(QueuedElement::Content(bytes));
-                            }
-                        }
-                    }
-                    _ => {} // Skip null or error
-                }
-                Ok(false)
-            }
+            Element::Expr(expr) => self.handle_expr(expr, output_writer),
 
             Element::Esi(Tag::Assign {
                 name,
                 subscript,
                 value,
-            }) => {
-                // Non-blocking - just update context
-                let val = expression::eval_expr(&value, &mut self.ctx)
-                    .unwrap_or(expression::Value::Text("".into()));
+            }) => self.handle_assign(name, subscript, value),
 
-                if let Some(subscript_expr) = subscript {
-                    // Subscript assignment: modify existing collection
-                    // Evaluate the subscript expression to get the key/index
-                    if let Ok(subscript_val) = expression::eval_expr(&subscript_expr, &mut self.ctx)
-                    {
-                        let key_str = subscript_val.to_string();
-                        self.ctx.set_variable(&name, Some(&key_str), val)?;
-                    }
-                } else {
-                    // Regular assignment without subscript
-                    self.ctx.set_variable(&name, None, val)?;
-                }
-                Ok(false)
-            }
-
-            Element::Esi(Tag::Vars { name: Some(n) }) => {
-                // Non-blocking - just update context
-                self.ctx.set_match_name(&n);
-                Ok(false)
-            }
-
-            Element::Esi(Tag::Vars { name: None }) => {
-                // No-op when name is None
-                Ok(false)
-            }
+            Element::Esi(Tag::Vars { name }) => self.handle_vars(name),
 
             Element::Esi(Tag::Include {
                 src,
                 alt,
                 continue_on_error,
                 params,
-            }) => {
-                // BLOCKING - dispatch and queue
-                let queued_element =
-                    self.process_include_tag(src, alt, continue_on_error, params, dispatcher)?;
-                self.queue.push_back(queued_element);
-                Ok(false)
-            }
+            }) => self.handle_include(src, alt, continue_on_error, params, dispatcher),
 
             Element::Esi(Tag::Choose {
                 when_branches,
                 otherwise_events,
-            }) => {
-                // Evaluate condition and recursively process chosen branch
-                let mut chose_branch = false;
-
-                for when_branch in when_branches {
-                    if let Some(ref match_name) = when_branch.match_name {
-                        self.ctx.set_match_name(match_name);
-                    }
-
-                    match expression::eval_expr(&when_branch.test, &mut self.ctx) {
-                        Ok(test_result) if test_result.to_bool() => {
-                            // This branch matches - recursively process it
-                            for elem in when_branch.content {
-                                let break_encountered = self.process_element_streaming(
-                                    elem,
-                                    output_writer,
-                                    dispatcher,
-                                )?;
-                                if break_encountered {
-                                    return Ok(true); // Propagate break signal
-                                }
-                            }
-                            chose_branch = true;
-                            break;
-                        }
-                        _ => continue,
-                    }
-                }
-
-                // No when matched - process otherwise
-                if !chose_branch {
-                    for elem in otherwise_events {
-                        let break_encountered =
-                            self.process_element_streaming(elem, output_writer, dispatcher)?;
-                        if break_encountered {
-                            return Ok(true); // Propagate break signal
-                        }
-                    }
-                }
-                Ok(false)
-            }
+            }) => self.handle_choose(when_branches, otherwise_events, output_writer, dispatcher),
 
             Element::Esi(Tag::Try {
                 attempt_events,
                 except_events,
-            }) => {
-                // Process try/except with parallel dispatch:
-                // Dispatch all includes from all attempts, then add try block to queue
-                let mut attempt_queues = Vec::new();
-
-                for attempt in attempt_events {
-                    let mut attempt_queue = Vec::new();
-
-                    for elem in attempt {
-                        // Process each element in the attempt, collecting queued items
-                        match elem {
-                            Element::Text(text) => {
-                                attempt_queue.push(QueuedElement::Content(text));
-                            }
-                            Element::Html(html) => {
-                                attempt_queue.push(QueuedElement::Content(html));
-                            }
-                            Element::Expr(expr) => {
-                                match expression::eval_expr(&expr, &mut self.ctx) {
-                                    Ok(value) => {
-                                        if !matches!(value, expression::Value::Null) {
-                                            let bytes = value.to_bytes();
-                                            if !bytes.is_empty() {
-                                                attempt_queue.push(QueuedElement::Content(bytes));
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!("Expression evaluation failed: {:?}", e);
-                                    }
-                                }
-                            }
-                            Element::Esi(Tag::Include {
-                                src,
-                                alt,
-                                continue_on_error,
-                                params,
-                            }) => {
-                                // Dispatch the include and add to attempt queue
-                                let queued_element = self.process_include_tag(
-                                    src,
-                                    alt,
-                                    continue_on_error,
-                                    params,
-                                    dispatcher,
-                                )?;
-                                attempt_queue.push(queued_element);
-                            }
-                            Element::Esi(Tag::Choose {
-                                when_branches,
-                                otherwise_events,
-                            }) => {
-                                // Evaluate and process chosen branch inline
-                                let mut chose_branch = false;
-                                for when_branch in when_branches {
-                                    if let Some(match_name) = &when_branch.match_name {
-                                        self.ctx.set_match_name(match_name);
-                                    }
-                                    let test_result =
-                                        expression::eval_expr(&when_branch.test, &mut self.ctx)?;
-                                    if test_result.to_bool() {
-                                        chose_branch = true;
-                                        for elem in when_branch.content {
-                                            self.process_element_streaming(
-                                                elem,
-                                                output_writer,
-                                                dispatcher,
-                                            )?;
-                                            // Note: breaks within try blocks don't propagate out
-                                        }
-                                        break;
-                                    }
-                                }
-                                if !chose_branch {
-                                    for elem in otherwise_events {
-                                        self.process_element_streaming(
-                                            elem,
-                                            output_writer,
-                                            dispatcher,
-                                        )?;
-                                        // Note: breaks within try blocks don't propagate out
-                                    }
-                                }
-                            }
-                            Element::Esi(Tag::Try { .. }) => {
-                                // Nested try blocks - process recursively
-                                self.process_element_streaming(
-                                    elem.clone(),
-                                    output_writer,
-                                    dispatcher,
-                                )?;
-                                // Note: breaks within try blocks don't propagate out
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    attempt_queues.push(attempt_queue);
-                }
-
-                // Process except clause elements
-                let mut except_queue = Vec::new();
-                for elem in except_events {
-                    match elem {
-                        Element::Text(text) => {
-                            except_queue.push(QueuedElement::Content(text));
-                        }
-                        Element::Html(html) => {
-                            except_queue.push(QueuedElement::Content(html));
-                        }
-                        Element::Expr(expr) => match expression::eval_expr(&expr, &mut self.ctx) {
-                            Ok(value) => {
-                                if !matches!(value, expression::Value::Null) {
-                                    let bytes = value.to_bytes();
-                                    if !bytes.is_empty() {
-                                        except_queue.push(QueuedElement::Content(bytes));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                debug!("Expression evaluation failed: {:?}", e);
-                            }
-                        },
-                        Element::Esi(Tag::Include {
-                            src,
-                            alt,
-                            continue_on_error,
-                            params,
-                        }) => {
-                            // Dispatch the include and add to except queue
-                            let queued_element = self.process_include_tag(
-                                src,
-                                alt,
-                                continue_on_error,
-                                params,
-                                dispatcher,
-                            )?;
-                            except_queue.push(queued_element);
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Add the try block to the queue with all attempts and except dispatched
-                self.queue.push_back(QueuedElement::Try {
-                    attempt_elements: attempt_queues,
-                    except_elements: except_queue,
-                });
-                Ok(false)
-            }
+            }) => self.handle_try(attempt_events, except_events, output_writer, dispatcher),
 
             Element::Esi(Tag::Foreach {
                 collection,
                 item,
                 content,
-            }) => {
-                // Evaluate the collection expression
-                let collection_value = expression::eval_expr(&collection, &mut self.ctx)
-                    .unwrap_or(expression::Value::Null);
+            }) => self.handle_foreach(collection, item, content, output_writer, dispatcher),
 
-                // Convert to a list if needed
-                let items = match &collection_value {
-                    expression::Value::List(items) => items.clone(),
-                    expression::Value::Dict(map) => {
-                        // Convert dict entries to a list of 2-element lists [key, value]
-                        map.iter()
-                            .map(|(k, v)| {
-                                expression::Value::List(vec![
-                                    expression::Value::Text(k.clone().into()),
-                                    v.clone(),
-                                ])
-                            })
-                            .collect()
-                    }
-                    expression::Value::Null => Vec::new(),
-                    other => vec![other.clone()], // Treat single values as a list of one
-                };
-
-                // Default item variable name if not specified
-                let item_var = item.unwrap_or_else(|| "item".to_string());
-
-                // Iterate through items
-                'foreach_loop: for item_value in items {
-                    // Set the item variable
-                    self.ctx.set_variable(&item_var, None, item_value)?;
-
-                    // Process content for this iteration
-                    for elem in content.iter() {
-                        let break_encountered = self.process_element_streaming(
-                            elem.clone(),
-                            output_writer,
-                            dispatcher,
-                        )?;
-                        if break_encountered {
-                            break 'foreach_loop;
-                        }
-                    }
-                }
-                Ok(false)
-            }
-
-            Element::Esi(Tag::Break) => {
-                // Signal break to enclosing foreach
-                Ok(true)
-            }
+            Element::Esi(Tag::Break) => Ok(true),
 
             _ => Ok(false), // Other standalone tags shouldn't appear
         }
