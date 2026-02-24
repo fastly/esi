@@ -923,8 +923,7 @@ impl Processor {
                 }
             }
             Err(e) => Err(ESIError::ExpressionError(format!(
-                "Fragment dispatch failed: {}",
-                e
+                "Fragment dispatch failed: {e}"
             ))),
         }
     }

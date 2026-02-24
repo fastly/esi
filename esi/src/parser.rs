@@ -5,13 +5,13 @@ use nom::bytes::streaming as streaming_bytes;
 use nom::character::streaming as streaming_char;
 // Using COMPLETE parsers for expression parsing - expressions are always complete
 // (they come from attribute values which are fully extracted before parsing)
-use nom::bytes::complete::{tag, take_until, take_while, take_while1};
+use nom::bytes::complete::{tag, take, take_until, take_while, take_while1};
 use nom::character::complete::multispace0;
 
 use nom::branch::alt;
 use nom::combinator::{map, map_res, not, opt, peek, recognize};
 use nom::error::Error;
-use nom::multi::{fold_many0, many0, separated_list0};
+use nom::multi::{fold_many0, many0, many1, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 use std::collections::HashMap;
@@ -194,7 +194,7 @@ fn interpolated_text<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         recognize(streaming_bytes::take_while1(|c| {
-            !is_opening_bracket(c) && !is_dollar(c)
+            !is_open_bracket(c) && !is_dollar(c)
         })),
         |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
     )(input)
@@ -206,7 +206,7 @@ fn interpolated_text_complete<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
-        recognize(take_while1(|c: u8| !is_opening_bracket(c) && !is_dollar(c))),
+        recognize(take_while1(|c| !is_open_bracket(c) && !is_dollar(c))),
         |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
     )(input)
 }
@@ -230,12 +230,30 @@ pub fn interpolated_content(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error
     )(input.as_ref())
 }
 
-/// Zero-copy element parser - dispatches to text or tag_dispatch
+/// Zero-copy element parser - dispatches to text or tags
+/// Note: Variable expressions like $(VAR) in plain HTML are NOT evaluated - only inside ESI tags
 fn element<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    alt((|i| text(original, i), |i| tag_handler(original, i)))(input)
+    // For top-level HTML content, we only parse tags, not variable expressions
+    // Variable expressions are only evaluated inside ESI tags
+    alt((
+        |i| top_level_text(original, i),
+        |i| tag_handler(original, i),
+    ))(input)
+}
+
+/// Text parser for top-level content - stops only at '<', not at '$()'
+/// This ensures $(VAR) in plain HTML is treated as literal text
+fn top_level_text<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    map(
+        recognize(streaming_bytes::take_while1(|c| !is_open_bracket(c))),
+        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
+    )(input)
 }
 
 fn interpolated_element<'a>(
@@ -516,7 +534,7 @@ fn esi_assign_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
         delimited(
             streaming_bytes::tag(b"<esi:assign"),
             attributes,
-            preceded(streaming_char::multispace0, self_closing),
+            preceded(streaming_char::multispace0, streaming_self_closing),
         ),
         assign_attributes_short,
     )(input)
@@ -533,7 +551,7 @@ fn esi_assign_long<'a>(
             delimited(
                 streaming_bytes::tag(b"<esi:assign"),
                 attributes,
-                preceded(streaming_char::multispace0, closing_bracket),
+                preceded(streaming_char::multispace0, streaming_close_bracket),
             ),
             streaming_bytes::take_until(b"</esi:assign>".as_ref()),
             streaming_bytes::tag(b"</esi:assign>"),
@@ -633,7 +651,7 @@ fn esi_when<'a>(
                 attributes,
                 preceded(
                     streaming_char::multispace0,
-                    alt((closing_bracket, self_closing)),
+                    alt((streaming_close_bracket, streaming_self_closing)),
                 ),
             ),
             |i| tag_content(original, i),
@@ -661,7 +679,7 @@ fn esi_foreach<'a>(
             delimited(
                 streaming_bytes::tag(b"<esi:foreach"),
                 attributes,
-                preceded(streaming_char::multispace0, closing_bracket),
+                preceded(streaming_char::multispace0, streaming_close_bracket),
             ),
             |i| tag_content(original, i),
             streaming_bytes::tag(b"</esi:foreach>"),
@@ -686,7 +704,7 @@ fn esi_break(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
         delimited(
             streaming_bytes::tag(b"<esi:break"),
             streaming_char::multispace0,
-            self_closing,
+            streaming_self_closing,
         ),
         |_| ParseResult::Single(Element::Esi(Tag::Break)),
     )(input)
@@ -794,7 +812,7 @@ fn esi_vars_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
         delimited(
             streaming_bytes::tag(b"<esi:vars"),
             attributes,
-            preceded(streaming_char::multispace0, self_closing), // Short form must be self-closing per ESI spec
+            preceded(streaming_char::multispace0, streaming_self_closing), // Short form must be self-closing per ESI spec
         ),
         parse_vars_attributes,
     )(input)
@@ -811,7 +829,7 @@ fn parse_content_complete(original: &Bytes, content: &[u8]) -> Vec<Element> {
         input: &'a [u8],
     ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
         map(
-            take_while1(|c| !is_dollar(c) && !is_opening_bracket(c)),
+            take_while1(|c| !is_dollar(c) && !is_open_bracket(c)),
             |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
         )(input)
     }
@@ -822,11 +840,14 @@ fn parse_content_complete(original: &Bytes, content: &[u8]) -> Vec<Element> {
         input: &'a [u8],
     ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
         // Check that this is NOT an esi: tag
-        let (_, _) = peek(tuple((tag(b"<"), not(tag(b"esi:")))))(input)?;
+        let (_, _) = peek(tuple((open_bracket, not(tag(b"esi:")))))(input)?;
 
         // Parse the HTML tag (simplified - just capture until >)
-        let (rest, html) =
-            recognize(tuple((tag(b"<"), take_while1(|c| c != b'>'), tag(b">"))))(input)?;
+        let (rest, html) = recognize(tuple((
+            open_bracket,
+            take_until(b">".as_ref()),
+            close_bracket,
+        )))(input)?;
 
         Ok((
             rest,
@@ -886,7 +907,7 @@ fn esi_comment(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
         delimited(
             streaming_bytes::tag(b"<esi:comment"),
             attributes,
-            preceded(streaming_char::multispace0, self_closing), // ESI comment must be self-closing per ESI spec
+            preceded(streaming_char::multispace0, streaming_self_closing), // ESI comment must be self-closing per ESI spec
         ),
         |_| ParseResult::Empty,
     )(input)
@@ -923,7 +944,7 @@ fn esi_include_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&
         delimited(
             streaming_bytes::tag(b"<esi:include"),
             attributes,
-            preceded(streaming_char::multispace0, self_closing),
+            preceded(streaming_char::multispace0, streaming_self_closing),
         ),
         |mut attrs| {
             let src = parse_attr_as_expr(attrs.remove("src").unwrap_or_default());
@@ -946,7 +967,7 @@ fn esi_include_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[
             delimited(
                 streaming_bytes::tag(b"<esi:include"),
                 attributes,
-                preceded(streaming_char::multispace0, closing_bracket),
+                preceded(streaming_char::multispace0, streaming_close_bracket),
             ),
             many0(preceded(streaming_char::multispace0, esi_param)),
             preceded(
@@ -976,7 +997,7 @@ fn esi_param(input: &[u8]) -> IResult<&[u8], (String, Expr), Error<&[u8]>> {
             attributes,
             preceded(
                 streaming_char::multispace0,
-                alt((closing_bracket, self_closing)),
+                alt((streaming_close_bracket, streaming_self_closing)),
             ),
         ),
         |mut attrs| {
@@ -1022,19 +1043,31 @@ fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 // ============================================================================
 /// Helper to find and consume the closing '>' character
 #[inline]
-fn closing_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+fn streaming_close_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    streaming_bytes::tag(b">")(input)
+}
+
+/// Helper to find and consume the closing '>' character
+#[inline]
+fn close_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     streaming_bytes::tag(b">")(input)
 }
 
 /// Helper to find and consume the closing self-closing tag characters '/>'
 #[inline]
-fn self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+fn streaming_self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     streaming_bytes::tag(b"/>")(input)
 }
 
 /// Helper to find and consume the opening '<' character
 #[inline]
-fn opening_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+fn open_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    tag(b"<")(input)
+}
+
+/// Helper to find and consume the opening '<' character
+#[inline]
+fn streaming_open_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     streaming_bytes::tag(b"<")(input)
 }
 
@@ -1050,16 +1083,19 @@ fn single_quote(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     streaming_bytes::tag(b"\'")(input)
 }
 
+/// Check if byte is an opening bracket '<'
 #[inline]
-const fn is_closing_bracket(b: u8) -> bool {
+const fn is_close_bracket(b: u8) -> bool {
     b == b'>'
 }
 
+/// Check if byte is a double quote '"'
 #[inline]
 const fn is_double_quote(b: u8) -> bool {
     b == b'\"'
 }
 
+/// Check if byte is a single quote '\''
 #[inline]
 const fn is_single_quote(b: u8) -> bool {
     b == b'\''
@@ -1091,18 +1127,18 @@ fn tag_name(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 /// Returns (remaining_input, (tag_name, full_tag_slice))
 /// Only succeeds when we have a complete tag (ending with > or />)
 #[allow(clippy::type_complexity)]
-fn complete_opening_tag(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8]), Error<&[u8]>> {
+fn esi_opening_tag(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8]), Error<&[u8]>> {
     let start = input;
 
     // Parse <tagname
-    let (rest, _) = opening_bracket(input)?;
+    let (rest, _) = streaming_open_bracket(input)?;
     let (rest, name) = tag_name(rest)?;
 
     // Parse attributes - consume everything up to '>'
-    let (rest, _) = streaming_bytes::take_till(is_closing_bracket)(rest)?;
+    let (rest, _) = streaming_bytes::take_till(is_close_bracket)(rest)?;
 
     // Must have > to be complete
-    let (rest, _) = closing_bracket(rest)?;
+    let (rest, _) = streaming_close_bracket(rest)?;
 
     Ok((rest, (name, start)))
 }
@@ -1126,7 +1162,7 @@ fn tag_handler<'a>(
         |i| {
             // First, parse the complete opening tag (including >)
             // This ensures we don't dispatch on partial tag names like "esi:ass"
-            let (rest, (name, start)) = complete_opening_tag(i)?;
+            let (rest, (name, start)) = esi_opening_tag(i)?;
             // Dispatch based on tag name without re-parsing
             match name {
                 // ESI tags - pass start position to parse from <esi:tagname
@@ -1210,8 +1246,8 @@ fn html_script_tag<'a>(
     // Parse opening tag
     let (input, _) = recognize(delimited(
         streaming_bytes::tag_no_case(b"<script"),
-        streaming_bytes::take_till(is_closing_bracket),
-        closing_bracket,
+        streaming_bytes::take_till(is_close_bracket),
+        streaming_close_bracket,
     ))(input)?;
 
     // Parse content (if any) and closing tag (if any)
@@ -1220,7 +1256,7 @@ fn html_script_tag<'a>(
         recognize(delimited(
             streaming_bytes::tag_no_case(b"</script"),
             streaming_char::multispace0,
-            closing_bracket,
+            streaming_close_bracket,
         )),
     )))(input)?;
 
@@ -1248,22 +1284,15 @@ fn closing_tag<'a>(
             streaming_bytes::tag(b"</"),
             tag_name,
             streaming_char::multispace0,
-            closing_bracket,
+            streaming_close_bracket,
         ))),
         |s: &[u8]| ParseResult::Single(Element::Html(slice_as_bytes(original, s))),
     )(input)
 }
 
-fn text<'a>(original: &Bytes, input: &'a [u8]) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    map(
-        recognize(streaming_bytes::take_while1(|c| !is_opening_bracket(c))),
-        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
-    )(input)
-}
-
 /// Check if byte is the opening bracket '<'
 #[inline]
-const fn is_opening_bracket(b: u8) -> bool {
+const fn is_open_bracket(b: u8) -> bool {
     b == b'<'
 }
 
@@ -1329,7 +1358,7 @@ fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
 
 fn string(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map(
-        alt((single_quoted_string, triple_quoted_string)),
+        alt((triple_quoted_string, single_quoted_string)),
         |string: String| {
             if string.is_empty() {
                 Expr::String(None)
@@ -1342,8 +1371,8 @@ fn string(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 fn var_key(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
     alt((
-        single_quoted_string,
         triple_quoted_string,
+        single_quoted_string,
         not_dollar_or_curlies,
     ))(input)
 }
