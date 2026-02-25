@@ -38,7 +38,7 @@ fn main() {
         let result = processor.process_stream(
             reader,
             &mut output_writer,
-            Some(&|req| {
+            Some(&|req, _maxwait: Option<u32>| {
                 info!("Sending request {} {}", req.get_method(), req.get_path());
                 Ok(req.with_ttl(120).send_async("mock-s3")?.into())
             }),

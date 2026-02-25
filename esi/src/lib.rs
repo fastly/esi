@@ -13,10 +13,12 @@ use crate::parser_types::Expr;
 use bytes::{Buf, Bytes, BytesMut};
 use fastly::http::request::{PendingRequest, PollResult};
 use fastly::http::{header, Method, StatusCode, Url};
-use fastly::{mime, Request, Response};
+use fastly::{mime, Backend, Request, Response};
 use log::debug;
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 pub use crate::error::{ExecutionError as ESIError, Result};
 pub use crate::parser::{interpolated_content, parse, parse_complete, parse_expression};
@@ -24,7 +26,7 @@ pub use crate::parser::{interpolated_content, parse, parse_complete, parse_expre
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;
 
-type FragmentRequestDispatcher = dyn Fn(Request) -> Result<PendingFragmentContent>;
+type FragmentRequestDispatcher = dyn Fn(Request, Option<u32>) -> Result<PendingFragmentContent>;
 
 type FragmentResponseProcessor = dyn Fn(&mut Request, Response) -> Result<Response>;
 
@@ -47,16 +49,41 @@ impl From<Response> for PendingFragmentContent {
     }
 }
 
+/// Common metadata shared between main and alt fragment requests
+#[derive(Clone)]
+struct FragmentMetadata {
+    /// Whether to continue on error
+    continue_on_error: bool,
+    /// Optional TTL override from the include tag (in seconds)
+    ttl_override: Option<u32>,
+    /// Optional timeout in milliseconds for this specific request
+    maxwait: Option<u32>,
+    // Request building parameters
+    is_escaped: bool,
+    /// Whether the request should be cached or not
+    cacheable: bool,
+    /// HTTP method to use for the request (default GET)
+    method: Option<Bytes>,
+    /// Optional body for POST requests
+    entity: Option<Bytes>,
+    /// Headers to append to the request
+    appendheaders: Vec<(String, Bytes)>,
+    /// Headers to remove from the request
+    removeheaders: Vec<String>,
+    /// Headers to set on the request
+    setheaders: Vec<(String, Bytes)>,
+}
+
 /// Representation of an ESI fragment request with its metadata and pending response
 pub struct Fragment {
     /// Metadata of the request
-    pub(crate) request: Request,
+    pub(crate) req: Request,
     /// An optional alternate request to send if the original request fails
-    pub(crate) alt: Option<Bytes>,
-    /// Whether to continue on error
-    pub(crate) continue_on_error: bool,
+    pub(crate) alt_bytes: Option<Bytes>,
     /// The pending fragment response, which can be polled to retrieve the content
-    pub(crate) pending_content: PendingFragmentContent,
+    pub(crate) pending_fragment: PendingFragmentContent,
+    /// Common fragment metadata (shared with alt)
+    pub(crate) metadata: FragmentMetadata,
 }
 
 /// Queue element for streaming processing
@@ -76,7 +103,7 @@ enum QueuedElement {
 
 impl PendingFragmentContent {
     /// Poll to check if the request is ready without blocking
-    /// Returns the updated PendingFragmentContent (either still Pending or now Completed/NoContent)
+    /// Returns the updated `PendingFragmentContent` (either still Pending or now Completed/NoContent)
     pub fn poll(self) -> Self {
         match self {
             Self::PendingRequest(pending_request) => match pending_request.poll() {
@@ -103,7 +130,7 @@ impl PendingFragmentContent {
     pub fn wait(self) -> Result<Response> {
         match self {
             Self::PendingRequest(pending_request) => pending_request.wait().map_err(|e| {
-                ESIError::ExpressionError(format!("Fragment request wait failed: {}", e))
+                ESIError::ExpressionError(format!("Fragment request wait failed: {e}"))
             }),
             Self::CompletedRequest(response) => Ok(*response),
             Self::NoContent => Ok(Response::from_status(StatusCode::NO_CONTENT)),
@@ -222,7 +249,7 @@ impl Processor {
     /// response.set_body("<esi:include src='http://example.com/header.html'/>");
     ///
     /// // Define a simple fragment dispatcher
-    /// fn default_fragment_dispatcher(req: fastly::Request) -> esi::Result<esi::PendingFragmentContent> {
+    /// fn default_fragment_dispatcher(req: fastly::Request, maxwait: Option<u32>) -> esi::Result<esi::PendingFragmentContent> {
     ///     Ok(esi::PendingFragmentContent::CompletedRequest(
     ///         Box::new(fastly::Response::from_body("Fragment content"))
     ///     ))
@@ -303,7 +330,7 @@ impl Processor {
     /// This method implements **three levels of streaming** for optimal performance:
     ///
     /// ## 1. Chunked Input Reading (Memory Efficient)
-    /// - Reads source stream in 8KB chunks from BufRead
+    /// - Reads source stream in 8KB chunks from `BufRead`
     /// - Accumulates chunks until parser can make progress
     /// - Prevents loading entire document into memory at once
     /// - Bounded memory growth with incremental processing
@@ -316,14 +343,14 @@ impl Processor {
     ///
     /// ## 3. Streaming Fragments (Maximum Parallelism)
     /// - Dispatches all includes immediately (non-blocking)
-    /// - Uses select() to process whichever fragment completes first
+    /// - Uses `select()` to process whichever fragment completes first
     /// - All fragments fetch in parallel, no wasted waiting
     /// - Try blocks dispatch all attempts' includes upfront
     ///
     /// ## Key Features:
     /// - Only fetches fragments that are actually needed (not those in unexecuted branches)
     /// - Fully recursive nested try/except blocks
-    /// - Proper alt fallback and continue_on_error handling
+    /// - Proper alt fallback and `continue_on_error` handling
     /// - Full ESI specification compliance
     ///
     /// ## Note on Parsing:
@@ -353,18 +380,19 @@ impl Processor {
         dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
-        // Set up fragment request dispatcher
-        let dispatcher = dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
-
         // STREAMING INPUT PARSING:
         // Read chunks, parse incrementally, process elements as we parse them
         const CHUNK_SIZE: usize = 8192; // 8KB chunks
-                                        // Using BytesMut for zero-copy parsing
+        const MAX_ITERATIONS: usize = 10000;
+
+        // Set up fragment request dispatcher
+        let dispatcher = dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
+
+        // Using BytesMut for zero-copy parsing
         let mut buffer = BytesMut::with_capacity(CHUNK_SIZE);
         let mut read_buf = vec![0u8; CHUNK_SIZE];
         let mut eof = false;
         let mut iterations = 0;
-        const MAX_ITERATIONS: usize = 10000;
 
         loop {
             iterations += 1;
@@ -460,7 +488,7 @@ impl Processor {
                     // Parse error
                     if eof {
                         // At EOF with parse error - this is a real error
-                        return Err(ESIError::ExpressionError(format!("Parser error: {:?}", e)));
+                        return Err(ESIError::ExpressionError(format!("Parser error: {e:?}")));
                     }
                     // Not at EOF - maybe more data will help, output what we have and continue
                     output_writer.write_all(&buffer)?;
@@ -506,24 +534,19 @@ impl Processor {
     }
 
     /// Handle variable assignment
-    fn handle_assign(
-        &mut self,
-        name: String,
-        subscript: Option<Expr>,
-        value: Expr,
-    ) -> Result<bool> {
-        let val = expression::eval_expr(&value, &mut self.ctx)
+    fn handle_assign(&mut self, name: &str, subscript: Option<Expr>, value: &Expr) -> Result<bool> {
+        let val = expression::eval_expr(value, &mut self.ctx)
             .unwrap_or(expression::Value::Text("".into()));
 
         if let Some(subscript_expr) = subscript {
             // Subscript assignment: modify existing collection
             if let Ok(subscript_val) = expression::eval_expr(&subscript_expr, &mut self.ctx) {
                 let key_str = subscript_val.to_string();
-                self.ctx.set_variable(&name, Some(&key_str), val)?;
+                self.ctx.set_variable(name, Some(&key_str), val)?;
             }
         } else {
             // Regular assignment without subscript
-            self.ctx.set_variable(&name, None, val)?;
+            self.ctx.set_variable(name, None, val)?;
         }
         Ok(false)
     }
@@ -539,14 +562,11 @@ impl Processor {
     /// Handle esi:include tag
     fn handle_include(
         &mut self,
-        src: Expr,
-        alt: Option<Expr>,
-        continue_on_error: bool,
-        params: Vec<(String, Expr)>,
+        params: &[(String, Expr)],
+        attrs: &parser_types::IncludeAttributes,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<bool> {
-        let queued_element =
-            self.process_include_tag(src, alt, continue_on_error, params, dispatcher)?;
+        let queued_element = self.process_include_tag(params, attrs, dispatcher)?;
         self.queue.push_back(queued_element);
         Ok(false)
     }
@@ -650,19 +670,13 @@ impl Processor {
                             }
                         }
                         Err(e) => {
-                            debug!("Expression evaluation failed: {:?}", e);
+                            debug!("Expression evaluation failed: {e:?}");
                         }
                     }
                 }
-                parser_types::Element::Esi(parser_types::Tag::Include {
-                    src,
-                    alt,
-                    continue_on_error,
-                    params,
-                }) => {
+                parser_types::Element::Esi(parser_types::Tag::Include { params, attrs }) => {
                     // Dispatch the include and add to queue
-                    let queued_element =
-                        self.process_include_tag(src, alt, continue_on_error, params, dispatcher)?;
+                    let queued_element = self.process_include_tag(&params, &attrs, dispatcher)?;
                     queue.push(queued_element);
                 }
                 parser_types::Element::Esi(parser_types::Tag::Choose {
@@ -697,7 +711,7 @@ impl Processor {
                     self.process_element_streaming(elem.clone(), output_writer, dispatcher)?;
                     // Note: breaks within try blocks don't propagate out
                 }
-                _ => {}
+                parser_types::Element::Esi(_) => {}
             }
         }
 
@@ -709,7 +723,7 @@ impl Processor {
         &mut self,
         collection: Expr,
         item: Option<String>,
-        content: Vec<parser_types::Element>,
+        content: &[parser_types::Element],
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<bool> {
@@ -744,7 +758,7 @@ impl Processor {
             self.ctx.set_variable(&item_var, None, item_value)?;
 
             // Process content for this iteration
-            for elem in content.iter() {
+            for elem in content {
                 let break_encountered =
                     self.process_element_streaming(elem.clone(), output_writer, dispatcher)?;
                 if break_encountered {
@@ -773,16 +787,13 @@ impl Processor {
                 name,
                 subscript,
                 value,
-            }) => self.handle_assign(name, subscript, value),
+            }) => self.handle_assign(&name, subscript, &value),
 
             Element::Esi(Tag::Vars { name }) => self.handle_vars(name),
 
-            Element::Esi(Tag::Include {
-                src,
-                alt,
-                continue_on_error,
-                params,
-            }) => self.handle_include(src, alt, continue_on_error, params, dispatcher),
+            Element::Esi(Tag::Include { params, attrs }) => {
+                self.handle_include(&params, &attrs, dispatcher)
+            }
 
             Element::Esi(Tag::Choose {
                 when_branches,
@@ -798,11 +809,11 @@ impl Processor {
                 collection,
                 item,
                 content,
-            }) => self.handle_foreach(collection, item, content, output_writer, dispatcher),
+            }) => self.handle_foreach(collection, item, &content, output_writer, dispatcher),
 
             Element::Esi(Tag::Break) => Ok(true),
 
-            _ => Ok(false), // Other standalone tags shouldn't appear
+            Element::Esi(_) => Ok(false), // Other standalone tags shouldn't appear
         }
     }
 
@@ -819,46 +830,44 @@ impl Processor {
     }
 
     /// Helper to evaluate Include expressions and dispatch the request
-    /// Returns a QueuedElement ready to be added to any queue (main/attempt/except)
+    /// Returns a `QueuedElement` ready to be added to any queue (main/attempt/except)
     fn process_include_tag(
         &mut self,
-        src: Expr,
-        alt: Option<Expr>,
-        continue_on_error: bool,
-        params: Vec<(String, Expr)>,
+        params: &[(String, Expr)],
+        attrs: &parser_types::IncludeAttributes,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<QueuedElement> {
+        self.dispatch_include_to_element(params, attrs, dispatcher)
+    }
+
+    /// Dispatch an include and return a `QueuedElement` (for flexible queue insertion)
+    /// This is the single source of truth for include dispatching logic
+    fn dispatch_include_to_element(
+        &mut self,
+        params: &[(String, Expr)],
+        attrs: &parser_types::IncludeAttributes,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<QueuedElement> {
         // Evaluate src and alt expressions to get actual URLs
-        let src_bytes = self.evaluate_expr_to_bytes(&src)?;
-        let alt_bytes = alt
+        let src_bytes = self.evaluate_expr_to_bytes(&attrs.src)?;
+        let alt_bytes = attrs
+            .alt
             .as_ref()
             .map(|e| self.evaluate_expr_to_bytes(e))
             .transpose()?;
 
-        self.dispatch_include_to_element(
-            &src_bytes,
-            alt_bytes.as_ref(),
-            continue_on_error,
-            &params,
-            dispatcher,
-        )
-    }
+        // Evaluate all metadata once (includes request params and TTL)
+        let metadata = self.evaluate_request_params(attrs)?;
 
-    /// Dispatch an include and return a QueuedElement (for flexible queue insertion)
-    /// This is the single source of truth for include dispatching logic
-    fn dispatch_include_to_element(
-        &mut self,
-        src: &Bytes,
-        alt: Option<&Bytes>,
-        continue_on_error: bool,
-        params: &[(String, Expr)],
-        dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<QueuedElement> {
         // Evaluate params and append to URL
-        let mut url = String::from_utf8_lossy(src).into_owned();
-        if !params.is_empty() {
-            // Pre-allocate capacity: estimate ~20 chars per param (name + value + separators)
-            url.reserve(params.len() * 20);
+        // Use Cow to avoid allocation when params are empty and bytes are valid UTF-8
+        let final_src = if params.is_empty() {
+            src_bytes
+        } else {
+            let url_cow = String::from_utf8_lossy(&src_bytes);
+            let mut url = String::with_capacity(url_cow.len() + params.len() * 20);
+            url.push_str(&url_cow);
+
             let mut separator = if url.contains('?') { '&' } else { '?' };
             for (name, value_expr) in params {
                 let value = self.evaluate_expr_to_bytes(value_expr)?;
@@ -870,50 +879,51 @@ impl Processor {
                 url.push_str(&value_str);
                 separator = '&';
             }
-        }
-        let final_src = Bytes::from(url);
+            Bytes::from(url)
+        };
 
         let req = build_fragment_request(
             self.ctx.get_request().clone_without_body(),
             &final_src,
-            self.configuration.is_escaped_content,
-            !self.configuration.cache.is_includes_cacheable,
+            &metadata,
         )?;
 
-        match dispatcher(req.clone_without_body()) {
-            Ok(pending) => {
+        let req_clone = req.clone_without_body();
+        match dispatcher(req_clone, attrs.maxwait) {
+            Ok(pending_fragment) => {
                 let fragment = Fragment {
-                    request: req,
-                    alt: alt.cloned(),
-                    continue_on_error,
-                    pending_content: pending,
+                    req,
+                    alt_bytes,
+                    pending_fragment,
+                    metadata,
                 };
                 Ok(QueuedElement::Include(Box::new(fragment)))
             }
-            Err(_) if continue_on_error => {
+            Err(_) if attrs.continue_on_error => {
                 // Try alt or add error placeholder
-                if let Some(alt_src) = alt {
+                if let Some(alt_src) = &alt_bytes {
                     let alt_req = build_fragment_request(
                         self.ctx.get_request().clone_without_body(),
                         alt_src,
-                        self.configuration.is_escaped_content,
-                        !self.configuration.cache.is_includes_cacheable,
+                        &metadata,
                     )?;
 
-                    dispatcher(alt_req.clone_without_body()).map_or_else(
+                    let alt_req_without_body = alt_req.clone_without_body();
+                    dispatcher(alt_req_without_body, attrs.maxwait).map_or_else(
                         |_| {
                             Ok(QueuedElement::Content(Bytes::from_static(
                                 b"<!-- fragment request failed -->",
                             )))
                         },
+                        //
                         |alt_pending| {
-                            let alt_fragment = Fragment {
-                                request: alt_req,
-                                alt: None,
-                                continue_on_error,
-                                pending_content: alt_pending,
+                            let fragment = Fragment {
+                                req: alt_req,
+                                alt_bytes: None,
+                                pending_fragment: alt_pending,
+                                metadata,
                             };
-                            Ok(QueuedElement::Include(Box::new(alt_fragment)))
+                            Ok(QueuedElement::Include(Box::new(fragment)))
                         },
                     )
                 } else {
@@ -926,6 +936,62 @@ impl Processor {
                 "Fragment dispatch failed: {e}"
             ))),
         }
+    }
+
+    /// Evaluate request parameters from `IncludeAttributes`
+    fn evaluate_request_params(
+        &mut self,
+        attrs: &parser_types::IncludeAttributes,
+    ) -> Result<FragmentMetadata> {
+        // Parse TTL if provided (it's a literal string like "120m", not an expression)
+        let ttl_override = attrs
+            .ttl
+            .as_ref()
+            .and_then(|ttl_str| cache::parse_ttl(ttl_str));
+
+        // Evaluate method if provided
+        let method = attrs
+            .method
+            .as_ref()
+            .map(|e| self.evaluate_expr_to_bytes(e))
+            .transpose()?;
+
+        // Evaluate entity if provided
+        let entity = attrs
+            .entity
+            .as_ref()
+            .map(|e| self.evaluate_expr_to_bytes(e))
+            .transpose()?;
+
+        // Evaluate header values
+        let mut appendheaders = Vec::with_capacity(attrs.appendheaders.len());
+        for (name, value_expr) in &attrs.appendheaders {
+            let value_bytes = self.evaluate_expr_to_bytes(value_expr)?;
+            appendheaders.push((name.clone(), value_bytes));
+        }
+
+        let mut setheaders = Vec::with_capacity(attrs.setheaders.len());
+        for (name, value_expr) in &attrs.setheaders {
+            let value_bytes = self.evaluate_expr_to_bytes(value_expr)?;
+            setheaders.push((name.clone(), value_bytes));
+        }
+
+        // Determine if the fragment should be cached
+        // cacheable=true means cache it, cacheable=false means bypass cache (set_pass)
+        let cacheable = !attrs.no_store && self.configuration.cache.is_includes_cacheable;
+
+        Ok(FragmentMetadata {
+            continue_on_error: attrs.continue_on_error,
+            ttl_override,
+            maxwait: attrs.maxwait,
+            is_escaped: self.configuration.is_escaped_content,
+            cacheable,
+            method,
+            entity,
+            appendheaders,
+            removeheaders: attrs.removeheaders.clone(),
+            setheaders,
+        })
     }
 
     /// Check ready queue items - non-blocking poll
@@ -960,13 +1026,13 @@ impl Processor {
                 QueuedElement::Include(mut fragment) => {
                     // Poll the fragment (non-blocking check)
                     let pending_content = std::mem::replace(
-                        &mut fragment.pending_content,
+                        &mut fragment.pending_fragment,
                         PendingFragmentContent::NoContent,
                     );
-                    fragment.pending_content = pending_content.poll();
+                    fragment.pending_fragment = pending_content.poll();
 
                     // Check if it's ready now
-                    if fragment.pending_content.is_ready() {
+                    if fragment.pending_fragment.is_ready() {
                         // Process it!
                         self.process_include_from_queue(
                             *fragment,
@@ -1016,7 +1082,7 @@ impl Processor {
                 match elem {
                     QueuedElement::Include(fragment) => {
                         if matches!(
-                            fragment.pending_content,
+                            fragment.pending_fragment,
                             PendingFragmentContent::PendingRequest(_)
                         ) {
                             pending_fragments.push((idx, fragment));
@@ -1071,7 +1137,7 @@ impl Processor {
 
             for (idx, mut fragment) in pending_fragments {
                 if let PendingFragmentContent::PendingRequest(pending_req) = std::mem::replace(
-                    &mut fragment.pending_content,
+                    &mut fragment.pending_fragment,
                     PendingFragmentContent::NoContent,
                 ) {
                     pending_reqs.push(*pending_req);
@@ -1092,24 +1158,39 @@ impl Processor {
                 fragments_by_request.remove(completed_idx);
 
             // Update the completed fragment with the result and track TTL if rendered caching enabled
-            completed_fragment.pending_content = result.map_or_else(
+            completed_fragment.pending_fragment = result.map_or_else(
                 |_| PendingFragmentContent::NoContent,
                 |resp| {
                     // Track TTL if we need it for rendered document (for tracking OR header emission)
                     if self.configuration.cache.is_rendered_cacheable
                         || self.configuration.cache.rendered_cache_control
                     {
-                        match cache::calculate_ttl(&resp, &self.configuration.cache) {
-                            Ok(Some(ttl)) => {
-                                self.ctx.update_cache_min_ttl(ttl);
-                                debug!("Tracking TTL {} for rendered document", ttl);
+                        // Use ttl_override from the include tag if present, otherwise calculate from response
+                        let ttl = if let Some(override_ttl) =
+                            completed_fragment.metadata.ttl_override
+                        {
+                            debug!("Using TTL override from include tag: {override_ttl} seconds");
+                            Some(override_ttl)
+                        } else {
+                            match cache::calculate_ttl(&resp, &self.configuration.cache) {
+                                Ok(Some(ttl)) => {
+                                    debug!("Calculated TTL from response: {ttl} seconds");
+                                    Some(ttl)
+                                }
+                                Ok(None) => {
+                                    debug!("Response not cacheable");
+                                    None
+                                }
+                                Err(e) => {
+                                    debug!("Error calculating TTL: {e:?}");
+                                    None
+                                }
                             }
-                            Ok(None) => {
-                                debug!("Response not cacheable");
-                            }
-                            Err(e) => {
-                                debug!("Error calculating TTL: {:?}", e);
-                            }
+                        };
+
+                        if let Some(ttl_value) = ttl {
+                            self.ctx.update_cache_min_ttl(ttl_value);
+                            debug!("Tracking TTL {ttl_value} for rendered document");
                         }
                     }
                     PendingFragmentContent::CompletedRequest(Box::new(resp))
@@ -1120,7 +1201,7 @@ impl Processor {
             for (pending_req, (_idx, mut fragment)) in
                 remaining.into_iter().zip(fragments_by_request)
             {
-                fragment.pending_content =
+                fragment.pending_fragment =
                     PendingFragmentContent::PendingRequest(Box::new(pending_req));
                 self.queue.push_back(QueuedElement::Include(fragment));
             }
@@ -1219,13 +1300,13 @@ impl Processor {
         dispatcher: &FragmentRequestDispatcher,
         processor: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
-        let continue_on_error = fragment.continue_on_error;
+        let continue_on_error = fragment.metadata.continue_on_error;
 
         // Wait for response
-        let response = fragment.pending_content.wait()?;
+        let response = fragment.pending_fragment.wait()?;
 
         // Apply processor if provided
-        let mut req_for_processor = fragment.request.clone_without_body();
+        let mut req_for_processor = fragment.req.clone_without_body();
         let final_response = if let Some(proc) = processor {
             proc(&mut req_for_processor, response)?
         } else {
@@ -1238,17 +1319,17 @@ impl Processor {
             // Write Bytes directly - no UTF-8 conversion needed!
             output_writer.write_all(&body_bytes)?;
             Ok(())
-        } else if let Some(alt_src) = fragment.alt {
-            // Try alt
+        } else if let Some(alt_src) = fragment.alt_bytes {
+            // Try alt - reuse metadata from original request
             debug!("Main request failed, trying alt");
             let alt_req = build_fragment_request(
                 self.ctx.get_request().clone_without_body(),
                 &alt_src,
-                self.configuration.is_escaped_content,
-                !self.configuration.cache.is_includes_cacheable,
+                &fragment.metadata,
             )?;
 
-            match dispatcher(alt_req.clone_without_body()) {
+            let alt_req_without_body = alt_req.clone_without_body();
+            match dispatcher(alt_req_without_body, fragment.metadata.maxwait) {
                 Ok(alt_pending) => {
                     let alt_response = alt_pending.wait()?;
                     let mut alt_req_for_proc = alt_req.clone_without_body();
@@ -1284,13 +1365,33 @@ impl Processor {
 }
 
 // Default fragment request dispatcher that uses the request's hostname as backend
-fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
+// Uses dynamic backends to support maxwait attribute as first_byte_timeout
+fn default_fragment_dispatcher(
+    req: Request,
+    maxwait: Option<u32>,
+) -> Result<PendingFragmentContent> {
     debug!("no dispatch method configured, defaulting to hostname");
-    let backend = req
+    let host = req
         .get_url()
         .host()
         .unwrap_or_else(|| panic!("no host in request: {}", req.get_url()))
         .to_string();
+
+    // Build a dynamic backend with appropriate settings
+    let mut builder = Backend::builder(&host, &host)
+        .override_host(&host)
+        .enable_ssl()
+        .sni_hostname(&host);
+
+    // Add timeout if `maxwait` is specified
+    if let Some(timeout_ms) = maxwait {
+        builder = builder.first_byte_timeout(Duration::from_millis(u64::from(timeout_ms)));
+    }
+
+    let backend = builder
+        .finish()
+        .map_err(|e| ExecutionError::ExpressionError(format!("Failed to create backend: {e}")))?;
+
     let pending_req = req.send_async(backend)?;
     Ok(PendingFragmentContent::PendingRequest(Box::new(
         pending_req,
@@ -1303,17 +1404,16 @@ fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
 fn build_fragment_request(
     mut request: Request,
     url: &Bytes,
-    is_escaped: bool,
-    set_pass: bool,
+    metadata: &FragmentMetadata,
 ) -> Result<Request> {
     // Convert Bytes to str for URL parsing
     let url_str = std::str::from_utf8(url)
         .map_err(|_| ExecutionError::ExpressionError("Invalid UTF-8 in URL".to_string()))?;
 
-    let escaped_url = if is_escaped {
-        html_escape::decode_html_entities(url_str).into_owned()
+    let escaped_url = if metadata.is_escaped {
+        Cow::Owned(html_escape::decode_html_entities(url_str).into_owned())
     } else {
-        url_str.to_string()
+        Cow::Borrowed(url_str)
     };
 
     if escaped_url.starts_with('/') {
@@ -1325,14 +1425,14 @@ fn build_fragment_request(
                 request.get_url_mut().set_query(u.query());
             }
             Err(_err) => {
-                return Err(ExecutionError::InvalidRequestUrl(escaped_url));
+                return Err(ExecutionError::InvalidRequestUrl(escaped_url.into_owned()));
             }
         }
     } else {
         request.set_url(match Url::parse(&escaped_url) {
             Ok(url) => url,
             Err(_err) => {
-                return Err(ExecutionError::InvalidRequestUrl(escaped_url));
+                return Err(ExecutionError::InvalidRequestUrl(escaped_url.into_owned()));
             }
         });
     }
@@ -1341,8 +1441,48 @@ fn build_fragment_request(
 
     request.set_header(header::HOST, &hostname);
 
-    // Set pass option to bypass cache if requested
-    if set_pass {
+    // Set HTTP method (default is GET)
+    if let Some(method_bytes) = &metadata.method {
+        let method_str = std::str::from_utf8(method_bytes)
+            .map_err(|_| ExecutionError::ExpressionError("Invalid UTF-8 in method".to_string()))?
+            .to_uppercase();
+
+        match method_str.as_str() {
+            "GET" => request.set_method(Method::GET),
+            "POST" => request.set_method(Method::POST),
+            _ => {
+                return Err(ExecutionError::ExpressionError(format!(
+                    "Unsupported HTTP method: {method_str}"
+                )))
+            }
+        }
+    }
+
+    // Set POST body if provided
+    if let Some(entity_bytes) = &metadata.entity {
+        if request.get_method() == Method::POST {
+            request.set_body(entity_bytes.as_ref());
+        }
+    }
+
+    // Process header manipulations in the correct order:
+    // 1. Remove headers
+    for header_name in &metadata.removeheaders {
+        request.remove_header(header_name);
+    }
+
+    // 2. Set headers (replace existing)
+    for (name, value) in &metadata.setheaders {
+        request.set_header(name, value.as_ref());
+    }
+
+    // 3. Append headers (add to existing)
+    for (name, value) in &metadata.appendheaders {
+        request.append_header(name, value.as_ref());
+    }
+
+    // Set pass option to bypass cache if fragment is not cacheable
+    if !metadata.cacheable {
         request.set_pass(true);
     }
 

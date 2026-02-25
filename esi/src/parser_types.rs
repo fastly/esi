@@ -1,5 +1,32 @@
 use bytes::Bytes;
 
+/// All attributes for esi:include tags
+#[derive(Debug, PartialEq, Clone)]
+pub struct IncludeAttributes {
+    /// Source URL to fetch (required)
+    pub src: Expr,
+    /// Optional fallback URL if src fails
+    pub alt: Option<Expr>,
+    /// Whether to continue on error (from onerror="continue")
+    pub continue_on_error: bool,
+    /// Time-To-Live for caching (e.g., "120m", "1h", "2d", "0s")
+    pub ttl: Option<String>,
+    /// Timeout in milliseconds for the request
+    pub maxwait: Option<u32>,
+    /// Whether to bypass caching (no-store)
+    pub no_store: bool,
+    /// HTTP method (GET or POST)
+    pub method: Option<Expr>,
+    /// POST request body
+    pub entity: Option<Expr>,
+    /// Headers to append to the request
+    pub appendheaders: Vec<(String, Expr)>,
+    /// Headers to remove from the request
+    pub removeheaders: Vec<String>,
+    /// Headers to set on the request (replaces existing)
+    pub setheaders: Vec<(String, Expr)>,
+}
+
 /// Represents a single when branch in a choose block
 #[derive(Debug, PartialEq, Clone)]
 pub struct WhenBranch {
@@ -11,10 +38,10 @@ pub struct WhenBranch {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Tag {
     Include {
-        src: Expr,
-        alt: Option<Expr>,
-        continue_on_error: bool,
+        /// Child <esi:param> elements (not attributes)
         params: Vec<(String, Expr)>,
+        /// All include tag attributes
+        attrs: IncludeAttributes,
     },
     Try {
         attempt_events: Vec<Vec<Element>>,

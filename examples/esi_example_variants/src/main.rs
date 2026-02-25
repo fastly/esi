@@ -48,7 +48,7 @@ fn main() {
         let result = processor.process_stream(
             reader,
             &mut output_writer,
-            Some(&|req| {
+            Some(&|req, _maxwait: Option<u32>| {
                 let original_url = req.get_url().to_string();
                 let variant_url = get_variant_url(&original_url);
                 info!(

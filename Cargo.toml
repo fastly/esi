@@ -8,6 +8,7 @@ members = [
     "examples/esi_vars_example",
     "examples/esi_example_variants",
 ]
+resolver = "2"
 
 [workspace.package]
 version = "0.6.2"
@@ -17,4 +18,4 @@ authors = [
     "Tyler McMullen <tyler@fastly.com>",
 ]
 license = "MIT"
-edition = "2018"
+edition = "2021"

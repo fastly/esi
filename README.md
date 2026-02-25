@@ -152,7 +152,7 @@ fn handle_request(req: Request) -> Result<(), Error> {
             Some(Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML)),
             // Provide logic for sending fragment requests, otherwise the hostname
             // of the request URL will be used as the backend name.
-            Some(&|req| {
+            Some(&|req, _maxwait| {
                 println!("Sending request {} {}", req.get_method(), req.get_path());
                 Ok(req.with_ttl(120).send_async("mock-s3")?.into())
             }),
@@ -196,7 +196,7 @@ fn process_custom_stream(
     processor.process_stream(
         reader,
         output,
-        Some(&|req| {
+        Some(&|req, _maxwait| {
             // Custom fragment dispatcher
             Ok(req.send_async("backend")?.into())
         }),

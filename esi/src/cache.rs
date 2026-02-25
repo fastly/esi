@@ -117,6 +117,49 @@ pub fn calculate_ttl(response: &Response, config: &CacheConfig) -> Result<Option
     Ok(None)
 }
 
+/// Parse ESI TTL string format (e.g., "120m", "1h", "2d", "0s") into seconds
+///
+/// Format: integer followed by unit specifier
+/// - s: seconds
+/// - m: minutes  
+/// - h: hours
+/// - d: days
+///
+/// Returns None if the format is invalid
+pub fn parse_ttl(ttl_str: &str) -> Option<u32> {
+    let ttl_str = ttl_str.trim();
+    if ttl_str.is_empty() {
+        return None;
+    }
+
+    // Find the last digit position
+    let mut num_end = 0;
+    for (i, c) in ttl_str.char_indices() {
+        if c.is_ascii_digit() {
+            num_end = i + 1;
+        } else if i > 0 {
+            break;
+        }
+    }
+
+    if num_end == 0 {
+        return None;
+    }
+
+    let (num_part, unit_part) = ttl_str.split_at(num_end);
+    let value = num_part.parse::<u32>().ok()?;
+
+    let multiplier = match unit_part.trim() {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        _ => return None,
+    };
+
+    Some(value * multiplier)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +307,47 @@ mod tests {
 
         let ttl = calculate_ttl(&resp, &config).unwrap();
         assert_eq!(ttl, None); // must-revalidate prevents caching
+    }
+
+    #[test]
+    fn test_parse_ttl_seconds() {
+        assert_eq!(parse_ttl("0s"), Some(0));
+        assert_eq!(parse_ttl("30s"), Some(30));
+        assert_eq!(parse_ttl("120s"), Some(120));
+    }
+
+    #[test]
+    fn test_parse_ttl_minutes() {
+        assert_eq!(parse_ttl("1m"), Some(60));
+        assert_eq!(parse_ttl("5m"), Some(300));
+        assert_eq!(parse_ttl("120m"), Some(7200));
+    }
+
+    #[test]
+    fn test_parse_ttl_hours() {
+        assert_eq!(parse_ttl("1h"), Some(3600));
+        assert_eq!(parse_ttl("2h"), Some(7200));
+        assert_eq!(parse_ttl("24h"), Some(86400));
+    }
+
+    #[test]
+    fn test_parse_ttl_days() {
+        assert_eq!(parse_ttl("1d"), Some(86400));
+        assert_eq!(parse_ttl("7d"), Some(604800));
+    }
+
+    #[test]
+    fn test_parse_ttl_invalid() {
+        assert_eq!(parse_ttl(""), None);
+        assert_eq!(parse_ttl("invalid"), None);
+        assert_eq!(parse_ttl("120x"), None);
+        assert_eq!(parse_ttl("s"), None);
+        assert_eq!(parse_ttl("m"), None);
+    }
+
+    #[test]
+    fn test_parse_ttl_whitespace() {
+        assert_eq!(parse_ttl(" 120m "), Some(7200));
+        assert_eq!(parse_ttl("  1h  "), Some(3600));
     }
 }

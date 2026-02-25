@@ -743,11 +743,11 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
         out
     } else {
         let iter = max_splits.map_or_else(
-            || source.split(&sep).map(|s| s.to_string()).collect(),
+            || source.split(&sep).map(ToString::to_string).collect(),
             |n| {
                 source
                     .splitn(n as usize + 1, &sep)
-                    .map(|s| s.to_string())
+                    .map(ToString::to_string)
                     .collect()
             },
         );
@@ -771,13 +771,10 @@ pub fn join(args: &[Value]) -> Result<Value> {
         Some(v) => v.to_string(),
     };
 
-    let list = match &args[0] {
-        Value::List(items) => items,
-        _ => {
-            return Err(ExecutionError::FunctionError(
-                "join expects a list as first argument".to_string(),
-            ))
-        }
+    let Value::List(list) = &args[0] else {
+        return Err(ExecutionError::FunctionError(
+            "join expects a list as first argument".to_string(),
+        ));
     };
 
     let mut out = String::new();
@@ -1325,19 +1322,19 @@ mod tests {
                 assert_eq!(items.len(), 1);
                 assert_eq!(items[0], Value::Text("abc".into()));
             }
-            other => panic!("Unexpected result: {:?}", other),
+            other => panic!("Unexpected result: {other:?}"),
         }
 
         let list_value = Value::List(vec![Value::Text("x".into()), Value::Text("y".into())]);
         match join(&[list_value.clone(), Value::Text("-".into())]) {
             Ok(Value::Text(out)) => assert_eq!(String::from_utf8_lossy(&out), "x-y"),
-            other => panic!("Unexpected result: {:?}", other),
+            other => panic!("Unexpected result: {other:?}"),
         }
 
         // default separator is space
-        match join(&[list_value.clone()]) {
+        match join(std::slice::from_ref(&list_value)) {
             Ok(Value::Text(out)) => assert_eq!(String::from_utf8_lossy(&out), "x y"),
-            other => panic!("Unexpected result: {:?}", other),
+            other => panic!("Unexpected result: {other:?}"),
         }
 
         match list_delitem(&[list_value, Value::Integer(0)]) {
@@ -1345,7 +1342,7 @@ mod tests {
                 assert_eq!(items.len(), 1);
                 assert_eq!(items[0], Value::Text("y".into()));
             }
-            other => panic!("Unexpected result: {:?}", other),
+            other => panic!("Unexpected result: {other:?}"),
         }
     }
 
@@ -1551,7 +1548,7 @@ mod tests {
             Ok(Value::Integer(v)) => v,
             other => panic!("Unexpected result: {:?}", other),
         };
-        assert!(first >= 0 && first < 100_000_000);
+        assert!((0..100_000_000).contains(&first));
 
         match last_rand(&[], &ctx) {
             Ok(Value::Integer(v)) => assert_eq!(v, first),
@@ -1562,7 +1559,7 @@ mod tests {
             Ok(Value::Integer(v)) => v,
             other => panic!("Unexpected result: {:?}", other),
         };
-        assert!(second >= 0 && second < 10);
+        assert!((0..10).contains(&second));
 
         match last_rand(&[], &ctx) {
             Ok(Value::Integer(v)) => assert_eq!(v, second),

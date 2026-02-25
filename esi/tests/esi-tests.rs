@@ -251,7 +251,7 @@ fn process_include_with_query_string_interpolation() -> Result<(), Error> {
         .process_response(
             &mut resp,
             None,
-            Some(&move |fragment_req: Request| {
+            Some(&move |fragment_req: Request, _maxwait: Option<u32>| {
                 // Check that the fragment request URL contains the interpolated apiKey
                 let url = fragment_req.get_url();
                 let url_str = url.to_string();
@@ -481,12 +481,13 @@ fn test_configuration_is_escaped_content() {
     use std::rc::Rc;
     let captured_url = Rc::new(RefCell::new(String::new()));
     let captured_url_clone = captured_url.clone();
-    let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
-        *captured_url_clone.borrow_mut() = req.get_url_str().to_string();
-        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
-            fastly::Response::from_body("fragment content"),
-        )))
-    };
+    let dispatcher =
+        move |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            *captured_url_clone.borrow_mut() = req.get_url_str().to_string();
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                fastly::Response::from_body("fragment content"),
+            )))
+        };
 
     let mut processor = Processor::new(
         Some(Request::get("http://example.com/")),
@@ -521,12 +522,13 @@ fn test_configuration_is_escaped_content_disabled() {
     use std::rc::Rc;
     let captured_url = Rc::new(RefCell::new(String::new()));
     let captured_url_clone = captured_url.clone();
-    let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
-        *captured_url_clone.borrow_mut() = req.get_url_str().to_string();
-        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
-            fastly::Response::from_body("fragment content"),
-        )))
-    };
+    let dispatcher =
+        move |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            *captured_url_clone.borrow_mut() = req.get_url_str().to_string();
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                fastly::Response::from_body("fragment content"),
+            )))
+        };
 
     let mut processor = Processor::new(
         Some(Request::get("http://example.com/")),
@@ -557,13 +559,14 @@ fn test_process_fragment_response_callback() {
     let mut output = Vec::new();
 
     // Dispatcher returns a response
-    let dispatcher = |_req: Request| -> esi::Result<esi::PendingFragmentContent> {
-        let mut resp = fastly::Response::from_body("original content");
-        resp.set_header("X-Custom-Header", "original-value");
-        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
-            resp,
-        )))
-    };
+    let dispatcher =
+        |_req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            let mut resp = fastly::Response::from_body("original content");
+            resp.set_header("X-Custom-Header", "original-value");
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                resp,
+            )))
+        };
 
     // Response processor that modifies the response
     use std::cell::RefCell;
@@ -624,19 +627,20 @@ fn test_process_fragment_response_on_alt() {
     let mut output = Vec::new();
 
     // Dispatcher that fails for main, succeeds for alt
-    let dispatcher = |req: Request| -> esi::Result<esi::PendingFragmentContent> {
-        if req.get_url_str().contains("/main") {
-            // Main request fails
-            Err(esi::ExecutionError::ExpressionError(
-                "main failed".to_string(),
-            ))
-        } else {
-            // Alt request succeeds
-            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
-                fastly::Response::from_body("alt content"),
-            )))
-        }
-    };
+    let dispatcher =
+        |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            if req.get_url_str().contains("/main") {
+                // Main request fails
+                Err(esi::ExecutionError::ExpressionError(
+                    "main failed".to_string(),
+                ))
+            } else {
+                // Alt request succeeds
+                Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                    fastly::Response::from_body("alt content"),
+                )))
+            }
+        };
 
     // Response processor that should be called for the alt response
     use std::cell::RefCell;
@@ -690,11 +694,12 @@ fn test_process_fragment_response_error_handling() {
     let mut output = Vec::new();
 
     // Dispatcher returns a response
-    let dispatcher = |_req: Request| -> esi::Result<esi::PendingFragmentContent> {
-        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
-            fastly::Response::from_body("content"),
-        )))
-    };
+    let dispatcher =
+        |_req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                fastly::Response::from_body("content"),
+            )))
+        };
 
     // Response processor that returns an error
     let processor_callback =
@@ -748,20 +753,21 @@ fn test_alt_url_with_interpolation() {
     use std::rc::Rc;
     let captured_alt_url = Rc::new(RefCell::new(String::new()));
     let captured_alt_url_clone = captured_alt_url.clone();
-    let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
-        if req.get_url_str().contains("/main") {
-            // Main request fails
-            Err(esi::ExecutionError::ExpressionError(
-                "main failed".to_string(),
-            ))
-        } else {
-            // Alt request succeeds - capture the URL
-            *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();
-            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
-                fastly::Response::from_body("alt content"),
-            )))
-        }
-    };
+    let dispatcher =
+        move |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            if req.get_url_str().contains("/main") {
+                // Main request fails
+                Err(esi::ExecutionError::ExpressionError(
+                    "main failed".to_string(),
+                ))
+            } else {
+                // Alt request succeeds - capture the URL
+                *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();
+                Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                    fastly::Response::from_body("alt content"),
+                )))
+            }
+        };
 
     let mut processor = Processor::new(
         Some(Request::get("http://example.com/?fallback_id=12345")),
@@ -808,20 +814,21 @@ fn test_alt_url_with_function_interpolation() {
     use std::rc::Rc;
     let captured_alt_url = Rc::new(RefCell::new(String::new()));
     let captured_alt_url_clone = captured_alt_url.clone();
-    let dispatcher = move |req: Request| -> esi::Result<esi::PendingFragmentContent> {
-        if req.get_url_str().contains("/main") {
-            // Main request fails
-            Err(esi::ExecutionError::ExpressionError(
-                "main failed".to_string(),
-            ))
-        } else {
-            // Alt request succeeds - capture the URL
-            *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();
-            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
-                fastly::Response::from_body("alt with function"),
-            )))
-        }
-    };
+    let dispatcher =
+        move |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            if req.get_url_str().contains("/main") {
+                // Main request fails
+                Err(esi::ExecutionError::ExpressionError(
+                    "main failed".to_string(),
+                ))
+            } else {
+                // Alt request succeeds - capture the URL
+                *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();
+                Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                    fastly::Response::from_body("alt with function"),
+                )))
+            }
+        };
 
     let mut req = Request::get("http://Example.COM/");
     req.set_header("Host", "Example.COM");
