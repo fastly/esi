@@ -39,6 +39,8 @@ pub fn html_encode(args: &[Value]) -> Result<Value> {
         )));
     }
 
+    // Per ESI spec: encode only 4 special characters: > < & "
+    // html_escape::encode_double_quoted_attribute does exactly this
     let encoded =
         html_escape::encode_double_quoted_attribute(args[0].to_string().as_str()).to_string();
     Ok(Value::Text(encoded.into()))
@@ -295,6 +297,30 @@ pub fn base64_encode(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(encoded.into()))
 }
 
+pub fn base64_decode(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "base64_decode: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let input = args[0].to_string();
+    let decoded = STANDARD
+        .decode(input.as_bytes())
+        .map_err(|_| ExecutionError::FunctionError("base64_decode: invalid base64".to_string()))?;
+
+    // Try to convert to UTF-8 string, but return raw bytes if it fails
+    match String::from_utf8(decoded.clone()) {
+        Ok(s) => Ok(Value::Text(s.into())),
+        Err(_) => Ok(Value::Text(Bytes::from(decoded))),
+    }
+}
+
 pub fn url_encode(args: &[Value]) -> Result<Value> {
     if args.len() != 1 {
         return Err(ExecutionError::FunctionError(format!(
@@ -489,10 +515,43 @@ pub fn rindex(args: &[Value]) -> Result<Value> {
     )
 }
 
-pub fn md5_digest(args: &[Value]) -> Result<Value> {
+/// $digest_md5(text_to_digest) - Returns MD5 digest as a list of 4 (32 bit) signed integers
+pub fn digest_md5(args: &[Value]) -> Result<Value> {
     if args.len() != 1 {
         return Err(ExecutionError::FunctionError(format!(
-            "md5_digest: expected 1 argument, got {}",
+            "digest_md5: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+
+    if matches!(args[0], Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let input = args[0].to_string();
+    let digest = md5::compute(input.as_bytes());
+
+    // MD5 produces 128 bits = 16 bytes, which we split into 4 x 32-bit signed integers
+    // Convert bytes to i32s (little-endian interpretation)
+    let bytes = digest.0;
+    let int1 = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let int2 = i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    let int3 = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let int4 = i32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+
+    Ok(Value::List(vec![
+        Value::Integer(int1),
+        Value::Integer(int2),
+        Value::Integer(int3),
+        Value::Integer(int4),
+    ]))
+}
+
+/// $digest_md5_hex(text_to_digest) - Returns MD5 digest as a 32 character hex string
+pub fn digest_md5_hex(args: &[Value]) -> Result<Value> {
+    if args.len() != 1 {
+        return Err(ExecutionError::FunctionError(format!(
+            "digest_md5_hex: expected 1 argument, got {}",
             args.len()
         )));
     }
@@ -916,6 +975,7 @@ mod tests {
 
     #[test]
     fn test_html_encode() {
+        // Test that the 4 ESI-specified chars ARE encoded: > < & "
         match html_encode(&[Value::Text("<div>".into())]) {
             Ok(value) => assert_eq!(value, Value::Text("&lt;div&gt;".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
@@ -928,6 +988,29 @@ mod tests {
             Ok(value) => assert_eq!(value, Value::Text("&quot;quoted&quot;".into())),
             Err(err) => panic!("Unexpected error: {:?}", err),
         };
+
+        // Test that ONLY the 4 ESI-specified chars are encoded (no false positives)
+        match html_encode(&[Value::Text("hello'world".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("hello'world".into())), // ' should NOT be encoded
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        };
+        match html_encode(&[Value::Text("café".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("café".into())), // Unicode should NOT be encoded
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        };
+        match html_encode(&[Value::Text("line1\nline2\ttab".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("line1\nline2\ttab".into())), // Whitespace should NOT be encoded
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        };
+        match html_encode(&[Value::Text("@#$%+=?/".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("@#$%+=?/".into())), // Special chars should NOT be encoded
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        };
+        match html_encode(&[Value::Text("123 456".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("123 456".into())), // Numbers and spaces should NOT be encoded
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        };
+
         match html_encode(&[Value::Integer(123), Value::Integer(456)]) {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
@@ -1120,6 +1203,45 @@ mod tests {
                 err.to_string(),
                 ExecutionError::FunctionError(
                     "base64_encode: expected 1 argument, got 0".to_string()
+                )
+                .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_base64_decode() {
+        // Basic decode
+        match base64_decode(&[Value::Text("aGk=".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("hi".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        // Decode longer text
+        match base64_decode(&[Value::Text("SGVsbG8gV29ybGQh".into())]) {
+            Ok(value) => assert_eq!(value, Value::Text("Hello World!".into())),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        // Null handling
+        match base64_decode(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Null),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        // Invalid base64
+        match base64_decode(&[Value::Text("not-valid-base64!@#".into())]) {
+            Ok(_) => panic!("Expected error for invalid base64"),
+            Err(err) => assert!(err.to_string().contains("invalid base64")),
+        }
+
+        // Wrong argument count
+        match base64_decode(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError(
+                    "base64_decode: expected 1 argument, got 0".to_string()
                 )
                 .to_string()
             ),
@@ -1419,8 +1541,44 @@ mod tests {
     }
 
     #[test]
-    fn test_md5_digest() {
-        match md5_digest(&[Value::Text("hello".into())]) {
+    fn test_digest_md5() {
+        // Test that digest_md5 returns a list of 4 signed integers
+        match digest_md5(&[Value::Text("hello".into())]) {
+            Ok(Value::List(ints)) => {
+                assert_eq!(ints.len(), 4);
+                // Expected MD5 for "hello": 5d41402abc4b2a76b9719d911017c592
+                // As 4 x i32 little-endian:
+                // bytes[0-3]: 5d 41 40 2a -> 0x2a404150
+                // bytes[4-7]: bc 4b 2a 76 -> 0x762a4bbc
+                // bytes[8-11]: b9 71 9d 91 -> 0x919d71b9
+                // bytes[12-15]: 10 17 c5 92 -> 0x92c51710
+                assert!(matches!(ints[0], Value::Integer(_)));
+                assert!(matches!(ints[1], Value::Integer(_)));
+                assert!(matches!(ints[2], Value::Integer(_)));
+                assert!(matches!(ints[3], Value::Integer(_)));
+            }
+            other => panic!("Expected list of 4 integers, got: {:?}", other),
+        }
+
+        match digest_md5(&[Value::Null]) {
+            Ok(value) => assert_eq!(value, Value::Null),
+            Err(err) => panic!("Unexpected error: {:?}", err),
+        }
+
+        match digest_md5(&[]) {
+            Ok(_) => panic!("Expected error, but got Ok"),
+            Err(err) => assert_eq!(
+                err.to_string(),
+                ExecutionError::FunctionError("digest_md5: expected 1 argument, got 0".to_string())
+                    .to_string()
+            ),
+        }
+    }
+
+    #[test]
+    fn test_digest_md5_hex() {
+        // Test that digest_md5_hex returns a 32 character hex string
+        match digest_md5_hex(&[Value::Text("hello".into())]) {
             Ok(value) => assert_eq!(
                 value,
                 Value::Text("5d41402abc4b2a76b9719d911017c592".into())
@@ -1428,17 +1586,19 @@ mod tests {
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
 
-        match md5_digest(&[Value::Null]) {
+        match digest_md5_hex(&[Value::Null]) {
             Ok(value) => assert_eq!(value, Value::Null),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
 
-        match md5_digest(&[]) {
+        match digest_md5_hex(&[]) {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("md5_digest: expected 1 argument, got 0".to_string())
-                    .to_string()
+                ExecutionError::FunctionError(
+                    "digest_md5_hex: expected 1 argument, got 0".to_string()
+                )
+                .to_string()
             ),
         }
     }
