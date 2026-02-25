@@ -1547,9 +1547,12 @@ fn esi_variable(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     delimited(tag(b"$("), esi_var_name, tag(b")"))(input)
 }
 
+/// Parse all binary operators
+///
+/// All operators at same precedence level, evaluated left-to-right
 fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
     alt((
-        // Try longer operators first
+        // Longer operators first to avoid partial matches
         map(tag(b"matches_i"), |_| Operator::MatchesInsensitive),
         map(tag(b"matches"), |_| Operator::Matches),
         map(tag(b"has_i"), |_| Operator::HasInsensitive),
@@ -1610,13 +1613,10 @@ fn list_literal(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     )(input)
 }
 
+/// Parse primary expressions (highest precedence atoms)
+/// Handles: variables, functions, literals, grouped expressions
 fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     alt((
-        // Parse negation: !expr
-        map(
-            preceded(tag(b"!"), preceded(multispace0, primary_expr)),
-            |expr| Expr::Not(Box::new(expr)),
-        ),
         // Parse grouped expression: (expr)
         delimited(
             tag(b"("),
@@ -1635,23 +1635,40 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     ))(input)
 }
 
+/// Entry point for expression parsing
+///
+/// Per ESI spec: "Operands associate from left to right"
+/// All operators at same precedence, evaluated left-to-right
+/// Format: unary_expr (operator unary_expr)*
+/// Left-associative: A op B op C → (A op B) op C
 fn expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    let (rest, exp) = primary_expr(input)?;
+    let (input, first) = unary_expr(input)?;
 
-    if let Ok((rest, (operator, right_exp))) =
-        tuple((delimited(multispace0, operator, multispace0), expr))(rest)
-    {
-        Ok((
-            rest,
-            Expr::Comparison {
-                left: Box::new(exp),
-                operator,
-                right: Box::new(right_exp),
-            },
-        ))
-    } else {
-        Ok((rest, exp))
-    }
+    fold_many0(
+        tuple((delimited(multispace0, operator, multispace0), unary_expr)),
+        move || first.clone(),
+        |left, (op, right)| Expr::Comparison {
+            left: Box::new(left),
+            operator: op,
+            right: Box::new(right),
+        },
+    )(input)
+}
+
+/// Parse unary expressions (!, highest precedence for operators)
+///
+/// Format: ! unary_expr | primary_expr
+/// Handles negation recursively (supports !!expr, !!!expr, etc.)
+fn unary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
+    alt((
+        // Parse negation: !expr (recursively handles multiple !)
+        map(
+            preceded(tag(b"!"), preceded(multispace0, unary_expr)),
+            |expr| Expr::Not(Box::new(expr)),
+        ),
+        // Otherwise parse primary expression
+        primary_expr,
+    ))(input)
 }
 
 #[cfg(test)]
@@ -2518,5 +2535,168 @@ exception!
         let (rest, expr) = result.unwrap();
         assert_eq!(rest, b"");
         assert!(matches!(expr, Expr::DictLiteral(_)));
+    }
+
+    #[test]
+    fn test_left_to_right_evaluation() {
+        // Test 1: Left-to-right evaluation per ESI spec
+        // $(a) && $(b) || $(c) should parse as ($(a) && $(b)) || $(c)
+        let input = b"$(a) && $(b) || $(c)";
+        let result = expr(input);
+        assert!(
+            result.is_ok(),
+            "Failed to parse '$(a) && $(b) || $(c)': {:?}",
+            result
+        );
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have OR at the top level (last operator evaluated)
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::Or,
+                left,
+                right,
+            } => {
+                // Left should be: $(a) && $(b) (evaluated first, left-to-right)
+                match *left {
+                    Expr::Comparison {
+                        operator: Operator::And,
+                        ..
+                    } => {}
+                    _ => panic!("Expected AND on left side, got {:?}", left),
+                }
+                // Right should be: $(c)
+                match *right {
+                    Expr::Variable(name, None, None) if name == "c" => {}
+                    _ => panic!("Expected variable 'c' on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected OR at top level, got {:?}", parsed),
+        }
+
+        // Test 2: $(a) || $(b) && $(c) should parse as ($(a) || $(b)) && $(c) [left-to-right]
+        let input = b"$(a) || $(b) && $(c)";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '$(a) || $(b) && $(c)'");
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have AND at the top level (last operator, left-to-right)
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::And,
+                left,
+                right,
+            } => {
+                // Left should be: $(a) || $(b) (evaluated first)
+                match *left {
+                    Expr::Comparison {
+                        operator: Operator::Or,
+                        ..
+                    } => {}
+                    _ => panic!("Expected OR on left side, got {:?}", left),
+                }
+                // Right should be: $(c)
+                match *right {
+                    Expr::Variable(name, None, None) if name == "c" => {}
+                    _ => panic!("Expected variable 'c' on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected AND at top level, got {:?}", parsed),
+        }
+
+        // Test 3: Unary NOT binds tighter than binary operators
+        // !$(a) && $(b) should parse as (!$(a)) && $(b)
+        let input = b"!$(a) && $(b)";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '!$(a) && $(b)'");
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have AND at the top level
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::And,
+                left,
+                right,
+            } => {
+                // Left should be: !$(a)
+                match *left {
+                    Expr::Not(_) => {}
+                    _ => panic!("Expected NOT on left side, got {:?}", left),
+                }
+                // Right should be: $(b)
+                match *right {
+                    Expr::Variable(name, None, None) if name == "b" => {}
+                    _ => panic!("Expected variable 'b' on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected AND at top level, got {:?}", parsed),
+        }
+
+        // Test 4: Left-to-right with multiple operators
+        // $(a) == $(b) || $(c) should parse as ($(a) == $(b)) || $(c)
+        let input = b"$(a) == $(b) || $(c)";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '$(a) == $(b) || $(c)'");
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have OR at the top level (last operator)
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::Or,
+                left,
+                right,
+            } => {
+                // Left should be: $(a) == $(b)
+                match *left {
+                    Expr::Comparison {
+                        operator: Operator::Equals,
+                        ..
+                    } => {}
+                    _ => panic!("Expected EQUALS on left side, got {:?}", left),
+                }
+                // Right should be: $(c)
+                match *right {
+                    Expr::Variable(name, None, None) if name == "c" => {}
+                    _ => panic!("Expected variable 'c' on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected OR at top level, got {:?}", parsed),
+        }
+
+        // Test 5: Parentheses override left-to-right evaluation
+        // $(a) && ($(b) || $(c)) should respect the parentheses
+        let input = b"$(a) && ($(b) || $(c))";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '$(a) && ($(b) || $(c))'");
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have AND at the top level
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::And,
+                left,
+                right,
+            } => {
+                // Left should be: $(a)
+                match *left {
+                    Expr::Variable(name, None, None) if name == "a" => {}
+                    _ => panic!("Expected variable 'a' on left side, got {:?}", left),
+                }
+                // Right should be: $(b) || $(c) (grouped by parentheses)
+                match *right {
+                    Expr::Comparison {
+                        operator: Operator::Or,
+                        ..
+                    } => {}
+                    _ => panic!("Expected OR on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected AND at top level, got {:?}", parsed),
+        }
     }
 }
