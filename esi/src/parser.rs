@@ -79,8 +79,7 @@ impl ParseResult {
 
 /// Zero-copy parse loop that threads Bytes through the parser chain
 fn parse_loop<'a, F>(
-    original: &Bytes,
-    input: &'a [u8],
+    original: &'a Bytes,
     mut parser: F,
     incomplete_strategy: &ParsingMode,
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>>
@@ -88,7 +87,7 @@ where
     F: FnMut(&Bytes, &'a [u8]) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>>,
 {
     let mut result = Vec::new();
-    let mut remaining = input;
+    let mut remaining = original.as_ref();
 
     loop {
         match parser(original, remaining) {
@@ -113,12 +112,10 @@ where
                     }
                     ParsingMode::Complete => {
                         // Treat remaining bytes as text - refcount increment, zero-copy
-                        if remaining.is_empty() {
-                            Ok((remaining, result))
-                        } else {
+                        if !remaining.is_empty() {
                             result.push(Element::Text(slice_as_bytes(original, remaining)));
-                            Ok((&remaining[remaining.len()..], result))
                         }
+                        Ok((&remaining[remaining.len()..], result))
                     }
                 };
             }
@@ -148,7 +145,7 @@ where
 /// - `Err(Incomplete)` - Parser needs more data to continue
 /// - `Err(Error)` - Parse error occurred
 pub fn parse(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    parse_loop(input, input.as_ref(), element, &ParsingMode::Streaming)
+    parse_loop(input, element, &ParsingMode::Streaming)
 }
 
 /// Parse remaining input when no more data will arrive (at EOF)
@@ -162,7 +159,7 @@ pub fn parse(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
 ///   converted to `Text` elements
 /// - `Err(Error)` - Parse error occurred (but not `Incomplete`)
 pub fn parse_remainder(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
-    parse_loop(input, input.as_ref(), element, &ParsingMode::Complete)
+    parse_loop(input, element, &ParsingMode::Complete)
 }
 
 // ============================================================================
