@@ -4,7 +4,11 @@ use fastly::Request;
 use regex::RegexBuilder;
 use std::{collections::HashMap, fmt::Display};
 
-use crate::{functions, parser_types, ExecutionError, Result};
+use crate::{
+    functions,
+    parser_types::{Element, Expr, Operator},
+    ExecutionError, Result,
+};
 
 /// Evaluates a nom-parsed expression directly without re-lexing/parsing
 ///
@@ -18,12 +22,12 @@ use crate::{functions, parser_types, ExecutionError, Result};
 ///
 /// # Returns
 /// * `Result<Value>` - The evaluated expression result or an error
-pub fn eval_expr(expr: &parser_types::Expr, ctx: &mut EvalContext) -> Result<Value> {
+pub fn eval_expr(expr: &Expr, ctx: &mut EvalContext) -> Result<Value> {
     match expr {
-        parser_types::Expr::Integer(i) => Ok(Value::Integer(*i)),
-        parser_types::Expr::String(Some(s)) => Ok(Value::Text(Bytes::from(s.clone()))),
-        parser_types::Expr::String(None) => Ok(Value::Text(Bytes::new())),
-        parser_types::Expr::Variable(name, key, default) => {
+        Expr::Integer(i) => Ok(Value::Integer(*i)),
+        Expr::String(Some(s)) => Ok(Value::Text(Bytes::from(s.clone()))),
+        Expr::String(None) => Ok(Value::Text(Bytes::new())),
+        Expr::Variable(name, key, default) => {
             // Evaluate the key expression if present
             let evaluated_key = if let Some(key_expr) = key {
                 let key_result = eval_expr(key_expr, ctx)?;
@@ -43,182 +47,27 @@ pub fn eval_expr(expr: &parser_types::Expr, ctx: &mut EvalContext) -> Result<Val
 
             Ok(value)
         }
-        parser_types::Expr::Comparison {
+        Expr::Comparison {
             left,
             operator,
             right,
         } => {
             let left_val = eval_expr(left, ctx)?;
             let right_val = eval_expr(right, ctx)?;
-
-            match operator {
-                parser_types::Operator::Matches | parser_types::Operator::MatchesInsensitive => {
-                    let test = left_val.to_string();
-                    let pattern = right_val.to_string();
-
-                    let re = if *operator == parser_types::Operator::Matches {
-                        RegexBuilder::new(&pattern).build()?
-                    } else {
-                        RegexBuilder::new(&pattern).case_insensitive(true).build()?
-                    };
-
-                    if let Some(captures) = re.captures(&test) {
-                        for (i, cap) in captures.iter().enumerate() {
-                            let capval = cap.map_or(Value::Null, |s| {
-                                Value::Text(Bytes::from(s.as_str().to_string()))
-                            });
-                            ctx.set_variable(
-                                &ctx.match_name.clone(),
-                                Some(&i.to_string()),
-                                capval,
-                            )?;
-                        }
-                        Ok(Value::Boolean(true))
-                    } else {
-                        Ok(Value::Boolean(false))
-                    }
-                }
-                parser_types::Operator::Has => {
-                    let haystack = left_val.to_string();
-                    let needle = right_val.to_string();
-                    Ok(Value::Boolean(haystack.contains(&needle)))
-                }
-                parser_types::Operator::HasInsensitive => {
-                    let haystack = left_val.to_string().to_lowercase();
-                    let needle = right_val.to_string().to_lowercase();
-                    Ok(Value::Boolean(haystack.contains(&needle)))
-                }
-                parser_types::Operator::Equals => {
-                    // Try numeric comparison first, then string comparison
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        Ok(Value::Boolean(l == r))
-                    } else {
-                        Ok(Value::Boolean(
-                            left_val.to_string() == right_val.to_string(),
-                        ))
-                    }
-                }
-                parser_types::Operator::NotEquals => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        Ok(Value::Boolean(l != r))
-                    } else {
-                        Ok(Value::Boolean(
-                            left_val.to_string() != right_val.to_string(),
-                        ))
-                    }
-                }
-                parser_types::Operator::LessThan => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        Ok(Value::Boolean(l < r))
-                    } else {
-                        Ok(Value::Boolean(left_val.to_string() < right_val.to_string()))
-                    }
-                }
-                parser_types::Operator::LessThanOrEqual => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        Ok(Value::Boolean(l <= r))
-                    } else {
-                        Ok(Value::Boolean(
-                            left_val.to_string() <= right_val.to_string(),
-                        ))
-                    }
-                }
-                parser_types::Operator::GreaterThan => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        Ok(Value::Boolean(l > r))
-                    } else {
-                        Ok(Value::Boolean(left_val.to_string() > right_val.to_string()))
-                    }
-                }
-                parser_types::Operator::GreaterThanOrEqual => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        Ok(Value::Boolean(l >= r))
-                    } else {
-                        Ok(Value::Boolean(
-                            left_val.to_string() >= right_val.to_string(),
-                        ))
-                    }
-                }
-                parser_types::Operator::And => {
-                    Ok(Value::Boolean(left_val.to_bool() && right_val.to_bool()))
-                }
-                parser_types::Operator::Or => {
-                    Ok(Value::Boolean(left_val.to_bool() || right_val.to_bool()))
-                }
-                // Arithmetic operators
-                parser_types::Operator::Add => {
-                    // Try numeric addition first, then string concatenation
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        Ok(Value::Integer(l + r))
-                    } else {
-                        // String/list concatenation
-                        let result = format!("{left_val}{right_val}");
-                        Ok(Value::Text(Bytes::from(result)))
-                    }
-                }
-                parser_types::Operator::Subtract => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        Ok(Value::Integer(l - r))
-                    } else {
-                        Err(ExecutionError::ExpressionError(
-                            "Subtraction requires numeric operands".to_string(),
-                        ))
-                    }
-                }
-                parser_types::Operator::Multiply => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        Ok(Value::Integer(l * r))
-                    } else {
-                        // Could implement string repetition here (e.g., 3 * "abc" = "abcabcabc")
-                        Err(ExecutionError::ExpressionError(
-                            "Multiplication requires numeric operands".to_string(),
-                        ))
-                    }
-                }
-                parser_types::Operator::Divide => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        if *r == 0 {
-                            Err(ExecutionError::ExpressionError(
-                                "Division by zero".to_string(),
-                            ))
-                        } else {
-                            Ok(Value::Integer(l / r))
-                        }
-                    } else {
-                        Err(ExecutionError::ExpressionError(
-                            "Division requires numeric operands".to_string(),
-                        ))
-                    }
-                }
-                parser_types::Operator::Modulo => {
-                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
-                        if *r == 0 {
-                            Err(ExecutionError::ExpressionError(
-                                "Modulo by zero".to_string(),
-                            ))
-                        } else {
-                            Ok(Value::Integer(l % r))
-                        }
-                    } else {
-                        Err(ExecutionError::ExpressionError(
-                            "Modulo requires numeric operands".to_string(),
-                        ))
-                    }
-                }
-            }
+            eval_comparison(&left_val, &right_val, operator, ctx)
         }
-        parser_types::Expr::Call(func_name, args) => {
+        Expr::Call(func_name, args) => {
             let mut values = Vec::new();
             for arg in args {
                 values.push(eval_expr(arg, ctx)?);
             }
             call_dispatch(func_name, &values, ctx)
         }
-        parser_types::Expr::Not(expr) => {
+        Expr::Not(expr) => {
             let inner_value = eval_expr(expr, ctx)?;
             Ok(Value::Boolean(!inner_value.to_bool()))
         }
-        parser_types::Expr::DictLiteral(pairs) => {
+        Expr::DictLiteral(pairs) => {
             let mut map = HashMap::new();
             for (key_expr, val_expr) in pairs {
                 let key = eval_expr(key_expr, ctx)?;
@@ -227,36 +76,205 @@ pub fn eval_expr(expr: &parser_types::Expr, ctx: &mut EvalContext) -> Result<Val
             }
             Ok(Value::Dict(map))
         }
-        parser_types::Expr::ListLiteral(items) => {
+        Expr::ListLiteral(items) => {
             let mut values = Vec::new();
             for item_expr in items {
                 values.push(eval_expr(item_expr, ctx)?);
             }
             Ok(Value::List(values))
         }
-        parser_types::Expr::Interpolated(elements) => {
+        Expr::Interpolated(elements) => {
             // Evaluate each element and concatenate the results
             // This handles compound expressions like: prefix$(VAR)suffix
             let mut result = String::new();
             for element in elements {
                 match element {
-                    parser_types::Element::Text(text) => {
+                    Element::Text(text) => {
                         result.push_str(&String::from_utf8_lossy(text.as_ref()));
                     }
-                    parser_types::Element::Html(html) => {
+                    Element::Html(html) => {
                         result.push_str(&String::from_utf8_lossy(html.as_ref()));
                     }
-                    parser_types::Element::Expr(expr) => {
+                    Element::Expr(expr) => {
                         let value = eval_expr(expr, ctx)?;
                         result.push_str(&value.to_string());
                     }
-                    parser_types::Element::Esi(_) => {
+                    Element::Esi(_) => {
                         // ESI tags in interpolated expressions should not happen
                         // but if they do, ignore them
                     }
                 }
             }
             Ok(Value::Text(Bytes::from(result)))
+        }
+    }
+}
+
+/// Evaluates a comparison/operator expression
+///
+/// This helper function handles all binary operators including comparison, logical,
+/// arithmetic, string matching, and containment operators. It applies the appropriate
+/// evaluation logic based on the operator type and operand values.
+///
+/// # Arguments
+/// * `left_val` - The evaluated left operand
+/// * `right_val` - The evaluated right operand
+/// * `operator` - The operator to apply
+/// * `ctx` - Evaluation context (needed for regex captures)
+///
+/// # Returns
+/// * `Result<Value>` - The result of applying the operator
+fn eval_comparison(
+    left_val: &Value,
+    right_val: &Value,
+    operator: &Operator,
+    ctx: &mut EvalContext,
+) -> Result<Value> {
+    match operator {
+        Operator::Matches | Operator::MatchesInsensitive => {
+            let test = left_val.to_string();
+            let pattern = right_val.to_string();
+
+            let re = if *operator == Operator::Matches {
+                RegexBuilder::new(&pattern).build()?
+            } else {
+                RegexBuilder::new(&pattern).case_insensitive(true).build()?
+            };
+
+            if let Some(captures) = re.captures(&test) {
+                for (i, cap) in captures.iter().enumerate() {
+                    let capval = cap.map_or(Value::Null, |s| {
+                        Value::Text(Bytes::from(s.as_str().to_string()))
+                    });
+                    ctx.set_variable(&ctx.match_name.clone(), Some(&i.to_string()), capval)?;
+                }
+                Ok(Value::Boolean(true))
+            } else {
+                Ok(Value::Boolean(false))
+            }
+        }
+        Operator::Has => {
+            let haystack = left_val.to_string();
+            let needle = right_val.to_string();
+            Ok(Value::Boolean(haystack.contains(&needle)))
+        }
+        Operator::HasInsensitive => {
+            let haystack = left_val.to_string().to_lowercase();
+            let needle = right_val.to_string().to_lowercase();
+            Ok(Value::Boolean(haystack.contains(&needle)))
+        }
+        Operator::Equals => {
+            // Try numeric comparison first, then string comparison
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                Ok(Value::Boolean(l == r))
+            } else {
+                Ok(Value::Boolean(
+                    left_val.to_string() == right_val.to_string(),
+                ))
+            }
+        }
+        Operator::NotEquals => {
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                Ok(Value::Boolean(l != r))
+            } else {
+                Ok(Value::Boolean(
+                    left_val.to_string() != right_val.to_string(),
+                ))
+            }
+        }
+        Operator::LessThan => {
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                Ok(Value::Boolean(l < r))
+            } else {
+                Ok(Value::Boolean(left_val.to_string() < right_val.to_string()))
+            }
+        }
+        Operator::LessThanOrEqual => {
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                Ok(Value::Boolean(l <= r))
+            } else {
+                Ok(Value::Boolean(
+                    left_val.to_string() <= right_val.to_string(),
+                ))
+            }
+        }
+        Operator::GreaterThan => {
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                Ok(Value::Boolean(l > r))
+            } else {
+                Ok(Value::Boolean(left_val.to_string() > right_val.to_string()))
+            }
+        }
+        Operator::GreaterThanOrEqual => {
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                Ok(Value::Boolean(l >= r))
+            } else {
+                Ok(Value::Boolean(
+                    left_val.to_string() >= right_val.to_string(),
+                ))
+            }
+        }
+        Operator::And => Ok(Value::Boolean(left_val.to_bool() && right_val.to_bool())),
+        Operator::Or => Ok(Value::Boolean(left_val.to_bool() || right_val.to_bool())),
+        // Arithmetic operators
+        Operator::Add => {
+            // Try numeric addition first, then string concatenation
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                Ok(Value::Integer(l + r))
+            } else {
+                // String/list concatenation
+                let result = format!("{left_val}{right_val}");
+                Ok(Value::Text(Bytes::from(result)))
+            }
+        }
+        Operator::Subtract => {
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                Ok(Value::Integer(l - r))
+            } else {
+                Err(ExecutionError::ExpressionError(
+                    "Subtraction requires numeric operands".to_string(),
+                ))
+            }
+        }
+        Operator::Multiply => {
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                Ok(Value::Integer(l * r))
+            } else {
+                // Could implement string repetition here (e.g., 3 * "abc" = "abcabcabc")
+                Err(ExecutionError::ExpressionError(
+                    "Multiplication requires numeric operands".to_string(),
+                ))
+            }
+        }
+        Operator::Divide => {
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                if *r == 0 {
+                    Err(ExecutionError::ExpressionError(
+                        "Division by zero".to_string(),
+                    ))
+                } else {
+                    Ok(Value::Integer(l / r))
+                }
+            } else {
+                Err(ExecutionError::ExpressionError(
+                    "Division requires numeric operands".to_string(),
+                ))
+            }
+        }
+        Operator::Modulo => {
+            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
+                if *r == 0 {
+                    Err(ExecutionError::ExpressionError(
+                        "Modulo by zero".to_string(),
+                    ))
+                } else {
+                    Ok(Value::Integer(l % r))
+                }
+            } else {
+                Err(ExecutionError::ExpressionError(
+                    "Modulo requires numeric operands".to_string(),
+                ))
+            }
         }
     }
 }

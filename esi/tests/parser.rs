@@ -2,13 +2,13 @@
 // These tests verify that the parser correctly handles ESI tags and produces the expected AST
 
 use bytes::Bytes;
-use esi::parse_complete;
+use esi::parse_remainder;
 
 #[test]
 fn test_parse_basic_include() {
     let input = br#"<html><body><esi:include src="https://example.com/hello"/></body></html>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -32,7 +32,7 @@ fn test_parse_basic_include() {
 fn test_parse_include_with_alt_and_onerror() {
     let input = br#"<esi:include src="abc" alt="def" onerror="continue"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -76,7 +76,7 @@ fn test_parse_open_include() {
 fn test_parse_include_with_onerror() {
     let input = br#"<esi:include src="/_fragments/content.html" onerror="continue"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -98,7 +98,7 @@ fn test_parse_include_with_single_param() {
     <esi:param name="foo" value="bar"/>
 </esi:include>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -124,7 +124,7 @@ fn test_parse_include_with_multiple_params() {
     <esi:param name="id" value="123"/>
 </esi:include>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -147,7 +147,7 @@ fn test_parse_include_with_multiple_params() {
 fn test_parse_include_self_closing_has_no_params() {
     let input = br#"<esi:include src="/test"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -167,7 +167,7 @@ fn test_parse_include_with_query_string_variable() {
     let input =
         br#"<esi:include src="http://search.akamai.com/search?query=$(QUERY_STRING{'query'})"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -188,7 +188,7 @@ fn test_parse_param_value_with_variable_expression() {
 <esi:param name="foo" value="$(var1)"/>
 </esi:include>"#;
     let bytes = Bytes::from_static(input);
-    let result = parse_complete(&bytes);
+    let result = parse_remainder(&bytes);
 
     assert!(
         result.is_ok(),
@@ -238,7 +238,7 @@ fn test_parse_try_with_attempt_and_except() {
 </esi:try>"#;
 
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Find the Try tag
@@ -296,7 +296,7 @@ fn test_parse_nested_try() {
 </esi:try>"#;
 
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Find outer Try tag
@@ -345,7 +345,7 @@ fn test_parse_nested_try() {
 fn test_parse_assign() {
     let input = br#"<esi:assign name="foo" value="bar"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -375,7 +375,7 @@ fn test_parse_assign() {
 fn test_parse_assign_short_with_integer() {
     let input = br#"<esi:assign name="count" value="123"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -399,7 +399,7 @@ fn test_parse_assign_short_with_integer() {
 fn test_parse_assign_short_with_variable() {
     let input = br#"<esi:assign name="copy" value="$(HTTP_HOST)"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -420,7 +420,7 @@ fn test_parse_assign_short_with_variable() {
 fn test_parse_assign_short_with_quoted_string() {
     let input = br#"<esi:assign name="text" value="'hello world'"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -443,7 +443,7 @@ fn test_parse_assign_long_form() {
         'This is a long form assign'
     </esi:assign>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -467,7 +467,7 @@ fn test_parse_assign_long_form() {
 fn test_parse_assign_long_with_variable() {
     let input = br#"<esi:assign name="host">$(HTTP_HOST)</esi:assign>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -488,7 +488,7 @@ fn test_parse_assign_long_with_variable() {
 fn test_parse_assign_with_function() {
     let input = br#"<esi:assign name="result" value="$url_encode('hello world')"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -514,7 +514,7 @@ fn test_parse_assign_long_with_interpolation() {
     // Test compound expression with mixed text and variable
     let input = br#"<esi:assign name="message">Hello $(name)!</esi:assign>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -575,7 +575,7 @@ fn test_parse_assign_long_with_multiple_variables() {
     // Test compound expression with multiple variables
     let input = br#"<esi:assign name="full_name">$(first) $(last)</esi:assign>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -607,7 +607,7 @@ fn test_parse_assign_long_with_multiple_variables() {
 fn test_parse_vars_short_form() {
     let input = br#"<esi:vars name="$(foo)"/>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -635,7 +635,7 @@ fn test_parse_vars_short_form() {
 fn test_parse_vars_long_form() {
     let input = br#"<esi:vars>$(foo)</esi:vars>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -672,7 +672,7 @@ fn test_parse_choose_when_otherwise() {
 </esi:choose>"#;
 
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
     assert_eq!(remaining, b"");
 
     let choose_found = elements.iter().any(|element| {
@@ -724,7 +724,7 @@ fn test_parse_choose_multiple_when() {
 </esi:choose>"#;
 
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Verify we have multiple when branches using the new structure
@@ -765,7 +765,7 @@ fn test_parse_remove() {
     let input =
         br#"<html><esi:remove>This should not appear</esi:remove><body>visible</body></html>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -802,7 +802,7 @@ fn test_parse_remove() {
 fn test_parse_comment() {
     let input = br#"<html><esi:comment text="This is a comment"/><body>visible</body></html>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -824,7 +824,7 @@ fn test_parse_comment() {
 fn test_parse_text_tag() {
     let input = br#"<esi:text>This <esi:include src="test"/> should appear as-is</esi:text>"#;
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
@@ -860,7 +860,7 @@ fn test_parse_mixed_content() {
 </html>"#;
 
     let bytes = Bytes::from_static(input);
-    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Should have HTML, expressions, ESI tags, and text
@@ -888,7 +888,7 @@ fn test_parse_include_with_esi_attributes() {
     // Test TTL attribute
     let input = br#"<esi:include src="/fragment" ttl="120m"/>"#;
     let bytes = Bytes::from_static(input);
-    let result = parse_complete(&bytes);
+    let result = parse_remainder(&bytes);
 
     match result {
         Ok((remaining, elements)) => {

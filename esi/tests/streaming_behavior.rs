@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use esi::{parse, parse_complete};
+use esi::{parse, parse_remainder};
 
 /// Tests to validate streaming parser behavior and the theory about delimited content
 ///
@@ -102,7 +102,7 @@ fn test_parse_complete_vs_parse_on_incomplete_input() {
     let streaming_result = parse(&bytes);
 
     // Test with complete parser
-    let complete_result = parse_complete(&bytes);
+    let complete_result = parse_remainder(&bytes);
 
     // Streaming should return Incomplete
     assert!(
@@ -189,7 +189,7 @@ fn test_parse_complete_doesnt_know_boundaries() {
     //                                                   Not valid ESI content, parser stops here
 
     let bytes = Bytes::from_static(input);
-    let result = parse_complete(&bytes);
+    let result = parse_remainder(&bytes);
 
     match result {
         Ok((remaining, elements)) => {
@@ -274,7 +274,7 @@ fn test_parse_complete_on_actually_complete_input() {
     // parse_complete should work on actually complete input
     let input = b"<esi:include src=\"/test\"/>";
     let bytes = Bytes::from_static(input);
-    let result = parse_complete(&bytes);
+    let result = parse_remainder(&bytes);
 
     match result {
         Ok((remaining, elements)) => {

@@ -21,7 +21,7 @@ use std::io::{BufRead, Write};
 use std::time::Duration;
 
 pub use crate::error::{ExecutionError as ESIError, Result};
-pub use crate::parser::{interpolated_content, parse, parse_complete, parse_expression};
+pub use crate::parser::{interpolated_content, parse, parse_expression, parse_remainder};
 
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;
@@ -359,7 +359,7 @@ impl Processor {
     /// then processing parsed elements immediately while retaining unparsed remainder.
     ///
     /// # Arguments
-    /// * `src_stream` - BufRead source containing ESI markup (streams in chunks)
+    /// * `src_stream` - `BufRead` source containing ESI markup (streams in chunks)
     /// * `output_writer` - Writer to stream processed output to (writes immediately)
     /// * `dispatch_fragment_request` - Optional handler for fragment requests
     /// * `process_fragment_response` - Optional processor for fragment responses
@@ -429,7 +429,7 @@ impl Processor {
             // Use streaming parser unless we're at EOF, then use complete parser
             let parse_result = if eof {
                 // At EOF - use complete parser which handles Incomplete by treating remainder as text
-                parser::parse_complete(&frozen)
+                parser::parse_remainder(&frozen)
             } else {
                 // Still streaming - use streaming parser
                 parser::parse(&frozen)
