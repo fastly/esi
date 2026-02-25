@@ -1642,3 +1642,99 @@ fn test_compound_expression_from_spec() {
         result4
     );
 }
+
+// Test arithmetic operators with ESI variables and expressions
+// This demonstrates the left-to-right evaluation behavior from the ESI spec
+#[test]
+fn test_arithmetic_operators_in_esi() {
+    init_logs();
+
+    // Test 1: Basic arithmetic with left-to-right evaluation
+    // 2 + 3 * 4 should evaluate left-to-right as (2 + 3) * 4 = 20, not 14
+    let input1 = r#"
+        <esi:assign name="result" value="2 + 3 * 4" />
+        <esi:vars>$(result)</esi:vars>
+    "#;
+    let req1 = Request::get("http://example.com");
+    let result1 = process_esi_document(input1, req1).expect("Processing should succeed");
+    assert_eq!(
+        result1.trim(),
+        "20",
+        "2 + 3 * 4 with left-to-right evaluation should be 20"
+    );
+
+    // Test 2: Subtraction chain with left-to-right
+    // 10 - 3 - 2 should be (10 - 3) - 2 = 5, not 10 - (3 - 2) = 9
+    let input2 = r#"
+        <esi:assign name="result" value="10 - 3 - 2" />
+        <esi:vars>$(result)</esi:vars>
+    "#;
+    let req2 = Request::get("http://example.com");
+    let result2 = process_esi_document(input2, req2).expect("Processing should succeed");
+    assert_eq!(
+        result2.trim(),
+        "5",
+        "10 - 3 - 2 with left-to-right evaluation should be 5"
+    );
+
+    // Test 3: Division and modulo
+    let input3 = r#"
+        <esi:assign name="div" value="20 / 4" />
+        <esi:assign name="mod" value="10 % 3" />
+        <esi:vars>$(div),$(mod)</esi:vars>
+    "#;
+    let req3 = Request::get("http://example.com");
+    let result3 = process_esi_document(input3, req3).expect("Processing should succeed");
+    assert_eq!(
+        result3.trim(),
+        "5,1",
+        "Division and modulo should work correctly"
+    );
+
+    // Test 4: Arithmetic in conditions
+    // 5 + 3 > 7 should evaluate as (5 + 3) > 7 = true
+    let input4 = r#"
+        <esi:choose>
+            <esi:when test="5 + 3 > 7">
+                arithmetic true
+            </esi:when>
+            <esi:otherwise>
+                arithmetic false
+            </esi:otherwise>
+        </esi:choose>
+    "#;
+    let req4 = Request::get("http://example.com");
+    let result4 = process_esi_document(input4, req4).expect("Processing should succeed");
+    assert!(
+        result4.contains("arithmetic true"),
+        "5 + 3 > 7 should evaluate to true"
+    );
+
+    // Test 5: Parentheses override left-to-right
+    // 2 * (3 + 4) should respect parentheses = 2 * 7 = 14
+    let input5 = r#"
+        <esi:assign name="result" value="2 * (3 + 4)" />
+        <esi:vars>$(result)</esi:vars>
+    "#;
+    let req5 = Request::get("http://example.com");
+    let result5 = process_esi_document(input5, req5).expect("Processing should succeed");
+    assert_eq!(
+        result5.trim(),
+        "14",
+        "2 * (3 + 4) should respect parentheses and equal 14"
+    );
+
+    // Test 6: Complex arithmetic expression
+    // 100 / 5 - 2 * 3 with left-to-right should be ((100 / 5) - 2) * 3 = (20 - 2) * 3 = 54
+    let input6 = r#"
+        <esi:assign name="result" value="100 / 5 - 2 * 3" />
+        <esi:vars>$(result)</esi:vars>
+    "#;
+    let req6 = Request::get("http://example.com");
+    let result6 = process_esi_document(input6, req6).expect("Processing should succeed");
+    assert_eq!(
+        result6.trim(),
+        "54",
+        "100 / 5 - 2 * 3 with left-to-right evaluation should be 54"
+    );
+}

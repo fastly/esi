@@ -145,6 +145,66 @@ pub fn eval_expr(expr: &parser_types::Expr, ctx: &mut EvalContext) -> Result<Val
                 parser_types::Operator::Or => {
                     Ok(Value::Boolean(left_val.to_bool() || right_val.to_bool()))
                 }
+                // Arithmetic operators
+                parser_types::Operator::Add => {
+                    // Try numeric addition first, then string concatenation
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        Ok(Value::Integer(l + r))
+                    } else {
+                        // String/list concatenation
+                        let result = format!("{left_val}{right_val}");
+                        Ok(Value::Text(Bytes::from(result)))
+                    }
+                }
+                parser_types::Operator::Subtract => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        Ok(Value::Integer(l - r))
+                    } else {
+                        Err(ExecutionError::ExpressionError(
+                            "Subtraction requires numeric operands".to_string(),
+                        ))
+                    }
+                }
+                parser_types::Operator::Multiply => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        Ok(Value::Integer(l * r))
+                    } else {
+                        // Could implement string repetition here (e.g., 3 * "abc" = "abcabcabc")
+                        Err(ExecutionError::ExpressionError(
+                            "Multiplication requires numeric operands".to_string(),
+                        ))
+                    }
+                }
+                parser_types::Operator::Divide => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        if *r == 0 {
+                            Err(ExecutionError::ExpressionError(
+                                "Division by zero".to_string(),
+                            ))
+                        } else {
+                            Ok(Value::Integer(l / r))
+                        }
+                    } else {
+                        Err(ExecutionError::ExpressionError(
+                            "Division requires numeric operands".to_string(),
+                        ))
+                    }
+                }
+                parser_types::Operator::Modulo => {
+                    if let (Value::Integer(l), Value::Integer(r)) = (&left_val, &right_val) {
+                        if *r == 0 {
+                            Err(ExecutionError::ExpressionError(
+                                "Modulo by zero".to_string(),
+                            ))
+                        } else {
+                            Ok(Value::Integer(l % r))
+                        }
+                    } else {
+                        Err(ExecutionError::ExpressionError(
+                            "Modulo requires numeric operands".to_string(),
+                        ))
+                    }
+                }
             }
         }
         parser_types::Expr::Call(func_name, args) => {
@@ -1122,6 +1182,122 @@ mod tests {
         assert!(!Value::Text("".into()).to_bool());
         assert!(Value::Text("hello".into()).to_bool());
         assert!(!Value::Null.to_bool());
+
+        Ok(())
+    }
+    #[test]
+    fn test_numeric_vs_lexicographic_comparison() -> Result<()> {
+        // ESI spec: "If both operands are numeric, the expression is evaluated numerically.
+        // If either binary operand is non-numeric, both operands are evaluated lexicographically as strings."
+
+        // Both numeric - numeric comparison
+        let result = evaluate_expression("5 > 3", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Boolean(true));
+
+        let result = evaluate_expression("10 == 10", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Boolean(true));
+
+        // Both strings - lexicographic comparison
+        let result = evaluate_expression("'5' > '3'", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Boolean(true)); // "5" > "3" lexicographically
+
+        let result = evaluate_expression("'10' < '9'", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Boolean(true)); // "10" < "9" lexicographically (starts with "1")
+
+        // Mixed (numeric and string) - lexicographic comparison
+        // When one operand is numeric and one is string, both are compared as strings
+        let mut ctx = EvalContext::new();
+        ctx.set_variable("numVar", None, Value::Integer(10))
+            .unwrap();
+        let result = evaluate_expression("$(numVar) > '9'", &mut ctx)?;
+        // "10" > "9" lexicographically = false (because "1" < "9")
+        assert_eq!(result, Value::Boolean(false));
+
+        // String versions that look numeric
+        let result = evaluate_expression("'10' == '10'", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Boolean(true));
+
+        // Per spec: "a version reported as 3.01.23 or 1.05a will not test as a number"
+        // These should be treated as strings, not parsed as numbers
+        // Store version string in variable and compare - proves it's not parsed as number
+        let mut ctx = EvalContext::new();
+        ctx.set_variable("version", None, Value::Text("3.01.23".into()))
+            .unwrap();
+        // Compare "3.01.23" stored as a text value with "3.01.23" literal - should be equal
+        // This proves stored text values are not coerced to numbers
+        let result = evaluate_expression("$(version) == '3.01.23'", &mut ctx)?;
+        assert_eq!(result, Value::Boolean(true));
+
+        // Test that version string comparison is lexicographic, not numeric
+        // If parsed as number: 3.01 < 3.2 would be TRUE
+        // As string: "3.01.23" < "3.2" is FALSE (lexicographic: after "3.", '0' < '2' is true,
+        // but we compare "01.23" vs "2", and "01.23" > "2" because '0' > nothing after '2')
+        ctx.set_variable("version", None, Value::Text("3.01.23".into()))
+            .unwrap();
+        let result = evaluate_expression("$(version) < '3.2'", &mut ctx)?;
+        assert_eq!(result, Value::Boolean(true)); // Lexicographic: "3.01.23" < "3.2"
+
+        // Test lexicographic comparison of version strings (not numeric parsing)
+        // '2.0' < '10.0' is FALSE lexicographically (because '2' > '1')
+        // but would be TRUE if parsed numerically (2.0 < 10.0)
+        let result = evaluate_expression("'2.0' < '10.0'", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Boolean(false)); // Lexicographic: '2' > '1'
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_null_undefined_evaluate_to_false() -> Result<()> {
+        // ESI spec: "If any operand is empty or undefined, the expression is evaluated to be false."
+
+        // Empty string evaluates to false
+        let mut ctx = EvalContext::new();
+        ctx.set_variable("empty", None, Value::Text("".into()))
+            .unwrap();
+        let result = evaluate_expression("$(empty)", &mut ctx)?;
+        assert_eq!(result.to_bool(), false);
+
+        // Null evaluates to false
+        let result = evaluate_expression("$(nonexistent)", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Null);
+        assert_eq!(result.to_bool(), false);
+
+        // Empty in logical expressions
+        let result = evaluate_expression("'' && 'something'", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Boolean(false));
+
+        let result = evaluate_expression("'' || 'something'", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Boolean(true));
+
+        // Zero evaluates to false (per to_bool implementation)
+        let result = evaluate_expression("0", &mut EvalContext::new())?;
+        assert_eq!(result.to_bool(), false);
+
+        let result = evaluate_expression("1", &mut EvalContext::new())?;
+        assert_eq!(result.to_bool(), true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_triple_quoted_strings() -> Result<()> {
+        // ESI spec: "Single or triple (three single) quotes must be used to delimit string literals"
+
+        // Single quotes
+        let result = evaluate_expression("'hello'", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Text("hello".into()));
+
+        // Triple quotes
+        let result = evaluate_expression("'''hello'''", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Text("hello".into()));
+
+        // Triple quotes with single quotes inside
+        let result = evaluate_expression("'''it's working'''", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Text("it's working".into()));
+
+        // Comparison using triple quotes
+        let result = evaluate_expression("'''test''' == 'test'", &mut EvalContext::new())?;
+        assert_eq!(result, Value::Boolean(true));
 
         Ok(())
     }

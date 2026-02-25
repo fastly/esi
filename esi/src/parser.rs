@@ -833,15 +833,16 @@ fn esi_vars<'a>(
 }
 
 fn parse_vars_attributes(mut attrs: HashMap<String, String>) -> Result<ParseResult, &'static str> {
-    if let Some(name_val) = take_attr_opt(&mut attrs, "name") {
-        if let Ok((_, expr)) = parse_expression(&name_val) {
-            Ok(ParseResult::Single(Element::Expr(expr)))
-        } else {
-            Err("failed to parse expression")
-        }
-    } else {
-        Err("no name field in short form vars")
-    }
+    take_attr_opt(&mut attrs, "name").map_or_else(
+        || Err("no name field in short form vars"),
+        |name_val| {
+            if let Ok((_, expr)) = parse_expression(&name_val) {
+                Ok(ParseResult::Single(Element::Expr(expr)))
+            } else {
+                Err("failed to parse expression")
+            }
+        },
+    )
 }
 
 fn esi_vars_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
@@ -1548,8 +1549,7 @@ fn esi_variable(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 }
 
 /// Parse all binary operators
-///
-/// All operators at same precedence level, evaluated left-to-right
+/// Per ESI spec: all operators at same precedence level, evaluated left-to-right
 fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
     alt((
         // Longer operators first to avoid partial matches
@@ -1565,6 +1565,12 @@ fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
         map(tag(b">"), |_| Operator::GreaterThan),
         map(tag(b"&&"), |_| Operator::And),
         map(tag(b"||"), |_| Operator::Or),
+        // Arithmetic operators (after comparison to avoid conflicts with <=, >=)
+        map(tag(b"+"), |_| Operator::Add),
+        map(tag(b"-"), |_| Operator::Subtract),
+        map(tag(b"*"), |_| Operator::Multiply),
+        map(tag(b"/"), |_| Operator::Divide),
+        map(tag(b"%"), |_| Operator::Modulo),
     ))(input)
 }
 
@@ -2697,6 +2703,186 @@ exception!
                 }
             }
             _ => panic!("Expected AND at top level, got {:?}", parsed),
+        }
+    }
+
+    #[test]
+    fn test_arithmetic_left_to_right() {
+        // Test 1: Per ESI spec, left-to-right evaluation
+        // 2 + 3 * 4 should parse as (2 + 3) * 4 = 20 (not 14 like traditional math)
+        let input = b"2 + 3 * 4";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '2 + 3 * 4': {:?}", result);
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have * at the top level (last operator, left-to-right)
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::Multiply,
+                left,
+                right,
+            } => {
+                // Left should be: 2 + 3 (evaluated first)
+                match *left {
+                    Expr::Comparison {
+                        operator: Operator::Add,
+                        ..
+                    } => {}
+                    _ => panic!("Expected ADD on left side, got {:?}", left),
+                }
+                // Right should be: 4
+                match *right {
+                    Expr::Integer(4) => {}
+                    _ => panic!("Expected integer 4 on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected MULTIPLY at top level, got {:?}", parsed),
+        }
+
+        // Test 2: Subtraction and division
+        // 10 - 2 / 2 should parse as (10 - 2) / 2 = 4 (not 9)
+        let input = b"10 - 2 / 2";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '10 - 2 / 2'");
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have / at the top level
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::Divide,
+                left,
+                right,
+            } => {
+                // Left should be: 10 - 2
+                match *left {
+                    Expr::Comparison {
+                        operator: Operator::Subtract,
+                        ..
+                    } => {}
+                    _ => panic!("Expected SUBTRACT on left side, got {:?}", left),
+                }
+                // Right should be: 2
+                match *right {
+                    Expr::Integer(2) => {}
+                    _ => panic!("Expected integer 2 on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected DIVIDE at top level, got {:?}", parsed),
+        }
+
+        // Test 3: Modulo
+        // 7 + 3 % 2 should parse as (7 + 3) % 2 = 0
+        let input = b"7 + 3 % 2";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '7 + 3 % 2'");
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have % at the top level
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::Modulo,
+                ..
+            } => {}
+            _ => panic!("Expected MODULO at top level, got {:?}", parsed),
+        }
+
+        // Test 4: Parentheses override left-to-right
+        // 2 + (3 * 4) should respect parentheses = 2 + 12 = 14
+        let input = b"2 + (3 * 4)";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '2 + (3 * 4)'");
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have + at the top level
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::Add,
+                left,
+                right,
+            } => {
+                // Left should be: 2
+                match *left {
+                    Expr::Integer(2) => {}
+                    _ => panic!("Expected integer 2 on left side, got {:?}", left),
+                }
+                // Right should be: 3 * 4 (grouped by parentheses)
+                match *right {
+                    Expr::Comparison {
+                        operator: Operator::Multiply,
+                        ..
+                    } => {}
+                    _ => panic!("Expected MULTIPLY on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected ADD at top level, got {:?}", parsed),
+        }
+
+        // Test 5: Parentheses override left-to-right
+        // 2 + (3 * 4) should respect parentheses = 2 + 12 = 14
+        let input = b"2 + (3 * 4)";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '2 + (3 * 4)'");
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have + at the top level
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::Add,
+                left,
+                right,
+            } => {
+                // Left should be: 2
+                match *left {
+                    Expr::Integer(2) => {}
+                    _ => panic!("Expected integer 2 on left side, got {:?}", left),
+                }
+                // Right should be: 3 * 4 (grouped by parentheses)
+                match *right {
+                    Expr::Comparison {
+                        operator: Operator::Multiply,
+                        ..
+                    } => {}
+                    _ => panic!("Expected MULTIPLY on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected ADD at top level, got {:?}", parsed),
+        }
+
+        // Test 6: Arithmetic mixed with comparison
+        // 5 + 3 > 7 should parse as (5 + 3) > 7 = true
+        let input = b"5 + 3 > 7";
+        let result = expr(input);
+        assert!(result.is_ok(), "Failed to parse '5 + 3 > 7'");
+        let (rest, parsed) = result.unwrap();
+        assert_eq!(rest, b"");
+
+        // Should have > at the top level (last operator)
+        match parsed {
+            Expr::Comparison {
+                operator: Operator::GreaterThan,
+                left,
+                right,
+            } => {
+                // Left should be: 5 + 3
+                match *left {
+                    Expr::Comparison {
+                        operator: Operator::Add,
+                        ..
+                    } => {}
+                    _ => panic!("Expected ADD on left side, got {:?}", left),
+                }
+                // Right should be: 7
+                match *right {
+                    Expr::Integer(7) => {}
+                    _ => panic!("Expected integer 7 on right side, got {:?}", right),
+                }
+            }
+            _ => panic!("Expected GREATER_THAN at top level, got {:?}", parsed),
         }
     }
 }

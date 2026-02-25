@@ -105,6 +105,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Operator {
+    // Comparison operators
     Matches,
     MatchesInsensitive,
     Has,
@@ -115,6 +116,13 @@ pub enum Operator {
     LessThanOrEqual,
     GreaterThan,
     GreaterThanOrEqual,
+    // Logical operators
     And,
     Or,
+    // Arithmetic operators
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
 }

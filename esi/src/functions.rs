@@ -315,10 +315,10 @@ pub fn base64_decode(args: &[Value]) -> Result<Value> {
         .map_err(|_| ExecutionError::FunctionError("base64_decode: invalid base64".to_string()))?;
 
     // Try to convert to UTF-8 string, but return raw bytes if it fails
-    match String::from_utf8(decoded.clone()) {
-        Ok(s) => Ok(Value::Text(s.into())),
-        Err(_) => Ok(Value::Text(Bytes::from(decoded))),
-    }
+    String::from_utf8(decoded.clone()).map_or_else(
+        |_| Ok(Value::Text(Bytes::from(decoded))),
+        |s| Ok(Value::Text(s.into())),
+    )
 }
 
 pub fn url_encode(args: &[Value]) -> Result<Value> {
