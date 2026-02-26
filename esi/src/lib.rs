@@ -5,6 +5,7 @@ mod config;
 mod error;
 mod expression;
 mod functions;
+mod literals;
 mod parser;
 pub mod parser_types;
 

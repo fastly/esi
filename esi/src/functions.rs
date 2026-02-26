@@ -351,7 +351,7 @@ pub fn url_decode(args: &[Value]) -> Result<Value> {
 
 fn parse_i64(name: &str, v: &Value) -> Result<i64> {
     match v {
-        Value::Integer(i) => Ok(*i as i64),
+        Value::Integer(i) => Ok(i64::from(*i)),
         Value::Text(b) => std::str::from_utf8(b)
             .ok()
             .and_then(|s| s.trim().parse::<i64>().ok())
@@ -395,7 +395,7 @@ pub fn len(args: &[Value]) -> Result<Value> {
 
 fn parse_positive_bound(name: &str, v: &Value) -> Result<i32> {
     let n = parse_i64(name, v)?;
-    if n <= 0 || n > i32::MAX as i64 {
+    if n <= 0 || n > i64::from(i32::MAX) {
         return Err(ExecutionError::FunctionError(format!(
             "{name}: invalid bound"
         )));
@@ -481,7 +481,8 @@ pub fn index(args: &[Value]) -> Result<Value> {
     hay.find(&needle).map_or_else(
         || Ok(Value::Integer(-1)),
         |byte_idx| {
-            let pos = hay[..byte_idx].chars().count() as i32;
+            // If the count exceeds i32::MAX, return MAX instead of erroring, since ESI spec doesn't define behavior for that case
+            let pos = i32::try_from(hay[..byte_idx].chars().count()).unwrap_or(i32::MAX);
             Ok(Value::Integer(pos))
         },
     )
@@ -503,13 +504,16 @@ pub fn rindex(args: &[Value]) -> Result<Value> {
     let needle = args[1].to_string();
 
     if needle.is_empty() {
-        return Ok(Value::Integer(hay.chars().count() as i32));
+        return Ok(Value::Integer(
+            i32::try_from(hay.chars().count()).unwrap_or(i32::MAX),
+        ));
     }
 
     hay.rfind(&needle).map_or_else(
         || Ok(Value::Integer(-1)),
         |byte_idx| {
-            let pos = hay[..byte_idx].chars().count() as i32;
+            // If the count exceeds i32::MAX, return MAX instead of erroring, since ESI spec doesn't define behavior for that case
+            let pos = i32::try_from(hay[..byte_idx].chars().count()).unwrap_or(i32::MAX);
             Ok(Value::Integer(pos))
         },
     )
@@ -562,7 +566,7 @@ pub fn digest_md5_hex(args: &[Value]) -> Result<Value> {
 
     let input = args[0].to_string();
     let digest = md5::compute(input.as_bytes());
-    let hex = format!("{:x}", digest);
+    let hex = format!("{digest:x}");
     Ok(Value::Text(hex.into()))
 }
 
@@ -660,13 +664,10 @@ pub fn bin_int(args: &[Value]) -> Result<Value> {
         )));
     }
 
-    let value = match args[0] {
-        Value::Integer(i) => i,
-        _ => {
-            return Err(ExecutionError::FunctionError(
-                "incorrect type passed to 'bin_int'".to_string(),
-            ))
-        }
+    let Value::Integer(value) = args[0] else {
+        return Err(ExecutionError::FunctionError(
+            "incorrect type passed to 'bin_int'".to_string(),
+        ));
     };
 
     let bytes = value.to_le_bytes();
@@ -686,13 +687,10 @@ pub fn substr(args: &[Value]) -> Result<Value> {
     }
 
     let s = args[0].to_string();
-    let start_i = match args[1] {
-        Value::Integer(i) => i,
-        _ => {
-            return Err(ExecutionError::FunctionError(
-                "incorrect type for 'substr' start".to_string(),
-            ))
-        }
+    let Value::Integer(start_i) = args[1] else {
+        return Err(ExecutionError::FunctionError(
+            "incorrect type for 'substr' start".to_string(),
+        ));
     };
 
     let end_i: Option<i32> = match args.get(2) {

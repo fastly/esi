@@ -6,6 +6,7 @@ use std::{collections::HashMap, fmt::Display};
 
 use crate::{
     functions,
+    literals::*,
     parser_types::{Element, Expr, Operator},
     ExecutionError, Result,
 };
@@ -308,8 +309,8 @@ impl Default for EvalContext {
     fn default() -> Self {
         Self {
             vars: HashMap::new(),
-            match_name: "MATCHES".to_string(),
-            request: Request::new(Method::GET, "http://localhost"),
+            match_name: VAR_MATCHES.to_string(),
+            request: Request::new(Method::GET, URL_LOCALHOST),
             response_headers: Vec::new(),
             last_rand: None,
             response_status: None,
@@ -326,8 +327,8 @@ impl EvalContext {
     pub fn new_with_vars(vars: HashMap<String, Value>) -> Self {
         Self {
             vars,
-            match_name: "MATCHES".to_string(),
-            request: Request::new(Method::GET, "http://localhost"),
+            match_name: VAR_MATCHES.to_string(),
+            request: Request::new(Method::GET, URL_LOCALHOST),
             response_headers: Vec::new(),
             last_rand: None,
             response_status: None,
@@ -401,15 +402,15 @@ impl EvalContext {
 
     pub fn get_variable(&self, key: &str, subkey: Option<&str>) -> Value {
         match key {
-            "REQUEST_METHOD" => Value::Text(self.request.get_method_str().to_string().into()),
-            "REQUEST_PATH" => Value::Text(self.request.get_path().to_string().into()),
-            "REMOTE_ADDR" => Value::Text(
+            VAR_REQUEST_METHOD => Value::Text(self.request.get_method_str().to_string().into()),
+            VAR_REQUEST_PATH => Value::Text(self.request.get_path().to_string().into()),
+            VAR_REMOTE_ADDR => Value::Text(
                 self.request
                     .get_client_ip_addr()
                     .map_or_else(String::new, |ip| ip.to_string())
                     .into(),
             ),
-            "QUERY_STRING" => {
+            VAR_QUERY_STRING => {
                 let params_ref = self.get_query_params();
                 let params = params_ref.as_ref().unwrap();
 
@@ -444,8 +445,8 @@ impl EvalContext {
                     },
                 )
             }
-            _ if key.starts_with("HTTP_") => {
-                let header = key.strip_prefix("HTTP_").unwrap_or_default();
+            _ if key.starts_with(VAR_HTTP_PREFIX) => {
+                let header = key.strip_prefix(VAR_HTTP_PREFIX).unwrap_or_default();
                 self.request.get_header(header).map_or(Value::Null, |h| {
                     let value = h.to_str().unwrap_or_default().to_owned();
                     subkey.map_or_else(
@@ -632,9 +633,9 @@ impl Value {
             Self::Text(b) => b.clone(), // Cheap refcount increment
             Self::Boolean(b) => {
                 if *b {
-                    Bytes::from_static(b"true")
+                    Bytes::from_static(BOOL_TRUE)
                 } else {
-                    Bytes::from_static(b"false")
+                    Bytes::from_static(BOOL_FALSE)
                 }
             }
             Self::List(items) => Bytes::from(items_to_string(items)),
@@ -696,46 +697,46 @@ fn dict_to_string(map: &HashMap<String, Value>) -> String {
 
 fn call_dispatch(identifier: &str, args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
     match identifier {
-        "ping" => Ok(Value::Text("pong".into())),
-        "lower" => functions::lower(args),
-        "upper" => functions::upper(args),
-        "html_encode" => functions::html_encode(args),
-        "html_decode" => functions::html_decode(args),
-        "convert_to_unicode" => functions::convert_to_unicode(args),
-        "convert_from_unicode" => functions::convert_from_unicode(args),
-        "replace" => functions::replace(args),
-        "str" => functions::to_str(args),
-        "lstrip" => functions::lstrip(args),
-        "rstrip" => functions::rstrip(args),
-        "strip" => functions::strip(args),
-        "substr" => functions::substr(args),
-        "dollar" => functions::dollar(args),
-        "dquote" => functions::dquote(args),
-        "squote" => functions::squote(args),
-        "base64_encode" => functions::base64_encode(args),
-        "base64_decode" => functions::base64_decode(args),
-        "url_encode" => functions::url_encode(args),
-        "url_decode" => functions::url_decode(args),
-        "exists" => functions::exists(args),
-        "is_empty" => functions::is_empty(args),
-        "string_split" => functions::string_split(args),
-        "join" => functions::join(args),
-        "list_delitem" => functions::list_delitem(args),
-        "int" => functions::int(args),
-        "len" => functions::len(args),
-        "index" => functions::index(args),
-        "rindex" => functions::rindex(args),
-        "digest_md5" => functions::digest_md5(args),
-        "digest_md5_hex" => functions::digest_md5_hex(args),
-        "bin_int" => functions::bin_int(args),
-        "time" => functions::time(args),
-        "http_time" => functions::http_time(args),
-        "strftime" => functions::strftime(args),
-        "rand" => functions::rand(args, ctx),
-        "last_rand" => functions::last_rand(args, ctx),
-        "add_header" => functions::add_header(args, ctx),
-        "set_response_code" => functions::set_response_code(args, ctx),
-        "set_redirect" => functions::set_redirect(args, ctx),
+        FN_PING => Ok(Value::Text(FN_PONG.into())),
+        FN_LOWER => functions::lower(args),
+        FN_UPPER => functions::upper(args),
+        FN_HTML_ENCODE => functions::html_encode(args),
+        FN_HTML_DECODE => functions::html_decode(args),
+        FN_CONVERT_TO_UNICODE => functions::convert_to_unicode(args),
+        FN_CONVERT_FROM_UNICODE => functions::convert_from_unicode(args),
+        FN_REPLACE => functions::replace(args),
+        FN_STR => functions::to_str(args),
+        FN_LSTRIP => functions::lstrip(args),
+        FN_RSTRIP => functions::rstrip(args),
+        FN_STRIP => functions::strip(args),
+        FN_SUBSTR => functions::substr(args),
+        FN_DOLLAR => functions::dollar(args),
+        FN_DQUOTE => functions::dquote(args),
+        FN_SQUOTE => functions::squote(args),
+        FN_BASE64_ENCODE => functions::base64_encode(args),
+        FN_BASE64_DECODE => functions::base64_decode(args),
+        FN_URL_ENCODE => functions::url_encode(args),
+        FN_URL_DECODE => functions::url_decode(args),
+        FN_EXISTS => functions::exists(args),
+        FN_IS_EMPTY => functions::is_empty(args),
+        FN_STRING_SPLIT => functions::string_split(args),
+        FN_JOIN => functions::join(args),
+        FN_LIST_DELITEM => functions::list_delitem(args),
+        FN_INT => functions::int(args),
+        FN_LEN => functions::len(args),
+        FN_INDEX => functions::index(args),
+        FN_RINDEX => functions::rindex(args),
+        FN_DIGEST_MD5 => functions::digest_md5(args),
+        FN_DIGEST_MD5_HEX => functions::digest_md5_hex(args),
+        FN_BIN_INT => functions::bin_int(args),
+        FN_TIME => functions::time(args),
+        FN_HTTP_TIME => functions::http_time(args),
+        FN_STRFTIME => functions::strftime(args),
+        FN_RAND => functions::rand(args, ctx),
+        FN_LAST_RAND => functions::last_rand(args, ctx),
+        FN_ADD_HEADER => functions::add_header(args, ctx),
+        FN_SET_RESPONSE_CODE => functions::set_response_code(args, ctx),
+        FN_SET_REDIRECT => functions::set_redirect(args, ctx),
         _ => Err(ExecutionError::FunctionError(format!(
             "unknown function: {identifier}"
         ))),
@@ -1116,7 +1117,7 @@ mod tests {
     fn test_eval_get_header() -> Result<()> {
         // This is kind of a useless test as this will always return an empty string.
         let mut ctx = EvalContext::new();
-        let mut req = Request::new(Method::GET, "http://localhost");
+        let mut req = Request::new(Method::GET, URL_LOCALHOST);
         req.set_header("host", "hello.com");
         req.set_header("foobar", "baz");
         ctx.set_request(req);
@@ -1131,7 +1132,7 @@ mod tests {
     fn test_eval_get_header_field() -> Result<()> {
         // This is kind of a useless test as this will always return an empty string.
         let mut ctx = EvalContext::new();
-        let mut req = Request::new(Method::GET, "http://localhost");
+        let mut req = Request::new(Method::GET, URL_LOCALHOST);
         req.set_header("Cookie", "foo=bar; bar=baz");
         ctx.set_request(req);
 
