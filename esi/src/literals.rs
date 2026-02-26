@@ -31,7 +31,6 @@ pub const OPEN_BRACKET: u8 = b'<';
 pub const CLOSE_BRACKET: u8 = b'>';
 
 // Multi-byte tag sequences
-pub const SLASH: &[u8] = b"/";
 pub const TAG_SELF_CLOSE: &[u8] = b"/>";
 pub const TAG_OPEN_CLOSE: &[u8] = b"</";
 
@@ -127,9 +126,10 @@ pub const PIPE: &[u8] = b"|";
 pub const VAR_OPEN: &[u8] = b"$(";
 
 // Arithmetic Operators
-pub const PLUS: &[u8] = b"+";
-pub const ASTERISK: &[u8] = b"*";
-pub const PERCENT: &[u8] = b"%";
+pub const OP_ADD: &[u8] = b"+";
+pub const OP_MULTIPLY: &[u8] = b"*";
+pub const OP_DIVIDE: &[u8] = b"/";
+pub const OP_MODULO: &[u8] = b"%";
 
 // Comparison & Logical Operators (multi-byte)
 pub const OP_EQUALS_COMP: &[u8] = b"==";
@@ -144,6 +144,9 @@ pub const OP_MATCHES_I: &[u8] = b"matches_i";
 pub const OP_MATCHES: &[u8] = b"matches";
 pub const OP_HAS_I: &[u8] = b"has_i";
 pub const OP_HAS: &[u8] = b"has";
+
+// Range Operator
+pub const OP_RANGE: &[u8] = b"..";
 
 // ============================================================================
 // Expression & Evaluation Constants

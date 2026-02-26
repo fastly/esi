@@ -132,6 +132,25 @@ fn eval_comparison(
     ctx: &mut EvalContext,
 ) -> Result<Value> {
     match operator {
+        Operator::Range => {
+            // Range operator creates a list: [start..end]
+            // Both operands must be integers
+            match (left_val, right_val) {
+                (Value::Integer(start), Value::Integer(end)) => {
+                    let values: Vec<Value> = if start <= end {
+                        // Ascending range: [1..5] -> [1, 2, 3, 4, 5]
+                        (*start..=*end).map(Value::Integer).collect()
+                    } else {
+                        // Descending range: [5..1] -> [5, 4, 3, 2, 1]
+                        (*end..=*start).rev().map(Value::Integer).collect()
+                    };
+                    Ok(Value::List(values))
+                }
+                _ => Err(ExecutionError::ExpressionError(
+                    "Range operator (..) requires integer operands".to_string(),
+                )),
+            }
+        }
         Operator::Matches | Operator::MatchesInsensitive => {
             let test = left_val.to_string();
             let pattern = right_val.to_string();
@@ -1415,5 +1434,115 @@ mod tests {
             ctx.cache_control_header(None),
             Some("public, max-age=200".to_string())
         );
+    }
+
+    #[test]
+    fn test_range_operator_ascending() -> Result<()> {
+        let result = evaluate_expression("[1..5]", &mut EvalContext::new())?;
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Integer(3),
+                Value::Integer(4),
+                Value::Integer(5),
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_operator_descending() -> Result<()> {
+        let result = evaluate_expression("[5..1]", &mut EvalContext::new())?;
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(5),
+                Value::Integer(4),
+                Value::Integer(3),
+                Value::Integer(2),
+                Value::Integer(1),
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_operator_single_element() -> Result<()> {
+        let result = evaluate_expression("[3..3]", &mut EvalContext::new())?;
+        assert_eq!(result, Value::List(vec![Value::Integer(3)]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_operator_with_variables() -> Result<()> {
+        let result = evaluate_expression(
+            "[$(start)..$(end)]",
+            &mut EvalContext::from([
+                ("start".to_string(), Value::Integer(1)),
+                ("end".to_string(), Value::Integer(10)),
+            ]),
+        )?;
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Integer(3),
+                Value::Integer(4),
+                Value::Integer(5),
+                Value::Integer(6),
+                Value::Integer(7),
+                Value::Integer(8),
+                Value::Integer(9),
+                Value::Integer(10),
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_operator_in_expression() -> Result<()> {
+        // Test that range can be part of a list literal expression
+        let result = evaluate_expression("[1..3]", &mut EvalContext::new())?;
+        if let Value::List(items) = result {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], Value::Integer(1));
+            assert_eq!(items[1], Value::Integer(2));
+            assert_eq!(items[2], Value::Integer(3));
+        } else {
+            panic!("Expected a list");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_operator_negative_numbers() -> Result<()> {
+        let result = evaluate_expression("[-2..2]", &mut EvalContext::new())?;
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(-2),
+                Value::Integer(-1),
+                Value::Integer(0),
+                Value::Integer(1),
+                Value::Integer(2),
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_operator_requires_integers() {
+        let result = evaluate_expression(
+            "['a'..'z']",
+            &mut EvalContext::new(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires integer operands"));
     }
 }

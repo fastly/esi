@@ -1583,11 +1583,12 @@ fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
         map(tag(OP_AND), |_| Operator::And),
         map(tag(OP_OR), |_| Operator::Or),
         // Arithmetic operators (after comparison to avoid conflicts with <=, >=)
-        map(tag(PLUS), |_| Operator::Add),
+        map(tag(OP_ADD), |_| Operator::Add),
         map(tag(&[HYPHEN]), |_| Operator::Subtract),
-        map(tag(ASTERISK), |_| Operator::Multiply),
-        map(tag(SLASH), |_| Operator::Divide),
-        map(tag(PERCENT), |_| Operator::Modulo),
+        map(tag(OP_MULTIPLY), |_| Operator::Multiply),
+        map(tag(OP_DIVIDE), |_| Operator::Divide),
+        map(tag(OP_MODULO), |_| Operator::Modulo),
+        // Note: Range (..) is NOT in the general operator list - it's only parsed in list literals
     ))(input)
 }
 
@@ -1626,16 +1627,35 @@ fn dict_literal(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 }
 
 fn list_literal(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    map(
-        delimited(
-            tag(&[OPEN_SQ_BRACKET]),
-            separated_list0(
-                tuple((multispace0, tag(&[COMMA]), multispace0)),
-                delimited(multispace0, primary_expr, multispace0),
+    delimited(
+        tag(&[OPEN_SQ_BRACKET]),
+        alt((
+            // Try range first: [start..end]
+            map(
+                tuple((
+                    delimited(multispace0, primary_expr, multispace0),
+                    tag(OP_RANGE),
+                    delimited(multispace0, primary_expr, multispace0),
+                )),
+                |(start, _, end)| {
+                    // Create a Comparison expression with Range operator
+                    Expr::Comparison {
+                        left: Box::new(start),
+                        operator: Operator::Range,
+                        right: Box::new(end),
+                    }
+                },
             ),
-            preceded(multispace0, tag(CLOSE_SQ_BRACKET)),
-        ),
-        Expr::ListLiteral,
+            // Otherwise parse as regular list: [item, item, ...]
+            map(
+                separated_list0(
+                    tuple((multispace0, tag(&[COMMA]), multispace0)),
+                    delimited(multispace0, primary_expr, multispace0),
+                ),
+                Expr::ListLiteral,
+            ),
+        )),
+        preceded(multispace0, tag(CLOSE_SQ_BRACKET)),
     )(input)
 }
 

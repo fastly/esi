@@ -1009,6 +1009,46 @@ fn test_foreach_dict_literal() {
     );
 }
 
+// Test foreach with range operator
+#[test]
+fn test_foreach_with_range() {
+    init_logs();
+    let input = r#"<esi:foreach collection="[1..10]" item="n">$(n) </esi:foreach>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(
+        result, "1 2 3 4 5 6 7 8 9 10 ",
+        "Should iterate from 1 to 10"
+    );
+}
+
+// Test foreach with descending range
+#[test]
+fn test_foreach_with_range_descending() {
+    init_logs();
+    let input = r#"<esi:foreach collection="[5..1]" item="n">$(n),</esi:foreach>"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert_eq!(result, "5,4,3,2,1,", "Should iterate from 5 down to 1");
+}
+
+// Test foreach with range and variables
+#[test]
+fn test_foreach_with_range_variables() {
+    init_logs();
+    let input = r#"
+        <esi:assign name="start" value="1" />
+        <esi:assign name="end" value="5" />
+        <esi:foreach collection="[$(start)..$(end)]" item="i">$(i) </esi:foreach>
+    "#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+    assert!(
+        result.contains("1 2 3 4 5"),
+        "Should use variable-based range"
+    );
+}
+
 // Test nested foreach with break - ensure break only affects inner loop
 #[test]
 fn test_nested_foreach_with_break() {

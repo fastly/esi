@@ -125,4 +125,6 @@ pub enum Operator {
     Multiply,
     Divide,
     Modulo,
+    // Range operator (for list creation)
+    Range,
 }
