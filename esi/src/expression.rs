@@ -304,6 +304,8 @@ pub struct EvalContext {
     query_params_cache: std::cell::RefCell<Option<HashMap<String, Vec<Bytes>>>>,
     /// Minimum TTL seen across all cached includes (in seconds) for rendered document cacheability
     min_ttl: Option<u32>,
+    /// Flag indicating if the rendered document should not be cached (due to `private`/`no-cache`/`Set-Cookie` in any include)
+    is_uncacheable: bool,
 }
 impl Default for EvalContext {
     fn default() -> Self {
@@ -317,6 +319,7 @@ impl Default for EvalContext {
             response_body_override: None,
             query_params_cache: std::cell::RefCell::new(None),
             min_ttl: None,
+            is_uncacheable: false,
         }
     }
 }
@@ -335,6 +338,7 @@ impl EvalContext {
             response_body_override: None,
             query_params_cache: std::cell::RefCell::new(None),
             min_ttl: None,
+            is_uncacheable: false,
         }
     }
 
@@ -421,7 +425,7 @@ impl EvalContext {
                             Value::Null
                         } else {
                             let mut dict = HashMap::new();
-                            for (key, values) in params.iter() {
+                            for (key, values) in params {
                                 let value = match values.len() {
                                     0 => Value::Null,
                                     1 => Value::Text(values[0].clone()),
@@ -516,8 +520,17 @@ impl EvalContext {
         self.min_ttl = Some(self.min_ttl.map_or(ttl, |current_min| current_min.min(ttl)));
     }
 
+    /// Mark the rendered document as uncacheable (e.g., when an include has Set-Cookie or Cache-Control: private)
+    pub fn mark_document_uncacheable(&mut self) {
+        self.is_uncacheable = true;
+    }
+
     /// Get the cache control header value for the rendered document
     pub fn cache_control_header(&self, rendered_ttl: Option<u32>) -> Option<String> {
+        // If any include was uncacheable (private, no-cache, set-cookie), mark document as uncacheable
+        if self.is_uncacheable {
+            return Some("private, no-cache".to_string());
+        }
         let ttl = rendered_ttl.or(self.min_ttl)?;
         Some(format!("public, max-age={ttl}"))
     }
@@ -668,7 +681,7 @@ impl From<Bytes> for Value {
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Integer(i) => write!(f, "{}", i),
+            Self::Integer(i) => write!(f, "{i}"),
             Self::Text(b) => write!(f, "{}", String::from_utf8_lossy(b.as_ref())),
             Self::Boolean(b) => write!(f, "{}", if *b { "true" } else { "false" }),
             Self::List(items) => write!(f, "{}", items_to_string(items)),
@@ -690,7 +703,7 @@ fn items_to_string(items: &[Value]) -> String {
 }
 
 fn dict_to_string(map: &HashMap<String, Value>) -> String {
-    let mut parts: Vec<_> = map.iter().map(|(k, v)| format!("{k}={}", v)).collect();
+    let mut parts: Vec<_> = map.iter().map(|(k, v)| format!("{k}={v}")).collect();
     parts.sort();
     parts.join("&")
 }
@@ -1355,5 +1368,52 @@ mod tests {
         // Test with non-existent subkey
         let result = ctx.get_variable("QUERY_STRING", Some("nonexistent"));
         assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_cache_control_header_uncacheable() {
+        let mut ctx = EvalContext::new();
+        
+        // Test that marking document uncacheable returns private, no-cache
+        ctx.mark_document_uncacheable();
+        assert_eq!(
+            ctx.cache_control_header(None),
+            Some("private, no-cache".to_string())
+        );
+        
+        // Even with rendered_ttl set, uncacheable should take precedence
+        assert_eq!(
+            ctx.cache_control_header(Some(600)),
+            Some("private, no-cache".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cache_control_header_with_min_ttl() {
+        let mut ctx = EvalContext::new();
+        
+        // Test with no TTL set
+        assert_eq!(ctx.cache_control_header(None), None);
+        
+        // Test with min_ttl set
+        ctx.update_cache_min_ttl(300);
+        assert_eq!(
+            ctx.cache_control_header(None),
+            Some("public, max-age=300".to_string())
+        );
+        
+        // Test with rendered_ttl override
+        assert_eq!(
+            ctx.cache_control_header(Some(600)),
+            Some("public, max-age=600".to_string())
+        );
+        
+        // Test that min_ttl tracks minimum across updates
+        ctx.update_cache_min_ttl(600);
+        ctx.update_cache_min_ttl(200);
+        assert_eq!(
+            ctx.cache_control_header(None),
+            Some("public, max-age=200".to_string())
+        );
     }
 }

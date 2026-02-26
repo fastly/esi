@@ -583,7 +583,7 @@ pub fn time(args: &[Value]) -> Result<Value> {
         .map_err(|_| ExecutionError::FunctionError("system time before UNIX_EPOCH".to_string()))?
         .as_secs();
 
-    let clamped = secs.min(i32::MAX as u64) as i32;
+    let clamped = i32::try_from(secs).unwrap_or(i32::MAX);
     Ok(Value::Integer(clamped))
 }
 

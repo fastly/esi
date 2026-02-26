@@ -1174,7 +1174,8 @@ impl Processor {
                                     Some(ttl)
                                 }
                                 Ok(None) => {
-                                    debug!("Response not cacheable");
+                                    debug!("Response not cacheable (private/no-cache/set-cookie)");
+                                    self.ctx.mark_document_uncacheable();
                                     None
                                 }
                                 Err(e) => {
