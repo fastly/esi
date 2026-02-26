@@ -986,7 +986,10 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
 }
 
 /// Helper to extract include attributes from the attributes `HashMap`
-fn extract_include_attrs(mut attrs: HashMap<String, String>) -> IncludeAttributes {
+fn extract_include_attrs(
+    mut attrs: HashMap<String, String>,
+    params: Vec<(String, Expr)>,
+) -> IncludeAttributes {
     let src = parse_attr_as_expr(take_attr(&mut attrs, "src"));
     let alt = take_attr_opt(&mut attrs, "alt").map(parse_attr_as_expr);
     let continue_on_error = attrs.get("onerror").is_some_and(|s| s == "continue");
@@ -1044,6 +1047,7 @@ fn extract_include_attrs(mut attrs: HashMap<String, String>) -> IncludeAttribute
         appendheaders,
         removeheaders,
         setheaders,
+        params,
     }
 }
 
@@ -1055,12 +1059,9 @@ fn esi_include_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&
             preceded(streaming_char::multispace0, streaming_self_closing),
         ),
         |attrs| {
-            let attrs = extract_include_attrs(attrs);
+            let attrs = extract_include_attrs(attrs, Vec::new());
 
-            ParseResult::Single(Element::Esi(Tag::Include {
-                params: Vec::new(),
-                attrs,
-            }))
+            ParseResult::Single(Element::Esi(Tag::Include { attrs }))
         },
     )(input)
 }
@@ -1080,9 +1081,9 @@ fn esi_include_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[
             ),
         )),
         |(attrs, params, _)| {
-            let attrs = extract_include_attrs(attrs);
+            let attrs = extract_include_attrs(attrs, params);
 
-            ParseResult::Single(Element::Esi(Tag::Include { params, attrs }))
+            ParseResult::Single(Element::Esi(Tag::Include { attrs }))
         },
     )(input)
 }

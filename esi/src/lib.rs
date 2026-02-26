@@ -563,11 +563,10 @@ impl Processor {
     /// Handle esi:include tag
     fn handle_include(
         &mut self,
-        params: &[(String, Expr)],
         attrs: &parser_types::IncludeAttributes,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<bool> {
-        let queued_element = self.process_include_tag(params, attrs, dispatcher)?;
+        let queued_element = self.process_include_tag(attrs, dispatcher)?;
         self.queue.push_back(queued_element);
         Ok(false)
     }
@@ -675,9 +674,9 @@ impl Processor {
                         }
                     }
                 }
-                parser_types::Element::Esi(parser_types::Tag::Include { params, attrs }) => {
+                parser_types::Element::Esi(parser_types::Tag::Include { attrs }) => {
                     // Dispatch the include and add to queue
-                    let queued_element = self.process_include_tag(&params, &attrs, dispatcher)?;
+                    let queued_element = self.process_include_tag(&attrs, dispatcher)?;
                     queue.push(queued_element);
                 }
                 parser_types::Element::Esi(parser_types::Tag::Choose {
@@ -792,9 +791,7 @@ impl Processor {
 
             Element::Esi(Tag::Vars { name }) => self.handle_vars(name),
 
-            Element::Esi(Tag::Include { params, attrs }) => {
-                self.handle_include(&params, &attrs, dispatcher)
-            }
+            Element::Esi(Tag::Include { attrs }) => self.handle_include(&attrs, dispatcher),
 
             Element::Esi(Tag::Choose {
                 when_branches,
@@ -834,18 +831,16 @@ impl Processor {
     /// Returns a `QueuedElement` ready to be added to any queue (main/attempt/except)
     fn process_include_tag(
         &mut self,
-        params: &[(String, Expr)],
         attrs: &parser_types::IncludeAttributes,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<QueuedElement> {
-        self.dispatch_include_to_element(params, attrs, dispatcher)
+        self.dispatch_include_to_element(attrs, dispatcher)
     }
 
     /// Dispatch an include and return a `QueuedElement` (for flexible queue insertion)
     /// This is the single source of truth for include dispatching logic
     fn dispatch_include_to_element(
         &mut self,
-        params: &[(String, Expr)],
         attrs: &parser_types::IncludeAttributes,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<QueuedElement> {
@@ -862,15 +857,15 @@ impl Processor {
 
         // Evaluate params and append to URL
         // Use Cow to avoid allocation when params are empty and bytes are valid UTF-8
-        let final_src = if params.is_empty() {
+        let final_src = if attrs.params.is_empty() {
             src_bytes
         } else {
             let url_cow = String::from_utf8_lossy(&src_bytes);
-            let mut url = String::with_capacity(url_cow.len() + params.len() * 20);
+            let mut url = String::with_capacity(url_cow.len() + attrs.params.len() * 20);
             url.push_str(&url_cow);
 
             let mut separator = if url.contains('?') { '&' } else { '?' };
-            for (name, value_expr) in params {
+            for (name, value_expr) in &attrs.params {
                 let value = self.evaluate_expr_to_bytes(value_expr)?;
                 let value_str = String::from_utf8_lossy(&value);
                 // Direct string building is more efficient than format!

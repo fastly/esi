@@ -15,11 +15,11 @@ fn test_parse_basic_include() {
     // Find the Include tag
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Include { attrs, params, .. }
+            esi::parser_types::Tag::Include { attrs, .. }
         ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "https://example.com/hello") 
             && attrs.alt.is_none() 
             && !attrs.continue_on_error 
-            && params.is_empty())
+            && attrs.params.is_empty())
     });
 
     assert!(
@@ -38,11 +38,11 @@ fn test_parse_include_with_alt_and_onerror() {
 
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Include { attrs, params, .. }
+            esi::parser_types::Tag::Include { attrs, .. }
         ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "abc")
             && matches!(&attrs.alt, Some(esi::parser_types::Expr::String(Some(a))) if a == "def")
             && attrs.continue_on_error 
-            && params.is_empty())
+            && attrs.params.is_empty())
     });
 
     assert!(
@@ -82,11 +82,11 @@ fn test_parse_include_with_onerror() {
 
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Include { attrs, params, .. }
+            esi::parser_types::Tag::Include { attrs, .. }
         ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "/_fragments/content.html")
             && attrs.alt.is_none() 
             && attrs.continue_on_error 
-            && params.is_empty())
+            && attrs.params.is_empty())
     });
 
     assert!(include_found, "Should find Include with onerror=continue");
@@ -104,13 +104,13 @@ fn test_parse_include_with_single_param() {
 
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Include { attrs, params, .. }
+            esi::parser_types::Tag::Include { attrs, .. }
         ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "/fragment")
             && attrs.alt.is_none() 
             && !attrs.continue_on_error 
-            && params.len() == 1
-            && params[0].0 == "foo"
-            && matches!(&params[0].1, esi::parser_types::Expr::String(Some(v)) if v == "bar"))
+            && attrs.params.len() == 1
+            && attrs.params[0].0 == "foo"
+            && matches!(&attrs.params[0].1, esi::parser_types::Expr::String(Some(v)) if v == "bar"))
     });
 
     assert!(include_found, "Should find Include with one param");
@@ -130,14 +130,14 @@ fn test_parse_include_with_multiple_params() {
 
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Include { attrs, params, .. }
+            esi::parser_types::Tag::Include { attrs, .. }
         ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "/fragment")
             && matches!(&attrs.alt, Some(esi::parser_types::Expr::String(Some(a))) if a == "/fallback")
             && attrs.continue_on_error 
-            && params.len() == 3
-            && params[0].0 == "user" && matches!(&params[0].1, esi::parser_types::Expr::String(Some(v)) if v == "alice")
-            && params[1].0 == "role" && matches!(&params[1].1, esi::parser_types::Expr::String(Some(v)) if v == "admin")
-            && params[2].0 == "id" && matches!(&params[2].1, esi::parser_types::Expr::Integer(123)))
+            && attrs.params.len() == 3
+            && attrs.params[0].0 == "user" && matches!(&attrs.params[0].1, esi::parser_types::Expr::String(Some(v)) if v == "alice")
+            && attrs.params[1].0 == "role" && matches!(&attrs.params[1].1, esi::parser_types::Expr::String(Some(v)) if v == "admin")
+            && attrs.params[2].0 == "id" && matches!(&attrs.params[2].1, esi::parser_types::Expr::Integer(123)))
     });
 
     assert!(include_found, "Should find Include with multiple params");
@@ -153,8 +153,8 @@ fn test_parse_include_self_closing_has_no_params() {
 
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::parser_types::Element::Esi(
-            esi::parser_types::Tag::Include { attrs, params, .. }
-        ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "/test") && params.is_empty())
+            esi::parser_types::Tag::Include { attrs, .. }
+        ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "/test") && attrs.params.is_empty())
     });
 
     assert!(include_found, "Self-closing include should have no params");
@@ -201,10 +201,10 @@ fn test_parse_param_value_with_variable_expression() {
 
     // Check what the param value looks like
     let include_found = elements.iter().find_map(|element| {
-        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Include { params, .. }) =
+        if let esi::parser_types::Element::Esi(esi::parser_types::Tag::Include { attrs, .. }) =
             element
         {
-            Some(params)
+            Some(&attrs.params)
         } else {
             None
         }

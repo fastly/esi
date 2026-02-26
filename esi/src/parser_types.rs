@@ -25,6 +25,8 @@ pub struct IncludeAttributes {
     pub removeheaders: Vec<String>,
     /// Headers to set on the request (replaces existing)
     pub setheaders: Vec<(String, Expr)>,
+    /// Child <esi:param> elements for query parameters
+    pub params: Vec<(String, Expr)>,
 }
 
 /// Represents a single when branch in a choose block
@@ -38,9 +40,7 @@ pub struct WhenBranch {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Tag {
     Include {
-        /// Child <esi:param> elements (not attributes)
-        params: Vec<(String, Expr)>,
-        /// All include tag attributes
+        /// All include tag attributes (including params)
         attrs: IncludeAttributes,
     },
     Try {
