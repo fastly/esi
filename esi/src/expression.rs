@@ -429,26 +429,41 @@ impl EvalContext {
 
     fn parse_http_header(&self, header: &str) -> Option<HashMap<String, Value>> {
         let value = self.request.get_header(header)?.to_str().ok()?;
+        let header_lower = header.to_lowercase();
 
-        // Try to parse as semicolon-separated key=value pairs
+        // Cookie: semicolon-separated key=value pairs
+        if header_lower == "cookie" {
+            let mut dict = HashMap::new();
+            for pair in value.split(';') {
+                let trimmed = pair.trim();
+                if let Some((k, v)) = trimmed.split_once('=') {
+                    dict.insert(
+                        k.trim().to_string(),
+                        Value::Text(v.trim().to_owned().into()),
+                    );
+                }
+            }
+            return if dict.is_empty() { None } else { Some(dict) };
+        }
+
+        // All other headers: comma-separated values (strip quality params like ;q=0.9)
+        // Creates Dict where key=value for membership testing: {"gzip": "gzip", "br": "br"}
         let mut dict = HashMap::new();
-        let mut has_pairs = false;
-
-        for pair in value.split(';') {
-            let trimmed = pair.trim();
-            if let Some((k, v)) = trimmed.split_once('=') {
+        for item in value.split(',') {
+            // Strip quality value: "gzip;q=0.9" → "gzip"
+            let item_value = item.split(';').next().unwrap_or("").trim();
+            if !item_value.is_empty() {
                 dict.insert(
-                    k.trim().to_string(),
-                    Value::Text(v.trim().to_owned().into()),
+                    item_value.to_string(),
+                    Value::Text(item_value.to_owned().into()),
                 );
-                has_pairs = true;
             }
         }
 
-        if has_pairs {
-            Some(dict)
+        if dict.is_empty() {
+            None // Plain text header
         } else {
-            None // Plain text header, not key=value format
+            Some(dict)
         }
     }
 
@@ -527,16 +542,11 @@ impl EvalContext {
 
                 subkey.map_or_else(
                     || {
-                        // Without subkey: try to return as Dict if parseable, else Text
-                        let cache = self.get_http_header_dict(header);
-                        if let Some(Some(dict)) = cache.get(header) {
-                            Value::Dict(dict.clone())
-                        } else {
-                            Value::Text(raw_value.to_owned().into())
-                        }
+                        // Without subkey: return raw header value as Text
+                        Value::Text(raw_value.to_owned().into())
                     },
                     |field| {
-                        // With subkey: look up in parsed dict
+                        // With subkey: parse and look up specific field
                         let cache = self.get_http_header_dict(header);
                         if let Some(Some(dict)) = cache.get(header) {
                             dict.get(field).cloned().unwrap_or(Value::Null)
@@ -622,11 +632,23 @@ impl<const N: usize> From<[(String, Value); N]> for EvalContext {
 
 fn get_subvalue(parent: &Value, subkey: &str) -> Value {
     if let Ok(idx) = subkey.parse::<usize>() {
+        // Try list index first
         if let Value::List(items) = parent {
             return items.get(idx).cloned().unwrap_or(Value::Null);
         }
+
+        // String-as-list: character access by index
+        if let Value::Text(s) = parent {
+            let text = std::str::from_utf8(s.as_ref()).unwrap_or("");
+            return text
+                .chars()
+                .nth(idx)
+                .map(|c| Value::Text(c.to_string().into()))
+                .unwrap_or(Value::Null);
+        }
     }
 
+    // Dict string-key lookup
     if let Value::Dict(map) = parent {
         return map.get(subkey).cloned().unwrap_or(Value::Null);
     }
@@ -1243,27 +1265,49 @@ mod tests {
         req.set_header("Cookie", "id=571; visits=42");
         ctx.set_request(req);
 
-        // Without subkey, should return Dict
+        // Without subkey, should return raw Text
         let result = evaluate_expression("$(HTTP_COOKIE)", &mut ctx)?;
-        match result {
-            Value::Dict(map) => {
-                assert_eq!(map.get("id"), Some(&Value::Text("571".into())));
-                assert_eq!(map.get("visits"), Some(&Value::Text("42".into())));
-                assert_eq!(map.len(), 2);
-            }
-            _ => panic!("Expected Dict, got {:?}", result),
-        }
+        assert_eq!(result, Value::Text("id=571; visits=42".into()));
 
-        // Verify cache works - access field after accessing full dict
+        // With subkey, should parse and return the field value
         let result = evaluate_expression("$(HTTP_COOKIE{'visits'})", &mut ctx)?;
         assert_eq!(result, Value::Text("42".into()));
 
-        // Plain text headers without key=value pairs should still return Text
+        let result = evaluate_expression("$(HTTP_COOKIE{'id'})", &mut ctx)?;
+        assert_eq!(result, Value::Text("571".into()));
+
+        // Non-existent field returns Null
+        let result = evaluate_expression("$(HTTP_COOKIE{'nonexistent'})", &mut ctx)?;
+        assert_eq!(result, Value::Null);
+
+        // Plain text headers still work
         let mut req2 = Request::new(Method::GET, URL_LOCALHOST);
         req2.set_header("host", "example.com");
         ctx.set_request(req2);
         let result = evaluate_expression("$(HTTP_HOST)", &mut ctx)?;
         assert_eq!(result, Value::Text("example.com".into()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_string_as_list_character_access() -> Result<()> {
+        let mut ctx = EvalContext::new();
+        ctx.set_variable("a_string", None, Value::Text("abcde".into()))?;
+
+        // Access individual characters by index
+        let result = evaluate_expression("$(a_string{0})", &mut ctx)?;
+        assert_eq!(result, Value::Text("a".into()));
+
+        let result = evaluate_expression("$(a_string{3})", &mut ctx)?;
+        assert_eq!(result, Value::Text("d".into()));
+
+        let result = evaluate_expression("$(a_string{4})", &mut ctx)?;
+        assert_eq!(result, Value::Text("e".into()));
+
+        // Out of bounds returns Null
+        let result = evaluate_expression("$(a_string{10})", &mut ctx)?;
+        assert_eq!(result, Value::Null);
 
         Ok(())
     }
