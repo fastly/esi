@@ -321,6 +321,8 @@ pub struct EvalContext {
     response_body_override: Option<Bytes>,
     /// Cached parsed query string parameters (lazy-loaded for performance)
     query_params_cache: std::cell::RefCell<Option<HashMap<String, Vec<Bytes>>>>,
+    /// Cached parsed HTTP headers (lazy-loaded for performance)
+    http_headers_cache: std::cell::RefCell<HashMap<String, Option<HashMap<String, Value>>>>,
     /// Minimum TTL seen across all cached includes (in seconds) for rendered document cacheability
     min_ttl: Option<u32>,
     /// Flag indicating if the rendered document should not be cached (due to `private`/`no-cache`/`Set-Cookie` in any include)
@@ -337,6 +339,7 @@ impl Default for EvalContext {
             response_status: None,
             response_body_override: None,
             query_params_cache: std::cell::RefCell::new(None),
+            http_headers_cache: std::cell::RefCell::new(HashMap::new()),
             min_ttl: None,
             is_uncacheable: false,
         }
@@ -356,6 +359,7 @@ impl EvalContext {
             response_status: None,
             response_body_override: None,
             query_params_cache: std::cell::RefCell::new(None),
+            http_headers_cache: std::cell::RefCell::new(HashMap::new()),
             min_ttl: None,
             is_uncacheable: false,
         }
@@ -423,6 +427,45 @@ impl EvalContext {
         self.query_params_cache.borrow()
     }
 
+    fn parse_http_header(&self, header: &str) -> Option<HashMap<String, Value>> {
+        let value = self.request.get_header(header)?.to_str().ok()?;
+
+        // Try to parse as semicolon-separated key=value pairs
+        let mut dict = HashMap::new();
+        let mut has_pairs = false;
+
+        for pair in value.split(';') {
+            let trimmed = pair.trim();
+            if let Some((k, v)) = trimmed.split_once('=') {
+                dict.insert(
+                    k.trim().to_string(),
+                    Value::Text(v.trim().to_owned().into()),
+                );
+                has_pairs = true;
+            }
+        }
+
+        if has_pairs {
+            Some(dict)
+        } else {
+            None // Plain text header, not key=value format
+        }
+    }
+
+    fn get_http_header_dict(
+        &self,
+        header: &str,
+    ) -> std::cell::Ref<'_, HashMap<String, Option<HashMap<String, Value>>>> {
+        // Check if we've already parsed this header
+        if !self.http_headers_cache.borrow().contains_key(header) {
+            let parsed = self.parse_http_header(header);
+            self.http_headers_cache
+                .borrow_mut()
+                .insert(header.to_string(), parsed);
+        }
+        self.http_headers_cache.borrow()
+    }
+
     pub fn get_variable(&self, key: &str, subkey: Option<&str>) -> Value {
         match key {
             VAR_REQUEST_METHOD => Value::Text(self.request.get_method_str().to_string().into()),
@@ -470,23 +513,38 @@ impl EvalContext {
             }
             _ if key.starts_with(VAR_HTTP_PREFIX) => {
                 let header = key.strip_prefix(VAR_HTTP_PREFIX).unwrap_or_default();
-                self.request.get_header(header).map_or(Value::Null, |h| {
-                    let value = h.to_str().unwrap_or_default().to_owned();
-                    subkey.map_or_else(
-                        || Value::Text(value.clone().into()),
-                        |field| {
-                            value
-                                .split(';')
-                                .find_map(|s| {
-                                    s.trim()
-                                        .split_once('=')
-                                        .filter(|(key, _)| *key == field)
-                                        .map(|(_, val)| Value::Text(val.to_owned().into()))
-                                })
-                                .unwrap_or(Value::Null)
-                        },
-                    )
-                })
+
+                // Get raw header value
+                let raw_value = self
+                    .request
+                    .get_header(header)
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("");
+
+                if raw_value.is_empty() {
+                    return Value::Null;
+                }
+
+                subkey.map_or_else(
+                    || {
+                        // Without subkey: try to return as Dict if parseable, else Text
+                        let cache = self.get_http_header_dict(header);
+                        if let Some(Some(dict)) = cache.get(header) {
+                            Value::Dict(dict.clone())
+                        } else {
+                            Value::Text(raw_value.to_owned().into())
+                        }
+                    },
+                    |field| {
+                        // With subkey: look up in parsed dict
+                        let cache = self.get_http_header_dict(header);
+                        if let Some(Some(dict)) = cache.get(header) {
+                            dict.get(field).cloned().unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        }
+                    },
+                )
             }
             _ => {
                 let stored = self.vars.get(key).cloned().unwrap_or(Value::Null);
@@ -526,8 +584,9 @@ impl EvalContext {
 
     pub fn set_request(&mut self, request: Request) {
         self.request = request;
-        // Clear cached query params when request changes
+        // Clear cached query params and headers when request changes
         *self.query_params_cache.borrow_mut() = None;
+        self.http_headers_cache.borrow_mut().clear();
     }
 
     pub const fn get_request(&self) -> &Request {
@@ -1176,6 +1235,39 @@ mod tests {
         assert_eq!(result, Value::Null);
         Ok(())
     }
+
+    #[test]
+    fn test_eval_get_header_as_dict() -> Result<()> {
+        let mut ctx = EvalContext::new();
+        let mut req = Request::new(Method::GET, URL_LOCALHOST);
+        req.set_header("Cookie", "id=571; visits=42");
+        ctx.set_request(req);
+
+        // Without subkey, should return Dict
+        let result = evaluate_expression("$(HTTP_COOKIE)", &mut ctx)?;
+        match result {
+            Value::Dict(map) => {
+                assert_eq!(map.get("id"), Some(&Value::Text("571".into())));
+                assert_eq!(map.get("visits"), Some(&Value::Text("42".into())));
+                assert_eq!(map.len(), 2);
+            }
+            _ => panic!("Expected Dict, got {:?}", result),
+        }
+
+        // Verify cache works - access field after accessing full dict
+        let result = evaluate_expression("$(HTTP_COOKIE{'visits'})", &mut ctx)?;
+        assert_eq!(result, Value::Text("42".into()));
+
+        // Plain text headers without key=value pairs should still return Text
+        let mut req2 = Request::new(Method::GET, URL_LOCALHOST);
+        req2.set_header("host", "example.com");
+        ctx.set_request(req2);
+        let result = evaluate_expression("$(HTTP_HOST)", &mut ctx)?;
+        assert_eq!(result, Value::Text("example.com".into()));
+
+        Ok(())
+    }
+
     #[test]
     fn test_logical_operators_with_parentheses() {
         let mut ctx = EvalContext::new();
