@@ -540,7 +540,7 @@ impl EvalContext {
     }
 
     /// Mark the rendered document as uncacheable (e.g., when an include has Set-Cookie or Cache-Control: private)
-    pub fn mark_document_uncacheable(&mut self) {
+    pub const fn mark_document_uncacheable(&mut self) {
         self.is_uncacheable = true;
     }
 
@@ -1392,14 +1392,14 @@ mod tests {
     #[test]
     fn test_cache_control_header_uncacheable() {
         let mut ctx = EvalContext::new();
-        
+
         // Test that marking document uncacheable returns private, no-cache
         ctx.mark_document_uncacheable();
         assert_eq!(
             ctx.cache_control_header(None),
             Some("private, no-cache".to_string())
         );
-        
+
         // Even with rendered_ttl set, uncacheable should take precedence
         assert_eq!(
             ctx.cache_control_header(Some(600)),
@@ -1410,23 +1410,23 @@ mod tests {
     #[test]
     fn test_cache_control_header_with_min_ttl() {
         let mut ctx = EvalContext::new();
-        
+
         // Test with no TTL set
         assert_eq!(ctx.cache_control_header(None), None);
-        
+
         // Test with min_ttl set
         ctx.update_cache_min_ttl(300);
         assert_eq!(
             ctx.cache_control_header(None),
             Some("public, max-age=300".to_string())
         );
-        
+
         // Test with rendered_ttl override
         assert_eq!(
             ctx.cache_control_header(Some(600)),
             Some("public, max-age=600".to_string())
         );
-        
+
         // Test that min_ttl tracks minimum across updates
         ctx.update_cache_min_ttl(600);
         ctx.update_cache_min_ttl(200);
@@ -1535,10 +1535,7 @@ mod tests {
 
     #[test]
     fn test_range_operator_requires_integers() {
-        let result = evaluate_expression(
-            "['a'..'z']",
-            &mut EvalContext::new(),
-        );
+        let result = evaluate_expression("['a'..'z']", &mut EvalContext::new());
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

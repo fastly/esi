@@ -17,7 +17,7 @@ use nom::IResult;
 use std::collections::HashMap;
 
 use crate::literals::*;
-use crate::parser_types::{Element, Expr, IncludeAttributes, Operator, Tag, WhenBranch};
+use crate::parser_types::{DcaMode, Element, Expr, IncludeAttributes, Operator, Tag, WhenBranch};
 
 // ============================================================================
 // Zero-Copy Helpers
@@ -993,6 +993,13 @@ fn extract_include_attrs(
     let src = parse_attr_as_expr(take_attr(&mut attrs, "src"));
     let alt = take_attr_opt(&mut attrs, "alt").map(parse_attr_as_expr);
     let continue_on_error = attrs.get("onerror").is_some_and(|s| s == "continue");
+
+    // Parse dca attribute - default to None
+    let dca = match attrs.get("dca").map(|s| s.to_lowercase()).as_deref() {
+        Some("esi") => DcaMode::Esi,
+        _ => DcaMode::None, // Default or unrecognized values
+    };
+
     let ttl = take_attr_opt(&mut attrs, "ttl");
     let maxwait = take_attr_opt(&mut attrs, "maxwait").and_then(|s| s.parse::<u32>().ok());
     let no_store = attrs
@@ -1039,6 +1046,7 @@ fn extract_include_attrs(
         src,
         alt,
         continue_on_error,
+        dca,
         ttl,
         maxwait,
         no_store,
@@ -1084,6 +1092,53 @@ fn esi_include_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[
             let attrs = extract_include_attrs(attrs, params);
 
             ParseResult::Single(Element::Esi(Tag::Include { attrs }))
+        },
+    )(input)
+}
+
+/// Parse <esi:eval> tag - similar to include but always evaluates as ESI
+/// Note: eval does NOT support alt attribute - use try/except instead
+fn esi_eval(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
+    alt((esi_eval_self_closing, esi_eval_with_params))(input)
+}
+
+fn esi_eval_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
+    map(
+        delimited(
+            streaming_bytes::tag(TAG_ESI_EVAL_OPEN),
+            attributes,
+            preceded(streaming_char::multispace0, streaming_self_closing),
+        ),
+        |attrs| {
+            let mut attrs = extract_include_attrs(attrs, Vec::new());
+            // Eval does not support alt - clear it if somehow present
+            attrs.alt = None;
+
+            ParseResult::Single(Element::Esi(Tag::Eval { attrs }))
+        },
+    )(input)
+}
+
+fn esi_eval_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
+    map(
+        tuple((
+            delimited(
+                streaming_bytes::tag(TAG_ESI_EVAL_OPEN),
+                attributes,
+                preceded(streaming_char::multispace0, streaming_close_bracket),
+            ),
+            many0(preceded(streaming_char::multispace0, esi_param)),
+            preceded(
+                streaming_char::multispace0,
+                streaming_bytes::tag(TAG_ESI_EVAL_CLOSE),
+            ),
+        )),
+        |(attrs, params, _)| {
+            let mut attrs = extract_include_attrs(attrs, params);
+            // Eval does not support alt - clear it if somehow present
+            attrs.alt = None;
+
+            ParseResult::Single(Element::Esi(Tag::Eval { attrs }))
         },
     )(input)
 }
@@ -1272,6 +1327,7 @@ fn tag_handler<'a>(
                 // ESI tags - pass start position to parse from <esi:tagname
                 TAG_NAME_ESI_ASSIGN => esi_assign(original, start),
                 TAG_NAME_ESI_INCLUDE => esi_include(start),
+                TAG_NAME_ESI_EVAL => esi_eval(start),
                 TAG_NAME_ESI_VARS => esi_vars(original, start),
                 TAG_NAME_ESI_COMMENT => esi_comment(start),
                 TAG_NAME_ESI_REMOVE => esi_remove(start),

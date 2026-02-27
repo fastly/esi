@@ -4,7 +4,8 @@ This crate provides a streaming Edge Side Includes parser and executor designed 
 
 The implementation is a subset of Akamai ESI 5.0 supporting the following tags:
 
-- `<esi:include>` (+ `alt`, `onerror="continue"`)
+- `<esi:include>`
+- `<esi:eval>` - evaluates included content as ESI
 - `<esi:try>` | `<esi:attempt>` | `<esi:except>`
 - `<esi:vars>` | `<esi:assign>` (with subscript support for dict/list assignment)
 - `<esi:choose>` | `<esi:when>` | `<esi:otherwise>`
@@ -13,6 +14,69 @@ The implementation is a subset of Akamai ESI 5.0 supporting the following tags:
 - `<esi:remove>`
 
 **Note:** The following tags support nested ESI tags: `<esi:try>`, `<esi:attempt>`, `<esi:except>`, `<esi:choose>`, `<esi:when>`, `<esi:otherwise>`, `<esi:foreach>`, and `<esi:assign>` (long form only).
+
+**Dynamic Content Assembly (DCA)**: Both `<esi:include>` and `<esi:eval>` support the `dca` attribute:
+
+- `dca="none"` (default): For `include`, inserts raw content without ESI processing. For `eval`, fragment executes in parent's context (variables shared).
+- `dca="esi"`: Two-phase processing: fragment is first processed in an isolated context, then the output is processed in parent's context (variables from phase 1 don't leak, but output can contain ESI tags).
+
+**Include vs Eval**:
+
+- `<esi:include>`: Fetches content from origin
+  - `dca="none"`: Inserts content verbatim (no ESI processing)
+  - `dca="esi"`: Parses and evaluates content as ESI before insertion
+- `<esi:eval>`: Fetches content and **always** parses it as ESI (blocking operation)
+  - `dca="none"`: Evaluates in parent's namespace (variables from fragment affect parent)
+  - `dca="esi"`: **Two-phase**: Phase 1 processes fragment in isolated context (variables set here stay isolated), then Phase 2 processes the output in parent's context (output can contain ESI that accesses parent variables)
+
+### Include/Eval Attributes
+
+Both `<esi:include>` and `<esi:eval>` support the following attributes:
+
+**Required:**
+
+- `src="url"` - Source URL to fetch (supports ESI expressions)
+
+**Fallback & Error Handling:**
+
+- `alt="url"` - Fallback URL if primary request fails (include only, eval uses try/except)
+- `onerror="continue"` - On error, delete the tag with no output (continue processing without failing)
+
+**Content Processing:**
+
+- `dca="none|esi"` - Dynamic Content Assembly mode (default: `none`)
+  - `none`: For include, insert content as-is. For eval, process in parent's context (single-phase).
+  - `esi`: For include, parse and evaluate as ESI. For eval, two-phase processing: first in isolated context, then output processed in parent context.
+
+**Caching:**
+
+- `ttl="duration"` - Cache time-to-live (e.g., `"120m"`, `"1h"`, `"2d"`, `"0s"` to disable)
+- `no-store="true"` - Bypass cache entirely
+
+**Request Configuration:**
+
+- `maxwait="milliseconds"` - Request timeout in milliseconds
+- `method="GET|POST"` - HTTP method (default: `GET`)
+- `entity="body"` - Request body for POST requests
+
+**Headers:**
+
+- `appendheaders="header:value"` - Append headers to the request
+- `removeheaders="header1,header2"` - Remove headers from the request
+- `setheaders="header:value"` - Set/replace headers on the request
+
+**Parameters:**
+
+- Nested `<esi:param name="key" value="val"/>` elements append query parameters to the URL
+
+**Example:**
+
+```html
+<esi:include src="http://api.example.com/user" alt="http://cache.example.com/user" dca="esi" ttl="5m" maxwait="1000" onerror="continue">
+  <esi:param name="id" value="$(user_id)" />
+  <esi:param name="format" value="'json'" />
+</esi:include>
+```
 
 Other tags will be ignored and served to the client as-is.
 

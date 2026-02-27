@@ -73,6 +73,8 @@ struct FragmentMetadata {
     removeheaders: Vec<String>,
     /// Headers to set on the request
     setheaders: Vec<(String, Bytes)>,
+    /// Dynamic content assembly mode - whether to process included content as ESI
+    dca: parser_types::DcaMode,
 }
 
 /// Representation of an ESI fragment request with its metadata and pending response
@@ -571,6 +573,117 @@ impl Processor {
         Ok(false)
     }
 
+    /// Handle esi:eval tag - BLOCKING operation that fetches and evaluates content as ESI
+    /// The dca attribute determines how eval processes the fragment:
+    /// - dca="none" (default): Fragment executed in parent's context (shared variables)
+    /// - dca="esi": Fragment executed in isolated context (output only)
+    fn handle_eval(
+        &mut self,
+        attrs: &parser_types::IncludeAttributes,
+        dispatcher: &FragmentRequestDispatcher,
+        output_writer: &mut impl Write,
+    ) -> Result<bool> {
+        // Build and dispatch the request (similar to include)
+        let queued_element = self.dispatch_include_to_element(attrs, dispatcher)?;
+
+        // Eval is BLOCKING - wait for the response immediately
+        match queued_element {
+            QueuedElement::Include(fragment) => {
+                // Wait for the fragment to complete
+                let response = fragment.pending_fragment.wait()?;
+
+                // Check if successful
+                if !response.get_status().is_success() {
+                    if fragment.metadata.continue_on_error {
+                        // Per ESI spec: onerror="continue" deletes the tag with no output
+                        return Ok(false);
+                    } else {
+                        return Err(ExecutionError::ExpressionError(format!(
+                            "Eval request failed with status: {}",
+                            response.get_status()
+                        )));
+                    }
+                }
+
+                // Get the response body
+                let body_bytes = response.into_body_bytes();
+                let body_as_bytes = Bytes::from(body_bytes);
+
+                // ALWAYS parse as ESI (this is the key difference from include)
+                let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
+                    ExecutionError::ExpressionError(format!("Failed to parse eval fragment: {}", e))
+                })?;
+
+                if !rest.is_empty() {
+                    return Err(ExecutionError::ExpressionError(
+                        "Incomplete parse of eval fragment".to_string(),
+                    ));
+                }
+
+                // Check dca mode to determine processing context
+                if fragment.metadata.dca == parser_types::DcaMode::Esi {
+                    // dca="esi": TWO-PHASE processing
+                    // Phase 1: Process fragment in ISOLATED context
+                    let mut isolated_processor = Self::new(
+                        Some(self.ctx.get_request().clone_without_body()),
+                        self.configuration.clone(),
+                    );
+                    let mut isolated_output = Vec::new();
+
+                    for element in elements {
+                        isolated_processor.process_element_streaming(
+                            element,
+                            &mut isolated_output,
+                            dispatcher,
+                        )?;
+                    }
+
+                    // Phase 2: Parse the isolated output as ESI and process in PARENT's context
+                    // This is why variables don't leak: they only exist in phase 1
+                    let isolated_bytes = Bytes::from(isolated_output);
+                    let (rest, output_elements) = parser::parse_remainder(&isolated_bytes)
+                        .map_err(|e| {
+                            ExecutionError::ExpressionError(format!(
+                                "Failed to parse eval isolated output: {}",
+                                e
+                            ))
+                        })?;
+
+                    if !rest.is_empty() {
+                        return Err(ExecutionError::ExpressionError(
+                            "Incomplete parse of eval isolated output".to_string(),
+                        ));
+                    }
+
+                    for element in output_elements {
+                        let break_encountered =
+                            self.process_element_streaming(element, output_writer, dispatcher)?;
+                        if break_encountered {
+                            return Ok(true);
+                        }
+                    }
+                } else {
+                    // dca="none": SINGLE-PHASE processing in PARENT's context
+                    // Fragment included first, then executed in parent (variables affect parent)
+                    for element in elements {
+                        let break_encountered =
+                            self.process_element_streaming(element, output_writer, dispatcher)?;
+                        if break_encountered {
+                            return Ok(true); // Propagate break from eval'd content
+                        }
+                    }
+                }
+
+                Ok(false)
+            }
+            QueuedElement::Content(_content) => {
+                // Error with continue_on_error - insert nothing per spec
+                Ok(false)
+            }
+            _ => unreachable!("dispatch_include_to_element should only return Include or Content"),
+        }
+    }
+
     /// Handle esi:choose tag
     fn handle_choose(
         &mut self,
@@ -793,6 +906,10 @@ impl Processor {
 
             Element::Esi(Tag::Include { attrs }) => self.handle_include(&attrs, dispatcher),
 
+            Element::Esi(Tag::Eval { attrs }) => {
+                self.handle_eval(&attrs, dispatcher, output_writer)
+            }
+
             Element::Esi(Tag::Choose {
                 when_branches,
                 otherwise_events,
@@ -987,6 +1104,7 @@ impl Processor {
             appendheaders,
             removeheaders: attrs.removeheaders.clone(),
             setheaders,
+            dca: attrs.dca,
         })
     }
 
@@ -1291,7 +1409,7 @@ impl Processor {
 
     /// Process an include from the queue (wait and write, handle alt)
     fn process_include_from_queue(
-        &self,
+        &mut self,
         fragment: Fragment,
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
@@ -1313,8 +1431,36 @@ impl Processor {
         // Check if successful
         if final_response.get_status().is_success() {
             let body_bytes = final_response.into_body_bytes();
-            // Write Bytes directly - no UTF-8 conversion needed!
-            output_writer.write_all(&body_bytes)?;
+
+            // Check if we need to process as ESI (dca="esi")
+            if fragment.metadata.dca == parser_types::DcaMode::Esi {
+                // Parse and process the content as ESI
+                let body_as_bytes = Bytes::from(body_bytes);
+                let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
+                    ExecutionError::ExpressionError(format!(
+                        "Failed to parse include fragment with dca=esi: {}",
+                        e
+                    ))
+                })?;
+
+                if !rest.is_empty() {
+                    return Err(ExecutionError::ExpressionError(
+                        "Incomplete parse of include fragment with dca=esi".to_string(),
+                    ));
+                }
+
+                // Process each element in the current namespace
+                for element in elements {
+                    let break_encountered =
+                        self.process_element_streaming(element, output_writer, dispatcher)?;
+                    if break_encountered {
+                        return Ok(()); // Break from foreach, stop processing
+                    }
+                }
+            } else {
+                // Write Bytes directly - no UTF-8 conversion needed!
+                output_writer.write_all(&body_bytes)?;
+            }
             Ok(())
         } else if let Some(alt_src) = fragment.alt_bytes {
             // Try alt - reuse metadata from original request

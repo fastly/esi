@@ -1,5 +1,15 @@
 use bytes::Bytes;
 
+/// Dynamic Content Assembly mode for esi:include and esi:eval
+#[derive(Default, Debug, PartialEq, Clone, Copy)]
+pub enum DcaMode {
+    #[default]
+    /// No pre-processing (default) - fragment returned as-is
+    None,
+    /// Fragment is processed as ESI by origin before returning
+    Esi,
+}
+
 /// All attributes for esi:include tags
 #[derive(Debug, PartialEq, Clone)]
 pub struct IncludeAttributes {
@@ -9,6 +19,8 @@ pub struct IncludeAttributes {
     pub alt: Option<Expr>,
     /// Whether to continue on error (from onerror="continue")
     pub continue_on_error: bool,
+    /// Dynamic Content Assembly mode - controls pre-processing
+    pub dca: DcaMode,
     /// Time-To-Live for caching (e.g., "120m", "1h", "2d", "0s")
     pub ttl: Option<String>,
     /// Timeout in milliseconds for the request
@@ -41,6 +53,10 @@ pub struct WhenBranch {
 pub enum Tag {
     Include {
         /// All include tag attributes (including params)
+        attrs: IncludeAttributes,
+    },
+    Eval {
+        /// All eval tag attributes (same as include but no alt)
         attrs: IncludeAttributes,
     },
     Try {

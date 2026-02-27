@@ -49,6 +49,7 @@ pub const HTML_COMMENT_CLOSE: &[u8] = b"-->";
 // ESI opening tags
 pub const TAG_ESI_ASSIGN_OPEN: &[u8] = b"<esi:assign";
 pub const TAG_ESI_INCLUDE_OPEN: &[u8] = b"<esi:include";
+pub const TAG_ESI_EVAL_OPEN: &[u8] = b"<esi:eval";
 pub const TAG_ESI_VARS_OPEN: &[u8] = b"<esi:vars";
 pub const TAG_ESI_VARS_OPEN_COMPLETE: &[u8] = b"<esi:vars>";
 pub const TAG_ESI_COMMENT_OPEN: &[u8] = b"<esi:comment";
@@ -67,6 +68,7 @@ pub const TAG_ESI_PARAM_OPEN: &[u8] = b"<esi:param";
 // ESI closing tags
 pub const TAG_ESI_ASSIGN_CLOSE: &[u8] = b"</esi:assign>";
 pub const TAG_ESI_INCLUDE_CLOSE: &[u8] = b"</esi:include>";
+pub const TAG_ESI_EVAL_CLOSE: &[u8] = b"</esi:eval>";
 pub const TAG_ESI_VARS_CLOSE: &[u8] = b"</esi:vars>";
 pub const TAG_ESI_TEXT_CLOSE: &[u8] = b"</esi:text>";
 pub const TAG_ESI_CHOOSE_CLOSE: &[u8] = b"</esi:choose>";
@@ -85,6 +87,7 @@ pub const ESI_CLOSE_PREFIX: &[u8] = b"</esi:";
 // ESI tag names (for dispatcher matching)
 pub const TAG_NAME_ESI_ASSIGN: &[u8] = b"esi:assign";
 pub const TAG_NAME_ESI_INCLUDE: &[u8] = b"esi:include";
+pub const TAG_NAME_ESI_EVAL: &[u8] = b"esi:eval";
 pub const TAG_NAME_ESI_VARS: &[u8] = b"esi:vars";
 pub const TAG_NAME_ESI_COMMENT: &[u8] = b"esi:comment";
 pub const TAG_NAME_ESI_REMOVE: &[u8] = b"esi:remove";
