@@ -10,7 +10,7 @@ mod parser;
 pub mod parser_types;
 
 use crate::expression::EvalContext;
-use crate::parser_types::Expr;
+use crate::parser_types::{DcaMode, Expr};
 use bytes::{Buf, Bytes, BytesMut};
 use fastly::http::request::{PendingRequest, PollResult};
 use fastly::http::{header, Method, StatusCode, Url};
@@ -50,31 +50,28 @@ impl From<Response> for PendingFragmentContent {
     }
 }
 
-/// Common metadata shared between main and alt fragment requests
-#[derive(Clone)]
+/// Evaluated fragment request metadata
+/// Store evaluated values once to avoid re-evaluation on alt fallback
 struct FragmentMetadata {
-    /// Whether to continue on error
-    continue_on_error: bool,
-    /// Optional TTL override from the include tag (in seconds)
-    ttl_override: Option<u32>,
-    /// Optional timeout in milliseconds for this specific request
-    maxwait: Option<u32>,
-    // Request building parameters
-    is_escaped: bool,
-    /// Whether the request should be cached or not
-    cacheable: bool,
     /// HTTP method to use for the request (default GET)
     method: Option<Bytes>,
     /// Optional body for POST requests
     entity: Option<Bytes>,
+    /// Headers to set on the request
+    setheaders: Vec<(String, Bytes)>,
     /// Headers to append to the request
     appendheaders: Vec<(String, Bytes)>,
     /// Headers to remove from the request
     removeheaders: Vec<String>,
-    /// Headers to set on the request
-    setheaders: Vec<(String, Bytes)>,
-    /// Dynamic content assembly mode - whether to process included content as ESI
-    dca: parser_types::DcaMode,
+    /// Whether the request should be cached or not
+    cacheable: bool,
+    /// Optional TTL override from the include tag (in seconds)
+    ttl_override: Option<u32>,
+    // Flags needed for fragment processing
+    continue_on_error: bool,
+    /// Optional timeout in milliseconds for this specific request
+    maxwait: Option<u32>,
+    dca: DcaMode,
 }
 
 /// Representation of an ESI fragment request with its metadata and pending response
@@ -85,7 +82,7 @@ pub struct Fragment {
     pub(crate) alt_bytes: Option<Bytes>,
     /// The pending fragment response, which can be polled to retrieve the content
     pub(crate) pending_fragment: PendingFragmentContent,
-    /// Common fragment metadata (shared with alt)
+    /// Evaluated parameters (reusable for alt fallback)
     pub(crate) metadata: FragmentMetadata,
 }
 
@@ -621,7 +618,7 @@ impl Processor {
                 }
 
                 // Check dca mode to determine processing context
-                if fragment.metadata.dca == parser_types::DcaMode::Esi {
+                if fragment.metadata.dca == DcaMode::Esi {
                     // dca="esi": TWO-PHASE processing
                     // Phase 1: Process fragment in ISOLATED context
                     let mut isolated_processor = Self::new(
@@ -954,6 +951,63 @@ impl Processor {
         self.dispatch_include_to_element(attrs, dispatcher)
     }
 
+    /// Evaluate request parameters from `IncludeAttributes` and return a `FragmentMetadata` struct
+    ///
+    /// Evaluate original tag attributes and compute all values needed for dispatching a fragment request
+    fn evaluate_request_params(
+        &mut self,
+        attrs: &parser_types::IncludeAttributes,
+    ) -> Result<FragmentMetadata> {
+        // Parse TTL if provided (it's a literal string like "120m", not an expression)
+        let ttl_override = attrs
+            .ttl
+            .as_ref()
+            .and_then(|ttl_str| cache::parse_ttl(ttl_str));
+
+        // Evaluate method if provided
+        let method = attrs
+            .method
+            .as_ref()
+            .map(|e| self.evaluate_expr_to_bytes(e))
+            .transpose()?;
+
+        // Evaluate entity if provided
+        let entity = attrs
+            .entity
+            .as_ref()
+            .map(|e| self.evaluate_expr_to_bytes(e))
+            .transpose()?;
+
+        // Evaluate header values
+        let mut setheaders = Vec::with_capacity(attrs.setheaders.len());
+        for (name, value_expr) in &attrs.setheaders {
+            let value_bytes = self.evaluate_expr_to_bytes(value_expr)?;
+            setheaders.push((name.clone(), value_bytes));
+        }
+
+        let mut appendheaders = Vec::with_capacity(attrs.appendheaders.len());
+        for (name, value_expr) in &attrs.appendheaders {
+            let value_bytes = self.evaluate_expr_to_bytes(value_expr)?;
+            appendheaders.push((name.clone(), value_bytes));
+        }
+
+        // Determine if the fragment should be cached
+        let cacheable = !attrs.no_store && self.configuration.cache.is_includes_cacheable;
+
+        Ok(FragmentMetadata {
+            method,
+            entity,
+            setheaders,
+            appendheaders,
+            removeheaders: attrs.removeheaders.clone(),
+            cacheable,
+            ttl_override,
+            continue_on_error: attrs.continue_on_error,
+            maxwait: attrs.maxwait,
+            dca: attrs.dca,
+        })
+    }
+
     /// Dispatch an include and return a `QueuedElement` (for flexible queue insertion)
     /// This is the single source of truth for include dispatching logic
     fn dispatch_include_to_element(
@@ -999,10 +1053,11 @@ impl Processor {
             self.ctx.get_request().clone_without_body(),
             &final_src,
             &metadata,
+            &self.configuration,
         )?;
 
         let req_clone = req.clone_without_body();
-        match dispatcher(req_clone, attrs.maxwait) {
+        match dispatcher(req_clone, metadata.maxwait) {
             Ok(pending_fragment) => {
                 let fragment = Fragment {
                     req,
@@ -1012,17 +1067,18 @@ impl Processor {
                 };
                 Ok(QueuedElement::Include(Box::new(fragment)))
             }
-            Err(_) if attrs.continue_on_error => {
+            Err(_) if metadata.continue_on_error => {
                 // Try alt or add error placeholder
                 if let Some(alt_src) = &alt_bytes {
                     let alt_req = build_fragment_request(
                         self.ctx.get_request().clone_without_body(),
                         alt_src,
                         &metadata,
+                        &self.configuration,
                     )?;
 
                     let alt_req_without_body = alt_req.clone_without_body();
-                    dispatcher(alt_req_without_body, attrs.maxwait).map_or_else(
+                    dispatcher(alt_req_without_body, metadata.maxwait).map_or_else(
                         |_| {
                             Ok(QueuedElement::Content(Bytes::from_static(
                                 b"<!-- fragment request failed -->",
@@ -1049,63 +1105,6 @@ impl Processor {
                 "Fragment dispatch failed: {e}"
             ))),
         }
-    }
-
-    /// Evaluate request parameters from `IncludeAttributes`
-    fn evaluate_request_params(
-        &mut self,
-        attrs: &parser_types::IncludeAttributes,
-    ) -> Result<FragmentMetadata> {
-        // Parse TTL if provided (it's a literal string like "120m", not an expression)
-        let ttl_override = attrs
-            .ttl
-            .as_ref()
-            .and_then(|ttl_str| cache::parse_ttl(ttl_str));
-
-        // Evaluate method if provided
-        let method = attrs
-            .method
-            .as_ref()
-            .map(|e| self.evaluate_expr_to_bytes(e))
-            .transpose()?;
-
-        // Evaluate entity if provided
-        let entity = attrs
-            .entity
-            .as_ref()
-            .map(|e| self.evaluate_expr_to_bytes(e))
-            .transpose()?;
-
-        // Evaluate header values
-        let mut appendheaders = Vec::with_capacity(attrs.appendheaders.len());
-        for (name, value_expr) in &attrs.appendheaders {
-            let value_bytes = self.evaluate_expr_to_bytes(value_expr)?;
-            appendheaders.push((name.clone(), value_bytes));
-        }
-
-        let mut setheaders = Vec::with_capacity(attrs.setheaders.len());
-        for (name, value_expr) in &attrs.setheaders {
-            let value_bytes = self.evaluate_expr_to_bytes(value_expr)?;
-            setheaders.push((name.clone(), value_bytes));
-        }
-
-        // Determine if the fragment should be cached
-        // cacheable=true means cache it, cacheable=false means bypass cache (set_pass)
-        let cacheable = !attrs.no_store && self.configuration.cache.is_includes_cacheable;
-
-        Ok(FragmentMetadata {
-            continue_on_error: attrs.continue_on_error,
-            ttl_override,
-            maxwait: attrs.maxwait,
-            is_escaped: self.configuration.is_escaped_content,
-            cacheable,
-            method,
-            entity,
-            appendheaders,
-            removeheaders: attrs.removeheaders.clone(),
-            setheaders,
-            dca: attrs.dca,
-        })
     }
 
     /// Check ready queue items - non-blocking poll
@@ -1431,44 +1430,21 @@ impl Processor {
         // Check if successful
         if final_response.get_status().is_success() {
             let body_bytes = final_response.into_body_bytes();
-
-            // Check if we need to process as ESI (dca="esi")
-            if fragment.metadata.dca == parser_types::DcaMode::Esi {
-                // Parse and process the content as ESI
-                let body_as_bytes = Bytes::from(body_bytes);
-                let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
-                    ExecutionError::ExpressionError(format!(
-                        "Failed to parse include fragment with dca=esi: {}",
-                        e
-                    ))
-                })?;
-
-                if !rest.is_empty() {
-                    return Err(ExecutionError::ExpressionError(
-                        "Incomplete parse of include fragment with dca=esi".to_string(),
-                    ));
-                }
-
-                // Process each element in the current namespace
-                for element in elements {
-                    let break_encountered =
-                        self.process_element_streaming(element, output_writer, dispatcher)?;
-                    if break_encountered {
-                        return Ok(()); // Break from foreach, stop processing
-                    }
-                }
-            } else {
-                // Write Bytes directly - no UTF-8 conversion needed!
-                output_writer.write_all(&body_bytes)?;
-            }
+            self.process_fragment_body(
+                body_bytes,
+                &fragment.metadata.dca,
+                output_writer,
+                dispatcher,
+            )?;
             Ok(())
         } else if let Some(alt_src) = fragment.alt_bytes {
-            // Try alt - reuse metadata from original request
+            // Try alt - reuse pre-evaluated params
             debug!("Main request failed, trying alt");
             let alt_req = build_fragment_request(
                 self.ctx.get_request().clone_without_body(),
                 &alt_src,
                 &fragment.metadata,
+                &self.configuration,
             )?;
 
             let alt_req_without_body = alt_req.clone_without_body();
@@ -1483,8 +1459,12 @@ impl Processor {
                     };
 
                     let body_bytes = final_alt.into_body_bytes();
-                    // Write Bytes directly - no UTF-8 conversion needed!
-                    output_writer.write_all(&body_bytes)?;
+                    self.process_fragment_body(
+                        body_bytes,
+                        &fragment.metadata.dca,
+                        output_writer,
+                        dispatcher,
+                    )?;
                     Ok(())
                 }
                 Err(_) if continue_on_error => {
@@ -1504,6 +1484,47 @@ impl Processor {
                 final_response.get_status()
             )))
         }
+    }
+
+    /// Process fragment body based on dca mode
+    /// - dca="esi": Parse and process content as ESI
+    /// - dca="none": Write raw content
+    fn process_fragment_body(
+        &mut self,
+        body_bytes: Vec<u8>,
+        dca_mode: &DcaMode,
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<()> {
+        if *dca_mode == DcaMode::Esi {
+            // Parse and process the content as ESI
+            let body_as_bytes = Bytes::from(body_bytes);
+            let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
+                ExecutionError::ExpressionError(format!(
+                    "Failed to parse fragment with dca=esi: {}",
+                    e
+                ))
+            })?;
+
+            if !rest.is_empty() {
+                return Err(ExecutionError::ExpressionError(
+                    "Incomplete parse of fragment with dca=esi".to_string(),
+                ));
+            }
+
+            // Process each element in the current namespace
+            for element in elements {
+                let break_encountered =
+                    self.process_element_streaming(element, output_writer, dispatcher)?;
+                if break_encountered {
+                    return Ok(()); // Break from foreach, stop processing
+                }
+            }
+        } else {
+            // dca="none" (default): Write raw content
+            output_writer.write_all(&body_bytes)?;
+        }
+        Ok(())
     }
 }
 
@@ -1548,12 +1569,13 @@ fn build_fragment_request(
     mut request: Request,
     url: &Bytes,
     metadata: &FragmentMetadata,
+    config: &Configuration,
 ) -> Result<Request> {
     // Convert Bytes to str for URL parsing
     let url_str = std::str::from_utf8(url)
         .map_err(|_| ExecutionError::ExpressionError("Invalid UTF-8 in URL".to_string()))?;
 
-    let escaped_url = if metadata.is_escaped {
+    let escaped_url = if config.is_escaped_content {
         Cow::Owned(html_escape::decode_html_entities(url_str).into_owned())
     } else {
         Cow::Borrowed(url_str)
@@ -1584,7 +1606,7 @@ fn build_fragment_request(
 
     request.set_header(header::HOST, &hostname);
 
-    // Set HTTP method (default is GET)
+    // Set HTTP method (default is GET) - use pre-evaluated value
     if let Some(method_bytes) = &metadata.method {
         let method_str = std::str::from_utf8(method_bytes)
             .map_err(|_| ExecutionError::ExpressionError("Invalid UTF-8 in method".to_string()))?
@@ -1601,7 +1623,7 @@ fn build_fragment_request(
         }
     }
 
-    // Set POST body if provided
+    // Set POST body if provided - use pre-evaluated value
     if let Some(entity_bytes) = &metadata.entity {
         if request.get_method() == Method::POST {
             request.set_body(entity_bytes.as_ref());
@@ -1614,12 +1636,12 @@ fn build_fragment_request(
         request.remove_header(header_name);
     }
 
-    // 2. Set headers (replace existing)
+    // 2. Set headers (replace existing) - use pre-evaluated values
     for (name, value) in &metadata.setheaders {
         request.set_header(name, value.as_ref());
     }
 
-    // 3. Append headers (add to existing)
+    // 3. Append headers (add to existing) - use pre-evaluated values
     for (name, value) in &metadata.appendheaders {
         request.append_header(name, value.as_ref());
     }
