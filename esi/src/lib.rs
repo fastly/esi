@@ -179,6 +179,8 @@ impl Processor {
         } else {
             ctx.set_request(Request::new(Method::GET, "http://localhost"));
         }
+        // Apply configuration settings to context
+        ctx.set_max_function_recursion_depth(configuration.function_recursion_depth);
         Self {
             ctx,
             configuration,
@@ -924,6 +926,18 @@ impl Processor {
             }) => self.handle_foreach(collection, item, &content, output_writer, dispatcher),
 
             Element::Esi(Tag::Break) => Ok(true),
+
+            Element::Esi(Tag::Function { name, body }) => {
+                // Register user-defined function in the evaluation context
+                self.ctx.register_function(name, body);
+                Ok(false)
+            }
+
+            Element::Esi(Tag::Return { .. }) => {
+                // Return tags should only appear inside function bodies, not at top level
+                // Ignore at top level
+                Ok(false)
+            }
 
             Element::Esi(_) => Ok(false), // Other standalone tags shouldn't appear
         }

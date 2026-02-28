@@ -24,6 +24,8 @@ pub struct Configuration {
     pub is_escaped_content: bool,
     /// Cache configuration for ESI includes
     pub cache: CacheConfig,
+    /// Maximum recursion depth for user-defined function calls (per ESI spec, default: 5)
+    pub function_recursion_depth: usize,
 }
 
 impl Default for Configuration {
@@ -32,6 +34,7 @@ impl Default for Configuration {
             namespace: String::from("esi"),
             is_escaped_content: true,
             cache: CacheConfig::default(),
+            function_recursion_depth: 5,
         }
     }
 }
@@ -53,6 +56,12 @@ impl Configuration {
     /// Configure caching for ESI includes
     pub const fn with_caching(mut self, cache: CacheConfig) -> Self {
         self.cache = cache;
+        self
+    }
+
+    /// Configure maximum recursion depth for user-defined function calls
+    pub const fn with_max_function_recursion_depth(mut self, depth: usize) -> Self {
+        self.function_recursion_depth = depth;
         self
     }
 }

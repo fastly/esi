@@ -64,6 +64,8 @@ pub const TAG_ESI_EXCEPT_OPEN: &[u8] = b"<esi:except>";
 pub const TAG_ESI_FOREACH_OPEN: &[u8] = b"<esi:foreach";
 pub const TAG_ESI_BREAK_OPEN: &[u8] = b"<esi:break";
 pub const TAG_ESI_PARAM_OPEN: &[u8] = b"<esi:param";
+pub const TAG_ESI_FUNCTION_OPEN: &[u8] = b"<esi:function";
+pub const TAG_ESI_RETURN_OPEN: &[u8] = b"<esi:return";
 
 // ESI closing tags
 pub const TAG_ESI_ASSIGN_CLOSE: &[u8] = b"</esi:assign>";
@@ -79,6 +81,7 @@ pub const TAG_ESI_ATTEMPT_CLOSE: &[u8] = b"</esi:attempt>";
 pub const TAG_ESI_EXCEPT_CLOSE: &[u8] = b"</esi:except>";
 pub const TAG_ESI_FOREACH_CLOSE: &[u8] = b"</esi:foreach>";
 pub const TAG_ESI_REMOVE_CLOSE: &[u8] = b"</esi:remove>";
+pub const TAG_ESI_FUNCTION_CLOSE: &[u8] = b"</esi:function>";
 
 // ESI prefix for detection
 pub const ESI_PREFIX: &[u8] = b"esi:";
@@ -100,6 +103,8 @@ pub const TAG_NAME_ESI_ATTEMPT: &[u8] = b"esi:attempt";
 pub const TAG_NAME_ESI_EXCEPT: &[u8] = b"esi:except";
 pub const TAG_NAME_ESI_FOREACH: &[u8] = b"esi:foreach";
 pub const TAG_NAME_ESI_BREAK: &[u8] = b"esi:break";
+pub const TAG_NAME_ESI_FUNCTION: &[u8] = b"esi:function";
+pub const TAG_NAME_ESI_RETURN: &[u8] = b"esi:return";
 pub const TAG_NAME_SCRIPT: &[u8] = b"script";
 
 // ============================================================================
@@ -162,6 +167,7 @@ pub const VAR_REMOTE_ADDR: &str = "REMOTE_ADDR";
 pub const VAR_QUERY_STRING: &str = "QUERY_STRING";
 pub const VAR_HTTP_PREFIX: &str = "HTTP_";
 pub const VAR_MATCHES: &str = "MATCHES";
+pub const VAR_ARGS: &str = "ARGS";
 
 // Boolean Value Literals
 pub const BOOL_TRUE: &[u8] = b"true";

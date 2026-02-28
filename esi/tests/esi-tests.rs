@@ -1778,3 +1778,143 @@ fn test_arithmetic_operators_in_esi() {
         "100 / 5 - 2 * 3 with left-to-right evaluation should be 54"
     );
 }
+
+#[test]
+fn test_user_defined_function_basic() {
+    init_logs();
+
+    let input = r#"
+        <esi:function name="greet">Hello, World!</esi:function>
+        <esi:vars>$greet()</esi:vars>
+    "#;
+    let req = Request::get("http://example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    // Function should output accumulated text
+    assert!(result.contains("Hello, World!"), "Result was: {}", result);
+}
+
+#[test]
+fn test_user_defined_function_add() {
+    init_logs();
+
+    let input = r#"
+        <esi:function name="add">
+            <esi:return value="$(ARGS{0}) + $(ARGS{1})"/>
+        </esi:function>
+        <esi:vars>$add( 5, 7 )</esi:vars>
+    "#;
+    let req = Request::get("http://example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(result.contains("12"), "Result was: {}", result);
+}
+
+#[test]
+fn test_user_defined_function_multiply() {
+    init_logs();
+
+    let input = r#"
+        <esi:function name="multiply">
+            <esi:return value="$(ARGS{0}) * $(ARGS{1})"/>
+        </esi:function>
+        <esi:vars>Result: $multiply(6, 7)</esi:vars>
+    "#;
+    let req = Request::get("http://example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(result.contains("42"), "Result was: {}", result);
+}
+
+#[test]
+fn test_user_defined_function_is_odd() {
+    init_logs();
+
+    let input = r#"
+        <esi:function name="is_odd">
+            <esi:choose>
+                <esi:when test="$(ARGS{0}) % 2 == 1">
+                    <esi:return value="'yes'"/>
+                </esi:when>
+                <esi:otherwise>
+                    <esi:return value="'no'"/>
+                </esi:otherwise>
+            </esi:choose>
+        </esi:function>
+        <esi:vars>$is_odd(3)</esi:vars>
+    "#;
+    let req = Request::get("http://example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(result.contains("yes"), "Result was: {}", result);
+}
+
+#[test]
+fn test_user_defined_function_sum_with_foreach() {
+    init_logs();
+
+    let input = r#"
+        <esi:function name="sum">
+            <esi:assign name="total" value="0"/>
+            <esi:foreach collection="$(ARGS)" item="arg">
+                <esi:assign name="total" value="$(total) + $(arg)"/>
+            </esi:foreach>
+            <esi:return value="$(total)"/>
+        </esi:function>
+        <esi:vars>$sum(1, 2, 3, 4)</esi:vars>
+    "#;
+    let req = Request::get("http://example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(result.contains("10"), "Result was: {}", result);
+}
+
+#[test]
+fn test_user_defined_function_recursive_addv() {
+    init_logs();
+
+    let input = r#"
+        <esi:function name="addv">
+            <esi:choose>
+                <esi:when test="$(ARGS) == []">
+                    <esi:return value="0"/>
+                </esi:when>
+                <esi:otherwise>
+                    <esi:assign name="sum" value="0"/>
+                    <esi:foreach collection="$(ARGS)" item="arg">
+                        <esi:assign name="sum" value="$(sum) + $(arg)"/>
+                    </esi:foreach>
+                    <esi:return value="$(sum)"/>
+                </esi:otherwise>
+            </esi:choose>
+        </esi:function>
+        <esi:vars>$addv(5, 10, 15)</esi:vars>
+    "#;
+    let req = Request::get("http://example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(result.contains("30"), "Result was: {}", result);
+}
+
+#[test]
+fn test_user_defined_function_recursive_factorial() {
+    init_logs();
+
+    let input = r#"
+        <esi:function name="factorial">
+            <esi:choose>
+                <esi:when test="$(ARGS{0}) <= 1">
+                    <esi:return value="1"/>
+                </esi:when>
+                <esi:otherwise>
+                    <esi:return value="$(ARGS{0}) * $factorial($(ARGS{0}) - 1)"/>
+                </esi:otherwise>
+            </esi:choose>
+        </esi:function>
+        <esi:vars>$factorial(5)</esi:vars>
+    "#;
+    let req = Request::get("http://example.com");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(result.contains("120"), "Result was: {}", result);
+}

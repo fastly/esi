@@ -756,6 +756,46 @@ fn esi_break(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     )(input)
 }
 
+/// Parse <esi:function name="...">...</esi:function>
+fn esi_function_tag<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    map(
+        tuple((
+            delimited(
+                streaming_bytes::tag(TAG_ESI_FUNCTION_OPEN),
+                attributes,
+                preceded(streaming_char::multispace0, streaming_close_bracket),
+            ),
+            |i| tag_content(original, i),
+            streaming_bytes::tag(TAG_ESI_FUNCTION_CLOSE),
+        )),
+        |(attrs, body, _)| {
+            let name = attrs.get("name").cloned().unwrap_or_default();
+
+            ParseResult::Single(Element::Esi(Tag::Function { name, body }))
+        },
+    )(input)
+}
+
+/// Parse <esi:return value="..." />
+fn esi_return(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
+    map(
+        delimited(
+            streaming_bytes::tag(TAG_ESI_RETURN_OPEN),
+            attributes,
+            preceded(streaming_char::multispace0, streaming_self_closing),
+        ),
+        |attrs| {
+            let value_str = attrs.get("value").cloned().unwrap_or_default();
+            let value = parse_attr_as_expr_with_context(value_str, false);
+
+            ParseResult::Single(Element::Esi(Tag::Return { value }))
+        },
+    )(input)
+}
+
 /// Zero-copy parser for <esi:choose>...</esi:choose>
 fn esi_choose<'a>(
     original: &Bytes,
@@ -1340,6 +1380,8 @@ fn tag_handler<'a>(
                 TAG_NAME_ESI_EXCEPT => esi_except(original, start),
                 TAG_NAME_ESI_FOREACH => esi_foreach(original, start),
                 TAG_NAME_ESI_BREAK => esi_break(start),
+                TAG_NAME_ESI_FUNCTION => esi_function_tag(original, start),
+                TAG_NAME_ESI_RETURN => esi_return(start),
 
                 // Special HTML tags - pass start to re-parse from beginning
                 // (script needs to check attributes, so easier to re-parse than continue)
@@ -1582,7 +1624,10 @@ fn fn_argument(input: &[u8]) -> IResult<&[u8], Vec<Expr>, Error<&[u8]>> {
 }
 
 fn fn_nested_argument(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    alt((esi_function, esi_variable, string, integer, bareword))(input)
+    // Try full expression parsing first (supports $(ARGS{0}) - 1)
+    // expr() will naturally stop at commas and closing parens
+    // If expr fails, fall back to bareword for backward compatibility
+    alt((expr, bareword))(input)
 }
 
 fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
@@ -2626,6 +2671,64 @@ exception!
                 assert!(matches!(&content[0], Element::Esi(Tag::Break)));
             }
             other => panic!("Expected Foreach tag, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_function() {
+        let input = b"<esi:function name=\"greet\">Hello $(name)</esi:function>";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+
+        match &elements[0] {
+            Element::Esi(Tag::Function { name, body }) => {
+                assert_eq!(name, "greet");
+                assert!(!body.is_empty());
+            }
+            other => panic!("Expected Function tag, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_function_with_return() {
+        let input =
+            b"<esi:function name=\"add\"><esi:return value=\"$(a) + $(b)\" /></esi:function>";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+
+        match &elements[0] {
+            Element::Esi(Tag::Function { name, body }) => {
+                assert_eq!(name, "add");
+                assert_eq!(body.len(), 1);
+                match &body[0] {
+                    Element::Esi(Tag::Return { value }) => {
+                        // Return should have a valid expression (Comparison for + operator)
+                        assert!(matches!(value, Expr::Comparison { .. }));
+                    }
+                    other => panic!("Expected Return tag in function body, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Function tag, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_return() {
+        let input = b"<esi:return value=\"42\" />";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+
+        match &elements[0] {
+            Element::Esi(Tag::Return { value }) => {
+                assert!(matches!(value, Expr::Integer(42)));
+            }
+            other => panic!("Expected Return tag, got {:?}", other),
         }
     }
 

@@ -88,6 +88,13 @@ pub enum Tag {
         content: Vec<Element>,
     },
     Break,
+    Function {
+        name: String,
+        body: Vec<Element>,
+    },
+    Return {
+        value: Expr,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
