@@ -2,6 +2,7 @@
 
 pub mod cache;
 mod config;
+mod element_handler;
 mod error;
 mod expression;
 mod functions;
@@ -9,8 +10,9 @@ mod literals;
 mod parser;
 pub mod parser_types;
 
+use crate::element_handler::{ElementHandler, Flow};
 use crate::expression::EvalContext;
-use crate::parser_types::{DcaMode, Expr};
+use crate::parser_types::{DcaMode, Element, Expr, IncludeAttributes};
 use bytes::{Buf, Bytes, BytesMut};
 use fastly::http::request::{PendingRequest, PollResult};
 use fastly::http::{header, Method, StatusCode, Url};
@@ -169,6 +171,259 @@ pub struct Processor {
     configuration: Configuration,
     // Queue for pending fragments and blocked content
     queue: VecDeque<QueuedElement>,
+}
+
+/// [`ElementHandler`] implementation for top-level ESI document processing.
+///
+/// Pairs with [`FunctionHandler`](crate::expression::FunctionHandler) — together they are the two
+/// concrete implementors of the trait, distinguished by execution context: this one drives
+/// [`Processor`]'s streaming pipeline, giving the shared default methods access to the
+/// output writer, the fragment dispatcher, and the ready-queue.
+//
+// (contrast with `FunctionHandler` in expression.rs, which drives user-defined function bodies)
+struct DocumentHandler<'a, W: Write> {
+    processor: &'a mut Processor,
+    output: &'a mut W,
+    dispatcher: &'a FragmentRequestDispatcher,
+    /// Optional response post-processor; needed by `process_ready_queue_items`.
+    response_processor: Option<&'a FragmentResponseProcessor>,
+}
+
+impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
+    fn ctx(&mut self) -> &mut EvalContext {
+        &mut self.processor.ctx
+    }
+
+    fn process_ready_queue_items(&mut self) -> crate::Result<()> {
+        self.processor.process_ready_queue_items(
+            self.output,
+            self.dispatcher,
+            self.response_processor,
+        )
+    }
+
+    fn write_bytes(&mut self, bytes: Bytes) -> crate::Result<()> {
+        if self.processor.queue.is_empty() {
+            // Not blocked - write immediately
+            self.output
+                .write_all(&bytes)
+                .map_err(ESIError::WriterError)?;
+        } else {
+            // Blocked by a pending fragment - enqueue for later
+            self.processor
+                .queue
+                .push_back(QueuedElement::Content(bytes));
+        }
+        Ok(())
+    }
+
+    fn on_return(&mut self, _value: &Expr) -> crate::Result<Flow> {
+        // Return tags should only appear inside function bodies, not at the streaming level
+        Ok(Flow::Continue)
+    }
+
+    fn on_include(&mut self, attrs: IncludeAttributes) -> crate::Result<Flow> {
+        let queued_element = self
+            .processor
+            .process_include_tag(&attrs, self.dispatcher)?;
+        self.processor.queue.push_back(queued_element);
+        Ok(Flow::Continue)
+    }
+
+    /// Handle `<esi:eval …/>` — BLOCKING operation that fetches and re-processes content as ESI.
+    ///
+    /// The `dca` attribute controls processing mode:
+    /// - `dca="none"` (default): fragment executed in parent's context (shared variables).
+    /// - `dca="esi"`:  fragment executed in an isolated context (output only, no variable leakage).
+    fn on_eval(&mut self, attrs: IncludeAttributes) -> crate::Result<Flow> {
+        // Build and dispatch the request (same machinery as include, but blocking)
+        let queued_element = self
+            .processor
+            .dispatch_include_to_element(&attrs, self.dispatcher)?;
+
+        match queued_element {
+            QueuedElement::Include(fragment) => {
+                // Eval is BLOCKING - wait for the response immediately
+                let response = fragment.pending_fragment.wait()?;
+
+                if !response.get_status().is_success() {
+                    if fragment.metadata.continue_on_error {
+                        // Per ESI spec: onerror="continue" deletes the tag with no output
+                        return Ok(Flow::Continue);
+                    } else {
+                        return Err(ExecutionError::ExpressionError(format!(
+                            "Eval request failed with status: {}",
+                            response.get_status()
+                        )));
+                    }
+                }
+
+                // Get the response body
+                let body_bytes = response.into_body_bytes();
+                let body_as_bytes = Bytes::from(body_bytes);
+
+                // ALWAYS parse as ESI (this is the key difference from include)
+                let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
+                    ExecutionError::ExpressionError(format!("Failed to parse eval fragment: {}", e))
+                })?;
+
+                if !rest.is_empty() {
+                    return Err(ExecutionError::ExpressionError(
+                        "Incomplete parse of eval fragment".to_string(),
+                    ));
+                }
+
+                if fragment.metadata.dca == DcaMode::Esi {
+                    // dca="esi": TWO-PHASE processing
+                    // Phase 1: Process fragment in ISOLATED context
+                    let dispatcher = self.dispatcher; // Copy the fat pointer (it's a reference)
+                    let mut isolated_processor = Processor::new(
+                        Some(self.processor.ctx.get_request().clone_without_body()),
+                        self.processor.configuration.clone(),
+                    );
+                    let mut isolated_output = Vec::new();
+
+                    let mut isolated_handler = DocumentHandler {
+                        processor: &mut isolated_processor,
+                        output: &mut isolated_output,
+                        dispatcher,
+                        response_processor: None,
+                    };
+                    for element in elements {
+                        isolated_handler.process(&element)?;
+                    }
+
+                    // Phase 2: Parse the isolated output as ESI and process in PARENT's context
+                    // This is why variables don't leak: they only exist in phase 1
+                    let isolated_bytes = Bytes::from(isolated_output);
+                    let (rest, output_elements) = parser::parse_remainder(&isolated_bytes)
+                        .map_err(|e| {
+                            ExecutionError::ExpressionError(format!(
+                                "Failed to parse eval isolated output: {}",
+                                e
+                            ))
+                        })?;
+
+                    if !rest.is_empty() {
+                        return Err(ExecutionError::ExpressionError(
+                            "Incomplete parse of eval isolated output".to_string(),
+                        ));
+                    }
+
+                    for element in output_elements {
+                        if matches!(self.process(&element)?, Flow::Break) {
+                            return Ok(Flow::Break);
+                        }
+                    }
+                } else {
+                    // dca="none": SINGLE-PHASE processing in PARENT's context
+                    // Fragment included first, then executed in parent (variables affect parent)
+                    for element in elements {
+                        if matches!(self.process(&element)?, Flow::Break) {
+                            return Ok(Flow::Break); // Propagate break from eval'd content
+                        }
+                    }
+                }
+
+                Ok(Flow::Continue)
+            }
+            QueuedElement::Content(_) => {
+                // Error with continue_on_error - insert nothing per spec
+                Ok(Flow::Continue)
+            }
+            _ => unreachable!("dispatch_include_to_element should only return Include or Content"),
+        }
+    }
+
+    fn on_try(
+        &mut self,
+        attempt_events: Vec<Vec<Element>>,
+        except_events: Vec<Element>,
+    ) -> crate::Result<Flow> {
+        let mut attempt_queues = Vec::new();
+
+        for attempt in attempt_events {
+            let attempt_queue = self.build_attempt_queue(attempt)?;
+            attempt_queues.push(attempt_queue);
+        }
+
+        // Process except clause elements
+        let except_queue = self.build_attempt_queue(except_events)?;
+
+        // Add the try block to the queue with all attempts and except dispatched
+        self.processor.queue.push_back(QueuedElement::Try {
+            attempt_elements: attempt_queues,
+            except_elements: except_queue,
+        });
+        Ok(Flow::Continue)
+    }
+
+    fn on_function(&mut self, name: String, body: Vec<Element>) -> crate::Result<Flow> {
+        // Register user-defined function in the evaluation context
+        self.processor.ctx.register_function(name, body);
+        Ok(Flow::Continue)
+    }
+}
+
+impl<W: Write> DocumentHandler<'_, W> {
+    /// Build a pre-dispatch queue for use inside a `<esi:try>` attempt or except block.
+    ///
+    /// Text/html/expressions and includes are resolved and queued immediately (for parallel
+    /// fetching); `choose` and nested `try` blocks are processed inline via the trait.
+    fn build_attempt_queue(
+        &mut self,
+        elements: Vec<parser_types::Element>,
+    ) -> crate::Result<Vec<QueuedElement>> {
+        use parser_types::{Element, Tag};
+
+        let mut queue = Vec::new();
+
+        for elem in elements {
+            match elem {
+                Element::Text(text) => {
+                    queue.push(QueuedElement::Content(text));
+                }
+                Element::Html(html) => {
+                    queue.push(QueuedElement::Content(html));
+                }
+                Element::Expr(ref expr) => match expression::eval_expr(expr, self.ctx()) {
+                    Ok(value) => {
+                        if !matches!(value, expression::Value::Null) {
+                            let bytes = value.to_bytes();
+                            if !bytes.is_empty() {
+                                queue.push(QueuedElement::Content(bytes));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Expression evaluation failed: {e:?}");
+                    }
+                },
+                Element::Esi(Tag::Include { ref attrs }) => {
+                    // Dispatch the include and add to queue
+                    let queued_element =
+                        self.processor.process_include_tag(attrs, self.dispatcher)?;
+                    queue.push(queued_element);
+                }
+                Element::Esi(Tag::Choose {
+                    ref when_branches,
+                    ref otherwise_events,
+                }) => {
+                    // Evaluate and process chosen branch inline
+                    self.handle_choose(when_branches, otherwise_events)?;
+                    // Note: breaks within try blocks don't propagate out
+                }
+                Element::Esi(Tag::Try { .. }) => {
+                    // Nested try blocks - process recursively
+                    self.process(&elem)?;
+                    // Note: breaks within try blocks don't propagate out
+                }
+                Element::Esi(_) => {}
+            }
+        }
+
+        Ok(queue)
+    }
 }
 
 impl Processor {
@@ -440,16 +695,17 @@ impl Processor {
             match parse_result {
                 Ok((remaining, elements)) => {
                     // Successfully parsed some elements
+                    let mut handler = DocumentHandler {
+                        processor: self,
+                        output: output_writer,
+                        dispatcher,
+                        response_processor: process_fragment_response,
+                    };
                     for element in elements {
-                        let _ =
-                            self.process_element_streaming(element, output_writer, dispatcher)?;
                         // Note: breaks at top-level are ignored
+                        handler.process(&element)?;
                         // After each element, check if any queued includes are ready (non-blocking poll)
-                        self.process_ready_queue_items(
-                            output_writer,
-                            dispatcher,
-                            process_fragment_response,
-                        )?;
+                        handler.process_ready_queue_items()?;
                     }
 
                     // Calculate how many bytes were consumed
@@ -503,444 +759,6 @@ impl Processor {
         self.drain_queue(output_writer, dispatcher, process_fragment_response)?;
 
         Ok(())
-    }
-
-    /// Handle text or HTML content elements
-    fn handle_content(&mut self, text: Bytes, output_writer: &mut impl Write) -> Result<bool> {
-        if self.queue.is_empty() {
-            // Not blocked - write immediately
-            output_writer.write_all(&text)?;
-        } else {
-            // Blocked - queue it
-            self.queue.push_back(QueuedElement::Content(text));
-        }
-        Ok(false)
-    }
-
-    /// Handle expression evaluation and output
-    fn handle_expr(&mut self, expr: Expr, output_writer: &mut impl Write) -> Result<bool> {
-        match expression::eval_expr(&expr, &mut self.ctx) {
-            Ok(val) if !matches!(val, expression::Value::Null) => {
-                let bytes = val.to_bytes();
-                if !bytes.is_empty() {
-                    if self.queue.is_empty() {
-                        output_writer.write_all(&bytes)?;
-                    } else {
-                        self.queue.push_back(QueuedElement::Content(bytes));
-                    }
-                }
-            }
-            _ => {} // Skip null or error
-        }
-        Ok(false)
-    }
-
-    /// Handle variable assignment
-    fn handle_assign(&mut self, name: &str, subscript: Option<Expr>, value: &Expr) -> Result<bool> {
-        let val = expression::eval_expr(value, &mut self.ctx)
-            .unwrap_or(expression::Value::Text("".into()));
-
-        if let Some(subscript_expr) = subscript {
-            // Subscript assignment: modify existing collection
-            if let Ok(subscript_val) = expression::eval_expr(&subscript_expr, &mut self.ctx) {
-                let key_str = subscript_val.to_string();
-                self.ctx.set_variable(name, Some(&key_str), val)?;
-            }
-        } else {
-            // Regular assignment without subscript
-            self.ctx.set_variable(name, None, val)?;
-        }
-        Ok(false)
-    }
-
-    /// Handle esi:vars tag (sets match name)
-    fn handle_vars(&mut self, name: Option<String>) -> Result<bool> {
-        if let Some(n) = name {
-            self.ctx.set_match_name(&n);
-        }
-        Ok(false)
-    }
-
-    /// Handle esi:include tag
-    fn handle_include(
-        &mut self,
-        attrs: &parser_types::IncludeAttributes,
-        dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<bool> {
-        let queued_element = self.process_include_tag(attrs, dispatcher)?;
-        self.queue.push_back(queued_element);
-        Ok(false)
-    }
-
-    /// Handle esi:eval tag - BLOCKING operation that fetches and evaluates content as ESI
-    /// The dca attribute determines how eval processes the fragment:
-    /// - dca="none" (default): Fragment executed in parent's context (shared variables)
-    /// - dca="esi": Fragment executed in isolated context (output only)
-    fn handle_eval(
-        &mut self,
-        attrs: &parser_types::IncludeAttributes,
-        dispatcher: &FragmentRequestDispatcher,
-        output_writer: &mut impl Write,
-    ) -> Result<bool> {
-        // Build and dispatch the request (similar to include)
-        let queued_element = self.dispatch_include_to_element(attrs, dispatcher)?;
-
-        // Eval is BLOCKING - wait for the response immediately
-        match queued_element {
-            QueuedElement::Include(fragment) => {
-                // Wait for the fragment to complete
-                let response = fragment.pending_fragment.wait()?;
-
-                // Check if successful
-                if !response.get_status().is_success() {
-                    if fragment.metadata.continue_on_error {
-                        // Per ESI spec: onerror="continue" deletes the tag with no output
-                        return Ok(false);
-                    } else {
-                        return Err(ExecutionError::ExpressionError(format!(
-                            "Eval request failed with status: {}",
-                            response.get_status()
-                        )));
-                    }
-                }
-
-                // Get the response body
-                let body_bytes = response.into_body_bytes();
-                let body_as_bytes = Bytes::from(body_bytes);
-
-                // ALWAYS parse as ESI (this is the key difference from include)
-                let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
-                    ExecutionError::ExpressionError(format!("Failed to parse eval fragment: {}", e))
-                })?;
-
-                if !rest.is_empty() {
-                    return Err(ExecutionError::ExpressionError(
-                        "Incomplete parse of eval fragment".to_string(),
-                    ));
-                }
-
-                // Check dca mode to determine processing context
-                if fragment.metadata.dca == DcaMode::Esi {
-                    // dca="esi": TWO-PHASE processing
-                    // Phase 1: Process fragment in ISOLATED context
-                    let mut isolated_processor = Self::new(
-                        Some(self.ctx.get_request().clone_without_body()),
-                        self.configuration.clone(),
-                    );
-                    let mut isolated_output = Vec::new();
-
-                    for element in elements {
-                        isolated_processor.process_element_streaming(
-                            element,
-                            &mut isolated_output,
-                            dispatcher,
-                        )?;
-                    }
-
-                    // Phase 2: Parse the isolated output as ESI and process in PARENT's context
-                    // This is why variables don't leak: they only exist in phase 1
-                    let isolated_bytes = Bytes::from(isolated_output);
-                    let (rest, output_elements) = parser::parse_remainder(&isolated_bytes)
-                        .map_err(|e| {
-                            ExecutionError::ExpressionError(format!(
-                                "Failed to parse eval isolated output: {}",
-                                e
-                            ))
-                        })?;
-
-                    if !rest.is_empty() {
-                        return Err(ExecutionError::ExpressionError(
-                            "Incomplete parse of eval isolated output".to_string(),
-                        ));
-                    }
-
-                    for element in output_elements {
-                        let break_encountered =
-                            self.process_element_streaming(element, output_writer, dispatcher)?;
-                        if break_encountered {
-                            return Ok(true);
-                        }
-                    }
-                } else {
-                    // dca="none": SINGLE-PHASE processing in PARENT's context
-                    // Fragment included first, then executed in parent (variables affect parent)
-                    for element in elements {
-                        let break_encountered =
-                            self.process_element_streaming(element, output_writer, dispatcher)?;
-                        if break_encountered {
-                            return Ok(true); // Propagate break from eval'd content
-                        }
-                    }
-                }
-
-                Ok(false)
-            }
-            QueuedElement::Content(_content) => {
-                // Error with continue_on_error - insert nothing per spec
-                Ok(false)
-            }
-            _ => unreachable!("dispatch_include_to_element should only return Include or Content"),
-        }
-    }
-
-    /// Handle esi:choose tag
-    fn handle_choose(
-        &mut self,
-        when_branches: Vec<parser_types::WhenBranch>,
-        otherwise_events: Vec<parser_types::Element>,
-        output_writer: &mut impl Write,
-        dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<bool> {
-        let mut chose_branch = false;
-
-        for when_branch in when_branches {
-            if let Some(ref match_name) = when_branch.match_name {
-                self.ctx.set_match_name(match_name);
-            }
-
-            match expression::eval_expr(&when_branch.test, &mut self.ctx) {
-                Ok(test_result) if test_result.to_bool() => {
-                    // This branch matches - recursively process it
-                    for elem in when_branch.content {
-                        let break_encountered =
-                            self.process_element_streaming(elem, output_writer, dispatcher)?;
-                        if break_encountered {
-                            return Ok(true); // Propagate break signal
-                        }
-                    }
-                    chose_branch = true;
-                    break;
-                }
-                _ => continue,
-            }
-        }
-
-        // No when matched - process otherwise
-        if !chose_branch {
-            for elem in otherwise_events {
-                let break_encountered =
-                    self.process_element_streaming(elem, output_writer, dispatcher)?;
-                if break_encountered {
-                    return Ok(true); // Propagate break signal
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    /// Handle esi:try tag with attempts and except clause
-    fn handle_try(
-        &mut self,
-        attempt_events: Vec<Vec<parser_types::Element>>,
-        except_events: Vec<parser_types::Element>,
-        output_writer: &mut impl Write,
-        dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<bool> {
-        let mut attempt_queues = Vec::new();
-
-        for attempt in attempt_events {
-            let attempt_queue = self.build_attempt_queue(attempt, output_writer, dispatcher)?;
-            attempt_queues.push(attempt_queue);
-        }
-
-        // Process except clause elements
-        let except_queue = self.build_attempt_queue(except_events, output_writer, dispatcher)?;
-
-        // Add the try block to the queue with all attempts and except dispatched
-        self.queue.push_back(QueuedElement::Try {
-            attempt_elements: attempt_queues,
-            except_elements: except_queue,
-        });
-        Ok(false)
-    }
-
-    /// Build a queue for attempt or except blocks
-    fn build_attempt_queue(
-        &mut self,
-        elements: Vec<parser_types::Element>,
-        output_writer: &mut impl Write,
-        dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<Vec<QueuedElement>> {
-        let mut queue = Vec::new();
-
-        for elem in elements {
-            match elem {
-                parser_types::Element::Text(text) => {
-                    queue.push(QueuedElement::Content(text));
-                }
-                parser_types::Element::Html(html) => {
-                    queue.push(QueuedElement::Content(html));
-                }
-                parser_types::Element::Expr(expr) => {
-                    match expression::eval_expr(&expr, &mut self.ctx) {
-                        Ok(value) => {
-                            if !matches!(value, expression::Value::Null) {
-                                let bytes = value.to_bytes();
-                                if !bytes.is_empty() {
-                                    queue.push(QueuedElement::Content(bytes));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            debug!("Expression evaluation failed: {e:?}");
-                        }
-                    }
-                }
-                parser_types::Element::Esi(parser_types::Tag::Include { attrs }) => {
-                    // Dispatch the include and add to queue
-                    let queued_element = self.process_include_tag(&attrs, dispatcher)?;
-                    queue.push(queued_element);
-                }
-                parser_types::Element::Esi(parser_types::Tag::Choose {
-                    when_branches,
-                    otherwise_events,
-                }) => {
-                    // Evaluate and process chosen branch inline
-                    let mut chose_branch = false;
-                    for when_branch in when_branches {
-                        if let Some(match_name) = &when_branch.match_name {
-                            self.ctx.set_match_name(match_name);
-                        }
-                        let test_result = expression::eval_expr(&when_branch.test, &mut self.ctx)?;
-                        if test_result.to_bool() {
-                            chose_branch = true;
-                            for elem in when_branch.content {
-                                self.process_element_streaming(elem, output_writer, dispatcher)?;
-                                // Note: breaks within try blocks don't propagate out
-                            }
-                            break;
-                        }
-                    }
-                    if !chose_branch {
-                        for elem in otherwise_events {
-                            self.process_element_streaming(elem, output_writer, dispatcher)?;
-                            // Note: breaks within try blocks don't propagate out
-                        }
-                    }
-                }
-                parser_types::Element::Esi(parser_types::Tag::Try { .. }) => {
-                    // Nested try blocks - process recursively
-                    self.process_element_streaming(elem.clone(), output_writer, dispatcher)?;
-                    // Note: breaks within try blocks don't propagate out
-                }
-                parser_types::Element::Esi(_) => {}
-            }
-        }
-
-        Ok(queue)
-    }
-
-    /// Handle esi:foreach tag
-    fn handle_foreach(
-        &mut self,
-        collection: Expr,
-        item: Option<String>,
-        content: &[parser_types::Element],
-        output_writer: &mut impl Write,
-        dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<bool> {
-        // Evaluate the collection expression
-        let collection_value =
-            expression::eval_expr(&collection, &mut self.ctx).unwrap_or(expression::Value::Null);
-
-        // Convert to a list if needed
-        let items = match &collection_value {
-            expression::Value::List(items) => items.clone(),
-            expression::Value::Dict(map) => {
-                // Convert dict entries to a list of 2-element lists [key, value]
-                map.iter()
-                    .map(|(k, v)| {
-                        expression::Value::List(vec![
-                            expression::Value::Text(k.clone().into()),
-                            v.clone(),
-                        ])
-                    })
-                    .collect()
-            }
-            expression::Value::Null => Vec::new(),
-            other => vec![other.clone()], // Treat single values as a list of one
-        };
-
-        // Default item variable name if not specified
-        let item_var = item.unwrap_or_else(|| "item".to_string());
-
-        // Iterate through items
-        'foreach_loop: for item_value in items {
-            // Set the item variable
-            self.ctx.set_variable(&item_var, None, item_value)?;
-
-            // Process content for this iteration
-            for elem in content {
-                let break_encountered =
-                    self.process_element_streaming(elem.clone(), output_writer, dispatcher)?;
-                if break_encountered {
-                    break 'foreach_loop;
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    /// Process a single element in streaming mode
-    fn process_element_streaming(
-        &mut self,
-        element: parser_types::Element,
-        output_writer: &mut impl Write,
-        dispatcher: &FragmentRequestDispatcher,
-    ) -> Result<bool> {
-        use parser_types::{Element, Tag};
-
-        match element {
-            Element::Text(text) | Element::Html(text) => self.handle_content(text, output_writer),
-
-            Element::Expr(expr) => self.handle_expr(expr, output_writer),
-
-            Element::Esi(Tag::Assign {
-                name,
-                subscript,
-                value,
-            }) => self.handle_assign(&name, subscript, &value),
-
-            Element::Esi(Tag::Vars { name }) => self.handle_vars(name),
-
-            Element::Esi(Tag::Include { attrs }) => self.handle_include(&attrs, dispatcher),
-
-            Element::Esi(Tag::Eval { attrs }) => {
-                self.handle_eval(&attrs, dispatcher, output_writer)
-            }
-
-            Element::Esi(Tag::Choose {
-                when_branches,
-                otherwise_events,
-            }) => self.handle_choose(when_branches, otherwise_events, output_writer, dispatcher),
-
-            Element::Esi(Tag::Try {
-                attempt_events,
-                except_events,
-            }) => self.handle_try(attempt_events, except_events, output_writer, dispatcher),
-
-            Element::Esi(Tag::Foreach {
-                collection,
-                item,
-                content,
-            }) => self.handle_foreach(collection, item, &content, output_writer, dispatcher),
-
-            Element::Esi(Tag::Break) => Ok(true),
-
-            Element::Esi(Tag::Function { name, body }) => {
-                // Register user-defined function in the evaluation context
-                self.ctx.register_function(name, body);
-                Ok(false)
-            }
-
-            Element::Esi(Tag::Return { .. }) => {
-                // Return tags should only appear inside function bodies, not at top level
-                // Ignore at top level
-                Ok(false)
-            }
-
-            Element::Esi(_) => Ok(false), // Other standalone tags shouldn't appear
-        }
     }
 
     /// Evaluate an Expr to a Bytes value for use in includes
@@ -1527,10 +1345,14 @@ impl Processor {
             }
 
             // Process each element in the current namespace
+            let mut handler = DocumentHandler {
+                processor: self,
+                output: output_writer,
+                dispatcher,
+                response_processor: None,
+            };
             for element in elements {
-                let break_encountered =
-                    self.process_element_streaming(element, output_writer, dispatcher)?;
-                if break_encountered {
+                if matches!(handler.process(&element)?, Flow::Break) {
                     return Ok(()); // Break from foreach, stop processing
                 }
             }

@@ -5,9 +5,10 @@ use regex::RegexBuilder;
 use std::{collections::HashMap, fmt::Display};
 
 use crate::{
+    element_handler::{ElementHandler, Flow},
     functions,
     literals::*,
-    parser_types::{Element, Expr, Operator},
+    parser_types::{Element, Expr, IncludeAttributes, Operator},
     ExecutionError, Result,
 };
 
@@ -356,7 +357,7 @@ pub struct EvalContext {
     /// Registry for user-defined ESI functions
     function_registry: FunctionRegistry,
     /// Maximum recursion depth for user-defined function calls (per ESI spec, default: 5)
-    max_function_recursion_depth: usize,
+    function_recursion_depth: usize,
 }
 impl Default for EvalContext {
     fn default() -> Self {
@@ -374,7 +375,7 @@ impl Default for EvalContext {
             is_uncacheable: false,
             args_stack: Vec::new(),
             function_registry: FunctionRegistry::new(),
-            max_function_recursion_depth: 5,
+            function_recursion_depth: 5,
         }
     }
 }
@@ -397,7 +398,7 @@ impl EvalContext {
             is_uncacheable: false,
             args_stack: Vec::new(),
             function_registry: FunctionRegistry::new(),
-            max_function_recursion_depth: 5,
+            function_recursion_depth: 5,
         }
     }
 
@@ -706,7 +707,7 @@ impl EvalContext {
 
     /// Set maximum recursion depth for user-defined function calls
     pub const fn set_max_function_recursion_depth(&mut self, depth: usize) {
-        self.max_function_recursion_depth = depth;
+        self.function_recursion_depth = depth;
     }
 }
 
@@ -894,167 +895,61 @@ fn dict_to_string(map: &HashMap<String, Value>) -> String {
     parts.join("&")
 }
 
-/// Process a single element within a function body, accumulating output and checking for returns
-/// This is a helper for call_user_function that can be called recursively
+/// Element handler for user-defined function bodies.
 ///
-/// Returns:
-/// - `Ok(Some(value))` - Explicit return with value
-/// - `Ok(None)` - Continue processing
-fn process_function_element(
-    element: &Element,
-    output: &mut Vec<u8>,
-    ctx: &mut EvalContext,
-    should_break: &mut bool,
-) -> Result<Option<Value>> {
-    match element {
-        Element::Esi(crate::parser_types::Tag::Return { value }) => {
-            // Evaluate the return expression and signal early return
-            Ok(Some(eval_expr(value, ctx)?))
-        }
-        Element::Text(text) | Element::Html(text) => {
-            output.extend_from_slice(text);
-            Ok(None)
-        }
-        Element::Expr(expr) => {
-            let value = eval_expr(expr, ctx)?;
-            output.extend_from_slice(value.to_bytes().as_ref());
-            Ok(None)
-        }
-        Element::Esi(crate::parser_types::Tag::Assign {
-            name,
-            subscript,
-            value,
-        }) => {
-            let val = eval_expr(value, ctx)?;
-            let subscript_str = if let Some(sub_expr) = subscript {
-                Some(eval_expr(sub_expr, ctx)?.to_string())
-            } else {
-                None
-            };
-            ctx.set_variable(name, subscript_str.as_deref(), val)?;
-            Ok(None)
-        }
-        Element::Esi(crate::parser_types::Tag::Vars { name }) => {
-            if let Some(match_name) = name {
-                ctx.set_match_name(match_name);
-            }
-            Ok(None)
-        }
-        Element::Esi(crate::parser_types::Tag::Choose {
-            when_branches,
-            otherwise_events,
-        }) => {
-            let mut chose_branch = false;
+/// Writes evaluated output to an in-memory `Vec<u8>`; signals `Return` or
+/// `Break` back to the caller via `Flow`.
+struct FunctionHandler<'a> {
+    ctx: &'a mut EvalContext,
+    output: &'a mut Vec<u8>,
+}
 
-            for when_branch in when_branches {
-                if let Some(ref match_name) = when_branch.match_name {
-                    ctx.set_match_name(match_name);
-                }
+impl ElementHandler for FunctionHandler<'_> {
+    fn ctx(&mut self) -> &mut EvalContext {
+        self.ctx
+    }
 
-                match eval_expr(&when_branch.test, ctx) {
-                    Ok(test_result) if test_result.to_bool() => {
-                        // This branch matches - recursively process it
-                        for elem in &when_branch.content {
-                            if let Some(return_val) = process_function_element(elem, output, ctx, should_break)? {
-                                return Ok(Some(return_val));
-                            }
-                            if *should_break {
-                                return Ok(None);
-                            }
-                        }
-                        chose_branch = true;
-                        break;
-                    }
-                    _ => continue,
-                }
-            }
+    fn write_bytes(&mut self, bytes: bytes::Bytes) -> Result<()> {
+        self.output.extend_from_slice(&bytes);
+        Ok(())
+    }
 
-            // No when matched - process otherwise
-            if !chose_branch {
-                for elem in otherwise_events {
-                    if let Some(return_val) = process_function_element(elem, output, ctx, should_break)? {
-                        return Ok(Some(return_val));
-                    }
-                    if *should_break {
-                        return Ok(None);
-                    }
-                }
-            }
-            Ok(None)
-        }
-        Element::Esi(crate::parser_types::Tag::Foreach {
-            collection,
-            item,
-            content,
-        }) => {
-            // Evaluate the collection expression
-            let collection_value = eval_expr(collection, ctx)?;
+    /// Evaluate the return expression and signal an early exit from the function body.
+    fn on_return(&mut self, value: &Expr) -> Result<Flow> {
+        let val = eval_expr(value, self.ctx)?;
+        Ok(Flow::Return(val))
+    }
 
-            // Convert to a list if needed
-            let items = match &collection_value {
-                Value::List(items) => items.clone(),
-                Value::Dict(map) => {
-                    // Convert dict to list of [key, value] pairs
-                    map.iter()
-                        .map(|(k, v)| {
-                            Value::List(vec![Value::Text(k.clone().into()), v.clone()])
-                        })
-                        .collect()
-                }
-                Value::Null => Vec::new(),
-                other => vec![other.clone()], // Treat single values as a list of one
-            };
+    /// Per ESI spec: `esi:include` is not allowed inside function bodies.
+    fn on_include(&mut self, _attrs: IncludeAttributes) -> Result<Flow> {
+        Err(ExecutionError::FunctionError(
+            "esi:include is not allowed in function bodies".to_string(),
+        ))
+    }
 
-            // Default item variable name if not specified
-            let item_var = item.as_ref().map(|s| s.as_str()).unwrap_or("item");
+    /// Per ESI spec: `esi:eval` is not allowed inside function bodies.
+    fn on_eval(&mut self, _attrs: IncludeAttributes) -> Result<Flow> {
+        Err(ExecutionError::FunctionError(
+            "esi:eval is not allowed in function bodies".to_string(),
+        ))
+    }
 
-            // Iterate through items
-            for item_value in items {
-                // Set the item variable
-                ctx.set_variable(item_var, None, item_value)?;
-
-                // Process content for this iteration
-                for elem in content {
-                    if let Some(return_val) = process_function_element(elem, output, ctx, should_break)? {
-                        return Ok(Some(return_val));
-                    }
-                    if *should_break {
-                        break; // Break out of foreach loop
-                    }
-                }
-                if *should_break {
-                    *should_break = false; // Reset break flag after exiting loop
-                    break;
-                }
-            }
-            Ok(None)
-        }
-        Element::Esi(crate::parser_types::Tag::Break) => {
-            // Signal break to exit foreach loop
-            *should_break = true;
-            Ok(None)
-        }
-        // Per ESI spec: functions cannot contain include, eval, or nested function definitions
-        Element::Esi(crate::parser_types::Tag::Include { .. }) => {
-            Err(ExecutionError::FunctionError(
-                "esi:include is not allowed in function bodies".to_string(),
-            ))
-        }
-        Element::Esi(crate::parser_types::Tag::Eval { .. }) => {
-            Err(ExecutionError::FunctionError(
-                "esi:eval is not allowed in function bodies".to_string(),
-            ))
-        }
-        Element::Esi(crate::parser_types::Tag::Function { .. }) => {
-            Err(ExecutionError::FunctionError(
-                "esi:function is not allowed in function bodies (nested function definitions are not supported)".to_string(),
-            ))
-        }
+    /// `esi:try` requires a dispatcher; silently ignore inside function bodies.
+    fn on_try(
+        &mut self,
+        _attempt_events: Vec<Vec<Element>>,
+        _except_events: Vec<Element>,
+    ) -> Result<Flow> {
         // Try/Except would require dispatcher context which isn't available in expression evaluation
         // Silently ignore for now (could also error)
-        Element::Esi(crate::parser_types::Tag::Try { .. }) => Ok(None),
-        // Other tags that shouldn't appear - silently ignore
-        _ => Ok(None),
+        Ok(Flow::Continue)
+    }
+
+    /// Per ESI spec: nested function definitions are not supported.
+    fn on_function(&mut self, _name: String, _body: Vec<Element>) -> Result<Flow> {
+        Err(ExecutionError::FunctionError(
+            "esi:function is not allowed in function bodies (nested function definitions are not supported)".to_string(),
+        ))
     }
 }
 
@@ -1079,29 +974,31 @@ fn call_user_function(
     ctx: &mut EvalContext,
 ) -> Result<Value> {
     // Check recursion depth before proceeding
-    if ctx.args_stack.len() >= ctx.max_function_recursion_depth {
+    if ctx.args_stack.len() >= ctx.function_recursion_depth {
         return Err(ExecutionError::FunctionError(format!(
             "Maximum recursion depth ({}) exceeded for function '{}'",
-            ctx.max_function_recursion_depth, name
+            ctx.function_recursion_depth, name
         )));
     }
 
     // Push arguments onto the stack for $(ARGS) access
     ctx.push_args(args.to_vec());
 
-    // Process function body, catching any errors to ensure cleanup
+    // Process function body via the shared ElementHandler trait, catching any
+    // errors to ensure cleanup
     let result = (|| {
         let mut output = Vec::new();
-        let mut should_break = false;
+        let mut handler = FunctionHandler {
+            ctx,
+            output: &mut output,
+        };
 
         for element in body {
-            if let Some(return_value) =
-                process_function_element(element, &mut output, ctx, &mut should_break)?
-            {
-                return Ok(return_value);
+            match handler.process(element)? {
+                Flow::Continue => continue,
+                Flow::Return(value) => return Ok(value),
+                Flow::Break => continue, // Break at top level - ignore
             }
-            // Break at function level doesn't make sense - ignore the flag
-            should_break = false;
         }
 
         // No explicit return - return accumulated output as text
