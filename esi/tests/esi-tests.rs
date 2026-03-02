@@ -1918,3 +1918,322 @@ fn test_user_defined_function_recursive_factorial() {
 
     assert!(result.contains("120"), "Result was: {}", result);
 }
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests for ESI tags inside <esi:try> attempt/except blocks (fix #9 / #2)
+// Previously, Choose, Foreach, Assign and Vars were silently dropped when they
+// appeared inside an attempt or except block because build_attempt_queue only
+// handled Text, Html, Expr, Include, and a hard-coded Choose/Try branch that
+// routed output to the wrong queue.
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_try_attempt_with_vars() {
+    init_logs();
+
+    let input = r#"<esi:assign name="x" value="'hello'"/>
+<esi:try>
+  <esi:attempt><esi:vars>$(x)</esi:vars></esi:attempt>
+  <esi:except>fallback</esi:except>
+</esi:try>"#;
+
+    let result = process_esi_document(input, Request::get("http://example.com/"))
+        .expect("Processing should succeed");
+
+    assert!(
+        result.contains("hello"),
+        "vars inside try attempt should render. Got: {result}"
+    );
+    assert!(
+        !result.contains("fallback"),
+        "fallback should NOT appear. Got: {result}"
+    );
+}
+
+#[test]
+fn test_try_attempt_with_choose() {
+    init_logs();
+
+    let input = r#"<esi:assign name="flag" value="'yes'"/>
+<esi:try>
+  <esi:attempt>
+    <esi:choose>
+      <esi:when test="$(flag)=='yes'">chosen</esi:when>
+      <esi:otherwise>other</esi:otherwise>
+    </esi:choose>
+  </esi:attempt>
+  <esi:except>fallback</esi:except>
+</esi:try>"#;
+
+    let result = process_esi_document(input, Request::get("http://example.com/"))
+        .expect("Processing should succeed");
+
+    assert!(
+        result.contains("chosen"),
+        "choose inside try attempt should evaluate. Got: {result}"
+    );
+    assert!(
+        !result.contains("other"),
+        "non-matching branch should not appear. Got: {result}"
+    );
+    assert!(
+        !result.contains("fallback"),
+        "fallback should NOT appear. Got: {result}"
+    );
+}
+
+#[test]
+fn test_try_attempt_with_foreach() {
+    init_logs();
+
+    let input = r#"<esi:try>
+  <esi:attempt><esi:foreach collection="['a','b','c']" item="i">$(i)</esi:foreach></esi:attempt>
+  <esi:except>fallback</esi:except>
+</esi:try>"#;
+
+    let result = process_esi_document(input, Request::get("http://example.com/"))
+        .expect("Processing should succeed");
+
+    assert_eq!(
+        result.trim(),
+        "abc",
+        "foreach inside try attempt should iterate. Got: {result}"
+    );
+}
+
+#[test]
+fn test_try_attempt_with_assign() {
+    init_logs();
+
+    let input = r#"<esi:try>
+  <esi:attempt>
+    <esi:assign name="val" value="'computed'"/>
+    <esi:vars>$(val)</esi:vars>
+  </esi:attempt>
+  <esi:except>fallback</esi:except>
+</esi:try>"#;
+
+    let result = process_esi_document(input, Request::get("http://example.com/"))
+        .expect("Processing should succeed");
+
+    assert!(
+        result.contains("computed"),
+        "assign+vars inside try attempt should work. Got: {result}"
+    );
+    assert!(
+        !result.contains("fallback"),
+        "fallback should NOT appear. Got: {result}"
+    );
+}
+
+#[test]
+fn test_try_except_with_vars() {
+    init_logs();
+
+    // Attempt dispatches an include that returns 500 (no onerror=continue, so it raises Err
+    // and the try machinery falls through to the except block).
+    let input = r#"<esi:assign name="msg" value="'except-rendered'"/>
+<esi:try>
+  <esi:attempt><esi:include src="http://example.com/fails"/></esi:attempt>
+  <esi:except><esi:vars>$(msg)</esi:vars></esi:except>
+</esi:try>"#;
+
+    // Dispatcher that always returns a 500 so the attempt fails
+    let dispatcher = |_req: Request, _: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+        let mut resp = fastly::Response::new();
+        resp.set_status(fastly::http::StatusCode::INTERNAL_SERVER_ERROR);
+        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+            resp,
+        )))
+    };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default(),
+    );
+    processor
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
+        .expect("Processing should succeed");
+
+    let result = String::from_utf8(output).unwrap();
+    assert!(
+        result.contains("except-rendered"),
+        "vars inside except block should render. Got: {result}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Multi-include document ordering (fix #7)
+// With simplified drain_queue (sequential wait), includes must appear in the
+// same order they appear in the document regardless of which finishes first.
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_multi_include_document_order() {
+    init_logs();
+
+    let input = r#"<esi:include src="http://example.com/first"/><esi:include src="http://example.com/second"/><esi:include src="http://example.com/third"/>"#;
+
+    let dispatcher = |req: Request, _: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+        let body = if req.get_url_str().contains("/first") {
+            "FIRST"
+        } else if req.get_url_str().contains("/second") {
+            "SECOND"
+        } else {
+            "THIRD"
+        };
+        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+            fastly::Response::from_body(body),
+        )))
+    };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default(),
+    );
+    processor
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
+        .expect("Processing should succeed");
+
+    let result = String::from_utf8(output).unwrap();
+    assert_eq!(
+        result, "FIRSTSECONDTHIRD",
+        "Includes must appear in document order. Got: {result}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Try block after an include in the same document (fix #11)
+// Previously, process_ready_queue_items skipped Try blocks entirely, so a Try
+// that reached the head of the queue (after a preceding include was consumed)
+// would stall until drain_queue ran at the end - never an outright bug in tests
+// using CompletedRequest, but wrong for real async requests.  The fix makes
+// process_ready_queue_items process Try blocks inline.
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_include_followed_by_try_block() {
+    init_logs();
+
+    let input = r#"<esi:include src="http://example.com/first"/>
+<esi:try>
+  <esi:attempt><esi:include src="http://example.com/attempt"/></esi:attempt>
+  <esi:except>except-content</esi:except>
+</esi:try>"#;
+
+    let dispatcher = |req: Request, _: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+        let body = if req.get_url_str().contains("/first") {
+            "first-content"
+        } else {
+            "attempt-content"
+        };
+        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+            fastly::Response::from_body(body),
+        )))
+    };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default(),
+    );
+    processor
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
+        .expect("Processing should succeed");
+
+    let result = String::from_utf8(output).unwrap();
+    assert!(
+        result.contains("first-content"),
+        "Include before try should appear. Got: {result}"
+    );
+    assert!(
+        result.contains("attempt-content"),
+        "Try attempt should execute after include. Got: {result}"
+    );
+    assert!(
+        !result.contains("except-content"),
+        "Except should NOT appear when attempt succeeds. Got: {result}"
+    );
+}
+
+#[test]
+fn test_content_order_around_try_block() {
+    // Verifies that text before and after a <esi:try> block appears in the
+    // correct position in the output, even when the attempt contains an include.
+    init_logs();
+
+    let input = r#"before<esi:try>
+  <esi:attempt><esi:include src="http://example.com/fragment"/></esi:attempt>
+  <esi:except>fallback</esi:except>
+</esi:try>after"#;
+
+    let dispatcher = |_req: Request, _: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+        Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+            fastly::Response::from_body("fragment-content"),
+        )))
+    };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default(),
+    );
+    processor
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
+        .expect("Processing should succeed");
+
+    let result = String::from_utf8(output).unwrap();
+    assert_eq!(result, "beforefragment-contentafter", "Got: {result:?}");
+}
+
+#[test]
+fn test_try_block_at_queue_head_uses_except_on_failure() {
+    init_logs();
+
+    // An include followed by a try whose attempt fails → except should show
+    let input = r#"<esi:include src="http://example.com/first"/>
+<esi:try>
+  <esi:attempt><esi:include src="http://example.com/attempt"/></esi:attempt>
+  <esi:except>except-content</esi:except>
+</esi:try>"#;
+
+    let dispatcher = |req: Request, _: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+        if req.get_url_str().contains("/first") {
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                fastly::Response::from_body("first-content"),
+            )))
+        } else {
+            // Attempt fails with 500
+            let mut resp = fastly::Response::new();
+            resp.set_status(fastly::http::StatusCode::INTERNAL_SERVER_ERROR);
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                resp,
+            )))
+        }
+    };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default(),
+    );
+    processor
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
+        .expect("Processing should succeed");
+
+    let result = String::from_utf8(output).unwrap();
+    assert!(
+        result.contains("first-content"),
+        "Include before try should appear. Got: {result}"
+    );
+    assert!(
+        result.contains("except-content"),
+        "Except should appear when attempt fails. Got: {result}"
+    );
+}
