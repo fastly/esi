@@ -522,23 +522,23 @@ impl EvalContext {
         match key {
             VAR_ARGS => {
                 // Handle $(ARGS) and $(ARGS{n})
-                match self.current_args() {
-                    None => Value::Null,
-                    Some(args) => subkey.map_or_else(
-                        || {
-                            // $(ARGS) without subscript - return list of all arguments
-                            Value::List(args.clone())
-                        },
-                        |sub| {
-                            // $(ARGS{n}) - return nth argument (0-indexed per ESI spec)
-                            if let Ok(index) = sub.parse::<usize>() {
-                                args.get(index).cloned().unwrap_or(Value::Null)
-                            } else {
-                                Value::Null
-                            }
-                        },
-                    ),
-                }
+                self.current_args().map_or_else(
+                    || Value::Null,
+                    |args| {
+                        subkey.map_or_else(
+                            || {
+                                // $(ARGS) without subscript - return list of all arguments
+                                Value::List(args.clone())
+                            },
+                            |sub| {
+                                // $(ARGS{n}) - return nth argument (0-indexed per ESI spec)
+                                sub.parse::<usize>().map_or(Value::Null, |index| {
+                                    args.get(index).cloned().unwrap_or(Value::Null)
+                                })
+                            },
+                        )
+                    },
+                )
             }
             VAR_REQUEST_METHOD => Value::Text(self.request.get_method_str().to_string().into()),
             VAR_REQUEST_PATH => Value::Text(self.request.get_path().to_string().into()),

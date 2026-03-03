@@ -299,7 +299,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
 
                 // ALWAYS parse as ESI (this is the key difference from include)
                 let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
-                    ExecutionError::ExpressionError(format!("Failed to parse eval fragment: {}", e))
+                    ExecutionError::ExpressionError(format!("Failed to parse eval fragment: {e}"))
                 })?;
 
                 if !rest.is_empty() {
@@ -342,8 +342,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     let (rest, output_elements) = parser::parse_remainder(&isolated_bytes)
                         .map_err(|e| {
                             ExecutionError::ExpressionError(format!(
-                                "Failed to parse eval isolated output: {}",
-                                e
+                                "Failed to parse eval isolated output: {e}",
                             ))
                         })?;
 
@@ -1061,7 +1060,7 @@ impl Processor {
                                     // Static content before the first include.
                                     if !pre_out.is_empty() {
                                         let slot = buf.len();
-                                        buf.push(Some(Bytes::from(pre_out.to_vec())));
+                                        buf.push(Some(Bytes::from(pre_out.clone())));
                                         try_trackers[tracker_idx].attempts[attempt_idx]
                                             .buf_slots
                                             .push(slot);
@@ -1239,7 +1238,7 @@ impl Processor {
 
             let entry = url_map
                 .get_mut(&key)
-                .and_then(|q| q.pop_front())
+                .and_then(VecDeque::pop_front)
                 .ok_or_else(|| {
                     ESIError::ExpressionError(format!(
                         "drain_queue: no in-flight fragment for {}/{}",
@@ -1362,7 +1361,7 @@ impl Processor {
             let except_elements = std::mem::take(&mut try_trackers[tracker_idx].except_elements);
             if !except_elements.is_empty() {
                 let except_buf = self.process_try_task(
-                    except_elements,
+                    &except_elements,
                     dispatch_fragment_request,
                     process_fragment_response,
                 )?;
@@ -1386,13 +1385,13 @@ impl Processor {
     ) -> Result<()> {
         let mut any_failed = false;
         for attempt in attempt_elements {
-            match self.process_try_task(attempt, dispatcher, processor) {
+            match self.process_try_task(&attempt, dispatcher, processor) {
                 Ok(buffer) => output_writer.write_all(&buffer)?,
                 Err(_) => any_failed = true,
             }
         }
         if any_failed {
-            let buf = self.process_try_task(except_elements, dispatcher, processor)?;
+            let buf = self.process_try_task(&except_elements, dispatcher, processor)?;
             output_writer.write_all(&buf)?;
         }
         Ok(())
@@ -1446,7 +1445,7 @@ impl Processor {
     /// document order (blocking wait per include).
     fn process_try_task(
         &mut self,
-        elements: Vec<Element>,
+        elements: &[Element],
         dispatcher: &FragmentRequestDispatcher,
         processor: Option<&FragmentResponseProcessor>,
     ) -> Result<Vec<u8>> {
@@ -1522,7 +1521,7 @@ impl Processor {
             let body_bytes = final_response.into_body_bytes();
             self.process_fragment_body(
                 body_bytes,
-                &fragment.metadata.dca,
+                fragment.metadata.dca,
                 output_writer,
                 dispatch_fragment_request,
             )?;
@@ -1551,7 +1550,7 @@ impl Processor {
                     let body_bytes = final_alt.into_body_bytes();
                     self.process_fragment_body(
                         body_bytes,
-                        &fragment.metadata.dca,
+                        fragment.metadata.dca,
                         output_writer,
                         dispatch_fragment_request,
                     )?;
@@ -1582,17 +1581,16 @@ impl Processor {
     fn process_fragment_body(
         &mut self,
         body_bytes: Vec<u8>,
-        dca_mode: &DcaMode,
+        dca_mode: DcaMode,
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
     ) -> Result<()> {
-        if *dca_mode == DcaMode::Esi {
+        if dca_mode == DcaMode::Esi {
             // Parse and process the content as ESI
             let body_as_bytes = Bytes::from(body_bytes);
             let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
                 ExecutionError::ExpressionError(format!(
-                    "Failed to parse fragment with dca=esi: {}",
-                    e
+                    "Failed to parse fragment with dca=esi: {e}",
                 ))
             })?;
 

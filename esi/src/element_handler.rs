@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Unified control-flow signal returned by every element-processing step.
-pub(crate) enum Flow {
+pub enum Flow {
     /// Keep going with the next element.
     Continue,
     /// Exit the nearest enclosing `esi:foreach` loop.
@@ -39,7 +39,7 @@ pub(crate) enum Flow {
 ///
 /// Implementors provide context-specific behaviour through the required hooks;
 /// all shared tag-handling logic lives in the default method implementations.
-pub(crate) trait ElementHandler {
+pub trait ElementHandler {
     // -------------------------------------------------------------------------
     // Required: context access
     // -------------------------------------------------------------------------

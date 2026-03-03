@@ -104,14 +104,14 @@ pub fn set_response_code(args: &[Value], ctx: &mut EvalContext) -> Result<Value>
         )));
     }
 
-    let status = parse_i64("set_response_code", &args[0])?;
+    let status = parse_i32("set_response_code", &args[0])?;
     if !(100..=599).contains(&status) {
         return Err(ExecutionError::FunctionError(
             "set_response_code: invalid status code".to_string(),
         ));
     }
 
-    ctx.set_response_status(status as i32);
+    ctx.set_response_status(status);
 
     if let Some(body_val) = args.get(1) {
         if matches!(body_val, Value::Null) {
@@ -349,12 +349,12 @@ pub fn url_decode(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(Bytes::from(decoded.to_string())))
 }
 
-fn parse_i64(name: &str, v: &Value) -> Result<i64> {
+fn parse_i32(name: &str, v: &Value) -> Result<i32> {
     match v {
-        Value::Integer(i) => Ok(i64::from(*i)),
+        Value::Integer(i) => Ok(*i),
         Value::Text(b) => std::str::from_utf8(b)
             .ok()
-            .and_then(|s| s.trim().parse::<i64>().ok())
+            .and_then(|s| s.trim().parse::<i32>().ok())
             .ok_or_else(|| ExecutionError::FunctionError(format!("{name}: invalid integer"))),
         Value::Null => Ok(0),
         _ => Err(ExecutionError::FunctionError(format!(
@@ -394,13 +394,13 @@ pub fn len(args: &[Value]) -> Result<Value> {
 }
 
 fn parse_positive_bound(name: &str, v: &Value) -> Result<i32> {
-    let n = parse_i64(name, v)?;
-    if n <= 0 || n > i64::from(i32::MAX) {
+    let n = parse_i32(name, v)?;
+    if n <= 0 {
         return Err(ExecutionError::FunctionError(format!(
             "{name}: invalid bound"
         )));
     }
-    Ok(n as i32)
+    Ok(n)
 }
 
 pub fn int(args: &[Value]) -> Result<Value> {
@@ -598,7 +598,7 @@ pub fn http_time(args: &[Value]) -> Result<Value> {
     let secs = if args.is_empty() || matches!(args[0], Value::Null) {
         Utc::now().timestamp()
     } else {
-        parse_i64("http_time", &args[0])?
+        i64::from(parse_i32("http_time", &args[0])?)
     };
 
     let dt = DateTime::<Utc>::from_timestamp(secs, 0)
@@ -618,7 +618,7 @@ pub fn strftime(args: &[Value]) -> Result<Value> {
 
     let secs = match &args[0] {
         Value::Null => Utc::now().timestamp(),
-        v => parse_i64("strftime", v)?,
+        v => i64::from(parse_i32("strftime", v)?),
     };
 
     let fmt = parse_str("strftime", &args[1])?;
@@ -863,7 +863,7 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
         }
     };
 
-    let idx = parse_i64("list_delitem", &args[1])?;
+    let idx = parse_i32("list_delitem", &args[1])?;
     if idx < 0 {
         return Ok(Value::List(list));
     }

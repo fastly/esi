@@ -703,7 +703,7 @@ fn esi_when<'a>(
     )
         .map(|(mut attrs, content, _)| {
             let test = attrs.remove("test").unwrap_or_default().to_owned();
-            let match_name = attrs.remove("matchname").map(|s| s.to_owned());
+            let match_name = attrs.remove("matchname").map(ToOwned::to_owned);
 
             // Reuse content Vec — insert marker at front instead of creating a new Vec
             let mut result = content;
@@ -730,7 +730,7 @@ fn esi_foreach<'a>(
         .map(|(mut attrs, content, _)| {
             let collection_str = attrs.remove("collection").unwrap_or_default();
             let collection = parse_attr_as_expr_with_context(collection_str, true);
-            let item = attrs.remove("item").map(|s| s.to_owned());
+            let item = attrs.remove("item").map(ToOwned::to_owned);
 
             ParseResult::Single(Element::Esi(Tag::Foreach {
                 collection,
@@ -1035,7 +1035,7 @@ fn extract_include_attrs(
         DcaMode::None
     };
 
-    let ttl = attrs.remove("ttl").map(|s| s.to_owned());
+    let ttl = attrs.remove("ttl").map(ToOwned::to_owned);
     let maxwait = attrs.remove("maxwait").and_then(|s| s.parse::<u32>().ok());
     let no_store = attrs
         .get("no-store")

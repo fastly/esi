@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 /// Dynamic Content Assembly mode for esi:include and esi:eval
-#[derive(Default, Debug, PartialEq, Clone, Copy)]
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum DcaMode {
     #[default]
     /// No pre-processing (default) - fragment returned as-is
