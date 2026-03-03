@@ -921,14 +921,14 @@ impl ElementHandler for FunctionHandler<'_> {
     }
 
     /// Per ESI spec: `esi:include` is not allowed inside function bodies.
-    fn on_include(&mut self, _attrs: IncludeAttributes) -> Result<Flow> {
+    fn on_include(&mut self, _attrs: &IncludeAttributes) -> Result<Flow> {
         Err(ExecutionError::FunctionError(
             "esi:include is not allowed in function bodies".to_string(),
         ))
     }
 
     /// Per ESI spec: `esi:eval` is not allowed inside function bodies.
-    fn on_eval(&mut self, _attrs: IncludeAttributes) -> Result<Flow> {
+    fn on_eval(&mut self, _attrs: &IncludeAttributes) -> Result<Flow> {
         Err(ExecutionError::FunctionError(
             "esi:eval is not allowed in function bodies".to_string(),
         ))

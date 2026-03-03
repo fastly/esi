@@ -63,12 +63,12 @@ pub(crate) trait ElementHandler {
     /// Handle `<esi:include …/>`.
     /// Streaming: dispatch the fragment request and enqueue it.
     /// Function: return an error.
-    fn on_include(&mut self, attrs: IncludeAttributes) -> Result<Flow>;
+    fn on_include(&mut self, attrs: &IncludeAttributes) -> Result<Flow>;
 
     /// Handle `<esi:eval …/>`.
     /// Streaming: fetch the fragment, parse it as ESI, re-process in current context.
     /// Function: return an error.
-    fn on_eval(&mut self, attrs: IncludeAttributes) -> Result<Flow>;
+    fn on_eval(&mut self, attrs: &IncludeAttributes) -> Result<Flow>;
 
     /// Handle `<esi:try>…</esi:try>`.
     /// Streaming: build parallel-dispatch queues for each attempt and the except clause.
@@ -128,9 +128,9 @@ pub(crate) trait ElementHandler {
 
             Element::Esi(Tag::Vars { name }) => self.handle_vars(name.as_deref()),
 
-            Element::Esi(Tag::Include { attrs }) => self.on_include(attrs.clone()),
+            Element::Esi(Tag::Include { attrs }) => self.on_include(attrs),
 
-            Element::Esi(Tag::Eval { attrs }) => self.on_eval(attrs.clone()),
+            Element::Esi(Tag::Eval { attrs }) => self.on_eval(attrs),
 
             Element::Esi(Tag::Choose {
                 when_branches,

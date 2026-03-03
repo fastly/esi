@@ -257,7 +257,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
         Ok(Flow::Continue)
     }
 
-    fn on_include(&mut self, attrs: IncludeAttributes) -> crate::Result<Flow> {
+    fn on_include(&mut self, attrs: &IncludeAttributes) -> crate::Result<Flow> {
         let queued_element = self
             .processor
             .dispatch_include_to_element(&attrs, self.dispatch_fragment_request)?;
@@ -270,7 +270,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
     /// The `dca` attribute controls processing mode:
     /// - `dca="none"` (default): fragment executed in parent's context (shared variables).
     /// - `dca="esi"`:  fragment executed in an isolated context (output only, no variable leakage).
-    fn on_eval(&mut self, attrs: IncludeAttributes) -> crate::Result<Flow> {
+    fn on_eval(&mut self, attrs: &IncludeAttributes) -> crate::Result<Flow> {
         // Build and dispatch the request (same machinery as include, but blocking)
         let queued_element = self
             .processor

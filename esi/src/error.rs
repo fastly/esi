@@ -6,11 +6,6 @@ use fastly::http::request::SendError;
 #[derive(Error, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum ExecutionError {
-    /// Invalid XML was encountered during parsing.
-    /// (Legacy - not used by nom parser)
-    // #[error("xml parsing error: {0}")]
-    // XMLError(#[from] quick_xml::Error),
-
     /// The ESI document contains a tag with a missing parameter.
     #[error("tag `{0}` is missing required parameter `{1}`")]
     MissingRequiredParameter(String, String),
