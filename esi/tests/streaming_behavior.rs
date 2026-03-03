@@ -137,16 +137,18 @@ fn test_delimited_propagates_incomplete() {
     use nom::bytes::streaming::tag;
     use nom::error::Error;
     use nom::sequence::delimited;
+    use nom::Parser;
 
     // Incomplete: has opening and closing tags but incomplete content in middle
     let input = b"<start>incomplete";
 
     // Try to parse with delimited - should get Incomplete from the closing tag parser
     let result: nom::IResult<&[u8], &[u8], Error<&[u8]>> = delimited(
-        tag(b"<start>"),
+        tag(&b"<start>"[..]),
         nom::bytes::streaming::take_while1(|c| c != b'<' && c != b'>'),
-        tag(b"<end>"),
-    )(input);
+        tag(&b"<end>"[..]),
+    )
+    .parse(input);
 
     assert!(
         matches!(result, Err(nom::Err::Incomplete(_))),
@@ -245,6 +247,7 @@ fn test_the_magic_sequence() {
     // when parsing incomplete nested ESI tags, preventing data corruption.
 
     use nom::bytes::streaming::tag;
+    use nom::Parser;
 
     let input = b"<esi:choose><esi:when test=\"true\">yes</esi:whe";
     //            ^-----------^                              ^------^
@@ -253,7 +256,7 @@ fn test_the_magic_sequence() {
     // Manually simulate what delimited() does:
 
     // Step 1: Opening tag
-    let step1 = tag::<_, _, nom::error::Error<&[u8]>>(b"<esi:choose>")(input);
+    let step1 = tag::<_, _, nom::error::Error<&[u8]>>(&b"<esi:choose>"[..]).parse(input);
     let (after_open, _) = step1.expect("Opening tag should succeed");
 
     // Step 2: Content with streaming parse
@@ -345,6 +348,7 @@ fn test_theory_parse_complete_used_for_delimited_content() {
 
     use nom::bytes::streaming::tag;
     use nom::sequence::delimited;
+    use nom::Parser;
 
     // Complete content between tags
     let input: &[u8] = b"<esi:choose><esi:when test=\"true\">yes</esi:when></esi:choose>";
@@ -354,7 +358,8 @@ fn test_theory_parse_complete_used_for_delimited_content() {
         tag(&b"<esi:choose>"[..]),
         tag(&b"<esi:when test=\"true\">yes</esi:when>"[..]), // Simplified - just checking structure
         tag(&b"</esi:choose>"[..]),
-    )(input);
+    )
+    .parse(input);
 
     match result {
         Ok((remaining, _content)) => {
@@ -756,13 +761,14 @@ fn test_streaming_handles_incomplete_attributes() {
 
     use nom::bytes::streaming::{is_not, tag};
     use nom::sequence::delimited;
+    use nom::Parser;
 
     // Test input: opening quote, some content, but NO closing quote
     let input: &[u8] = b"\"incomplete_attribute_value";
 
     // Test 1: is_not() alone should return Incomplete
     let content_only = &input[1..]; // Skip the opening quote
-    let is_not_result = is_not::<_, _, nom::error::Error<&[u8]>>(&b"\""[..])(content_only);
+    let is_not_result = is_not::<_, _, nom::error::Error<&[u8]>>(&b"\""[..]).parse(content_only);
     assert!(
         matches!(is_not_result, Err(nom::Err::Incomplete(_))),
         "is_not() should return Incomplete when it doesn't find the delimiter"
@@ -770,7 +776,7 @@ fn test_streaming_handles_incomplete_attributes() {
 
     // Test 2: delimited() should also return Incomplete
     let delimited_result: nom::IResult<&[u8], &[u8], nom::error::Error<&[u8]>> =
-        delimited(tag(b"\""), is_not(&b"\""[..]), tag(b"\""))(input);
+        delimited(tag(&b"\""[..]), is_not(&b"\""[..]), tag(&b"\""[..])).parse(input);
     assert!(
         matches!(delimited_result, Err(nom::Err::Incomplete(_))),
         "delimited() should return Incomplete for missing closing delimiter, got: {:?}",
@@ -780,7 +786,7 @@ fn test_streaming_handles_incomplete_attributes() {
     // Test 3: With complete input, parsing should succeed
     let complete_input: &[u8] = b"\"incomplete_attribute_value\"";
     let retry_result: nom::IResult<&[u8], &[u8], nom::error::Error<&[u8]>> =
-        delimited(tag(b"\""), is_not(&b"\""[..]), tag(b"\""))(complete_input);
+        delimited(tag(&b"\""[..]), is_not(&b"\""[..]), tag(&b"\""[..])).parse(complete_input);
     assert!(retry_result.is_ok(), "Should succeed with complete input");
 
     // Test 4: ESI parser with incomplete attribute should return Incomplete
