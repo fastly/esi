@@ -296,7 +296,7 @@ fn tag_content<'a>(
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
     fold_many0(
         |i| interpolated_element(original, i),
-        Vec::new,
+        || Vec::with_capacity(10),
         |mut acc: Vec<Element>, item: ParseResult| {
             item.append_to(&mut acc);
             acc
@@ -408,28 +408,28 @@ fn esi_assign<'a>(
     alt((esi_assign_short, |i| esi_assign_long(original, i))).parse(input)
 }
 
-fn assign_attributes_short(mut attrs: HashMap<String, String>) -> ParseResult {
+fn assign_attributes_short(mut attrs: HashMap<&str, &str>) -> ParseResult {
     let name = attrs.remove("name").unwrap_or_default();
 
     // Validate variable name according to ESI spec
-    if !is_valid_variable_name(&name) {
+    if !is_valid_variable_name(name) {
         // Invalid name - silently drop this tag per ESI spec for invalid constructs
         // ParseResult::Empty causes the parser to consume the tag but emit nothing
         return ParseResult::Empty;
     }
 
     // Parse name and optional subscript (e.g., "colors{0}" or "ages{joan}")
-    let (var_name, subscript) = parse_variable_name_with_subscript(&name);
+    let (var_name, subscript) = parse_variable_name_with_subscript(name);
 
     let value_str = attrs.remove("value").unwrap_or_default();
 
     // Per ESI spec, short form value attribute contains an expression
     // Try to parse as ESI expression. If it fails, treat as string literal.
-    let value = match parse_expression(&value_str) {
+    let value = match parse_expression(value_str) {
         Ok((_, expr)) => expr,
         Err(_) => {
             // If parsing fails (e.g., plain text), treat as a string literal
-            Expr::String(Some(Bytes::from(value_str)))
+            Expr::String(Some(Bytes::copy_from_slice(value_str.as_bytes())))
         }
     };
 
@@ -446,18 +446,18 @@ fn assign_attributes_short(mut attrs: HashMap<String, String>) -> ParseResult {
 ///   "simple_string" -> Expr::String(Some("simple_string"))
 ///   "$(VARIABLE)" -> Expr::Variable("VARIABLE", ...)
 ///   "http://example.com/?q=$(QUERY_STRING{'query'})" -> Expr::Interpolated([Text, Expr])
-fn parse_attr_as_expr(value_str: String) -> Expr {
+fn parse_attr_as_expr(value_str: &str) -> Expr {
     parse_attr_as_expr_with_context(value_str, false)
 }
 
-fn parse_attr_as_expr_with_context(value_str: String, bare_id_as_variable: bool) -> Expr {
+fn parse_attr_as_expr_with_context(value_str: &str, bare_id_as_variable: bool) -> Expr {
     // Fast-path: empty string
     if value_str.is_empty() {
         return Expr::String(Some(Bytes::new()));
     }
 
     // Try to parse as pure ESI expression first (variables/functions/quoted strings/integers/dict/list literals)
-    if let Ok((remaining, expr)) = parse_expression(&value_str) {
+    if let Ok((remaining, expr)) = parse_expression(value_str) {
         // Only accept if we consumed the entire string (pure expression)
         if remaining.is_empty() {
             return expr;
@@ -476,12 +476,12 @@ fn parse_attr_as_expr_with_context(value_str: String, bare_id_as_variable: bool)
                 .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
 
         if is_bare_identifier {
-            return Expr::Variable(value_str, None, None);
+            return Expr::Variable(value_str.to_owned(), None, None);
         }
     }
 
     // Not a pure expression - try interpolation (mixed text + expressions)
-    let bytes = Bytes::from(value_str);
+    let bytes = Bytes::copy_from_slice(value_str.as_bytes());
     match interpolated_content(&bytes) {
         Ok(([], elements)) => {
             if elements.len() == 1 {
@@ -500,18 +500,18 @@ fn parse_attr_as_expr_with_context(value_str: String, bare_id_as_variable: bool)
     }
 }
 
-fn assign_long(attrs: &HashMap<String, String>, mut content: Vec<Element>) -> ParseResult {
-    let name = attrs.get("name").cloned().unwrap_or_default();
+fn assign_long(attrs: &HashMap<&str, &str>, mut content: Vec<Element>) -> ParseResult {
+    let name = attrs.get("name").copied().unwrap_or_default();
 
     // Validate variable name according to ESI spec
-    if !is_valid_variable_name(&name) {
+    if !is_valid_variable_name(name) {
         // Invalid name - silently drop this tag per ESI spec for invalid constructs
         // ParseResult::Empty causes the parser to consume the tag but emit nothing
         return ParseResult::Empty;
     }
 
     // Parse name and optional subscript (e.g., "colors{0}" or "ages{joan}")
-    let (var_name, subscript) = parse_variable_name_with_subscript(&name);
+    let (var_name, subscript) = parse_variable_name_with_subscript(name);
 
     // Per ESI spec, long form value comes from content between tags
     // Content is already parsed as Vec<Element> (can be text, expressions, etc.)
@@ -701,8 +701,8 @@ fn esi_when<'a>(
         streaming_bytes::tag(TAG_ESI_WHEN_CLOSE),
     )
         .map(|(mut attrs, content, _)| {
-            let test = attrs.remove("test").unwrap_or_default();
-            let match_name = attrs.remove("matchname");
+            let test = attrs.remove("test").unwrap_or_default().to_owned();
+            let match_name = attrs.remove("matchname").map(|s| s.to_owned());
 
             // Reuse content Vec — insert marker at front instead of creating a new Vec
             let mut result = content;
@@ -729,7 +729,7 @@ fn esi_foreach<'a>(
         .map(|(mut attrs, content, _)| {
             let collection_str = attrs.remove("collection").unwrap_or_default();
             let collection = parse_attr_as_expr_with_context(collection_str, true);
-            let item = attrs.remove("item");
+            let item = attrs.remove("item").map(|s| s.to_owned());
 
             ParseResult::Single(Element::Esi(Tag::Foreach {
                 collection,
@@ -766,7 +766,7 @@ fn esi_function_tag<'a>(
         streaming_bytes::tag(TAG_ESI_FUNCTION_CLOSE),
     )
         .map(|(mut attrs, body, _)| {
-            let name = attrs.remove("name").unwrap_or_default();
+            let name = attrs.remove("name").unwrap_or_default().to_owned();
 
             ParseResult::Single(Element::Esi(Tag::Function { name, body }))
         })
@@ -873,11 +873,11 @@ fn esi_vars<'a>(
     alt((esi_vars_short, |i| esi_vars_long(original, i))).parse(input)
 }
 
-fn parse_vars_attributes(mut attrs: HashMap<String, String>) -> Result<ParseResult, &'static str> {
+fn parse_vars_attributes(mut attrs: HashMap<&str, &str>) -> Result<ParseResult, &'static str> {
     attrs.remove("name").map_or_else(
         || Err("no name field in short form vars"),
         |name_val| {
-            if let Ok((_, expr)) = parse_expression(&name_val) {
+            if let Ok((_, expr)) = parse_expression(name_val) {
                 Ok(ParseResult::Single(Element::Expr(expr)))
             } else {
                 Err("failed to parse expression")
@@ -1017,12 +1017,12 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
 
 /// Helper to extract include attributes from the HashMap
 fn extract_include_attrs(
-    mut attrs: HashMap<String, String>,
+    mut attrs: HashMap<&str, &str>,
     params: Vec<(String, Expr)>,
 ) -> IncludeAttributes {
     let src = parse_attr_as_expr(attrs.remove("src").unwrap_or_default());
     let alt = attrs.remove("alt").map(parse_attr_as_expr);
-    let continue_on_error = attrs.get("onerror").is_some_and(|v| v == "continue");
+    let continue_on_error = attrs.get("onerror").is_some_and(|v| *v == "continue");
 
     // Parse dca attribute - default to None
     let dca = match attrs.get("dca").map(|v| v.to_lowercase()).as_deref() {
@@ -1030,11 +1030,11 @@ fn extract_include_attrs(
         _ => DcaMode::None,
     };
 
-    let ttl = attrs.remove("ttl");
+    let ttl = attrs.remove("ttl").map(|s| s.to_owned());
     let maxwait = attrs.remove("maxwait").and_then(|s| s.parse::<u32>().ok());
     let no_store = attrs
         .get("no-store")
-        .is_some_and(|v| v == "on" || v == "true");
+        .is_some_and(|v| *v == "on" || *v == "true");
     let method = attrs.remove("method").map(parse_attr_as_expr);
     let entity = attrs.remove("entity").map(parse_attr_as_expr);
 
@@ -1044,26 +1044,20 @@ fn extract_include_attrs(
     let mut removeheaders = Vec::new();
 
     // Collect header attributes from remaining attrs
-    let keys: Vec<String> = attrs.keys().cloned().collect();
+    let keys: Vec<&str> = attrs.keys().copied().collect();
     for key in keys {
-        let value = attrs.remove(&key).unwrap();
+        let value = attrs.remove(key).unwrap();
         if key.starts_with("appendheader") {
             // Parse header format: "Header-Name: value"
             if let Some((name, val)) = value.split_once(':') {
-                appendheaders.push((
-                    name.trim().to_string(),
-                    parse_attr_as_expr(val.trim().to_string()),
-                ));
+                appendheaders.push((name.trim().to_string(), parse_attr_as_expr(val.trim())));
             }
         } else if key.starts_with("setheader") {
             if let Some((name, val)) = value.split_once(':') {
-                setheaders.push((
-                    name.trim().to_string(),
-                    parse_attr_as_expr(val.trim().to_string()),
-                ));
+                setheaders.push((name.trim().to_string(), parse_attr_as_expr(val.trim())));
             }
         } else if key.starts_with("removeheader") {
-            removeheaders.push(value);
+            removeheaders.push(value.to_owned());
         }
     }
 
@@ -1174,14 +1168,14 @@ fn esi_param(input: &[u8]) -> IResult<&[u8], (String, Expr), Error<&[u8]>> {
         ),
     )
     .map(|mut attrs| {
-        let name = attrs.remove("name").unwrap_or_default();
+        let name = attrs.remove("name").unwrap_or_default().to_owned();
         let value = parse_attr_as_expr(attrs.remove("value").unwrap_or_default());
         (name, value)
     })
     .parse(input)
 }
 
-fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<String, String>, Error<&[u8]>> {
+fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<&str, &str>, Error<&[u8]>> {
     fold_many0(
         separated_pair(
             preceded(streaming_char::multispace1, streaming_char::alpha1),
@@ -1190,7 +1184,10 @@ fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<String, String>, Error<&[u
         ),
         HashMap::new,
         |mut acc, (k, v)| {
-            acc.insert(bytes_to_string(k), bytes_to_string(v));
+            // alpha1 guarantees ASCII keys; from_utf8 is validation-only (zero allocation)
+            if let (Ok(key), Ok(val)) = (std::str::from_utf8(k), std::str::from_utf8(v)) {
+                acc.insert(key, val);
+            }
             acc
         },
     )
