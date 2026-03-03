@@ -533,12 +533,12 @@ fn test_parse_assign_long_with_interpolation() {
                         return false;
                     }
                     // Check first element is Text("Hello ")
-                    let first_ok = if let esi::parser_types::Element::Text(ref bytes) = elements[0]
-                    {
-                        &bytes[..] == b"Hello "
-                    } else {
-                        false
-                    };
+                    let first_ok =
+                        if let esi::parser_types::Element::Content(ref bytes) = elements[0] {
+                            &bytes[..] == b"Hello "
+                        } else {
+                            false
+                        };
                     // Check second element is Variable("name", None, None)
                     let second_ok = if let esi::parser_types::Element::Expr(
                         esi::parser_types::Expr::Variable(ref n, None, None),
@@ -549,12 +549,12 @@ fn test_parse_assign_long_with_interpolation() {
                         false
                     };
                     // Check third element is Text("!")
-                    let third_ok = if let esi::parser_types::Element::Text(ref bytes) = elements[2]
-                    {
-                        &bytes[..] == b"!"
-                    } else {
-                        false
-                    };
+                    let third_ok =
+                        if let esi::parser_types::Element::Content(ref bytes) = elements[2] {
+                            &bytes[..] == b"!"
+                        } else {
+                            false
+                        };
                     first_ok && second_ok && third_ok
                 } else {
                     false
@@ -771,7 +771,7 @@ fn test_parse_remove() {
 
     // esi:remove content should not appear in elements at all
     let has_removed_text = elements.iter().any(|element| {
-        if let esi::parser_types::Element::Text(t) = element {
+        if let esi::parser_types::Element::Content(t) = element {
             // Check if bytes contain the substring
             let needle = b"should not appear";
             t.windows(needle.len()).any(|window| window == needle)
@@ -787,7 +787,7 @@ fn test_parse_remove() {
 
     // But visible content should be there
     let has_visible = elements.iter().any(|element| {
-        if let esi::parser_types::Element::Text(t) = element {
+        if let esi::parser_types::Element::Content(t) = element {
             let needle = b"visible";
             t.windows(needle.len()).any(|window| window == needle)
         } else {
@@ -830,7 +830,7 @@ fn test_parse_text_tag() {
 
     // esi:text content should be plain text, ESI tags inside should not be parsed
     let text_found = elements.iter().any(|element| {
-        if let esi::parser_types::Element::Text(t) = element {
+        if let esi::parser_types::Element::Content(t) = element {
             let needle1 = b"<esi:include";
             let needle2 = b"should appear as-is";
             t.windows(needle1.len()).any(|w| w == needle1)
@@ -875,7 +875,7 @@ fn test_parse_mixed_content() {
         .any(|c| matches!(c, esi::parser_types::Element::Esi(_)));
     let has_text = elements
         .iter()
-        .any(|c| matches!(c, esi::parser_types::Element::Text(_)));
+        .any(|c| matches!(c, esi::parser_types::Element::Content(_)));
 
     assert!(has_html, "Should have HTML elements");
     assert!(has_expr, "Should have expression elements");

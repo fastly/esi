@@ -102,7 +102,7 @@ pub(crate) trait ElementHandler {
     /// tags call the required hooks above.
     fn process(&mut self, element: &Element) -> Result<Flow> {
         match element {
-            Element::Text(text) | Element::Html(text) => {
+            Element::Content(text) | Element::Html(text) => {
                 self.write_bytes(text.clone())?;
                 Ok(Flow::Continue)
             }

@@ -51,7 +51,7 @@ impl FunctionRegistry {
 pub fn eval_expr(expr: &Expr, ctx: &mut EvalContext) -> Result<Value> {
     match expr {
         Expr::Integer(i) => Ok(Value::Integer(*i)),
-        Expr::String(Some(s)) => Ok(Value::Text(Bytes::from(s.clone()))),
+        Expr::String(Some(b)) => Ok(Value::Text(b.clone())),
         Expr::String(None) => Ok(Value::Text(Bytes::new())),
         Expr::Variable(name, key, default) => {
             // Evaluate the key expression if present
@@ -115,7 +115,7 @@ pub fn eval_expr(expr: &Expr, ctx: &mut EvalContext) -> Result<Value> {
             let mut result = String::new();
             for element in elements {
                 match element {
-                    Element::Text(text) => {
+                    Element::Content(text) => {
                         result.push_str(&String::from_utf8_lossy(text.as_ref()));
                     }
                     Element::Html(html) => {

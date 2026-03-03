@@ -114,7 +114,7 @@ where
                     ParsingMode::Complete => {
                         // Treat remaining bytes as text - refcount increment, zero-copy
                         if !remaining.is_empty() {
-                            result.push(Element::Text(slice_as_bytes(original, remaining)));
+                            result.push(Element::Content(slice_as_bytes(original, remaining)));
                         }
                         Ok((&remaining[remaining.len()..], result))
                     }
@@ -216,7 +216,7 @@ fn interpolated_text<'a>(
         recognize(streaming_bytes::take_while1(|c| {
             !is_open_bracket(c) && !is_dollar(c)
         })),
-        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
+        |s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))),
     )(input)
 }
 
@@ -227,7 +227,7 @@ fn interpolated_text_complete<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         recognize(take_while1(|c| !is_open_bracket(c) && !is_dollar(c))),
-        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
+        |s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))),
     )(input)
 }
 
@@ -275,7 +275,7 @@ fn top_level_text<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     map(
         recognize(streaming_bytes::take_while1(|c| !is_open_bracket(c))),
-        |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
+        |s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))),
     )(input)
 }
 
@@ -380,7 +380,9 @@ fn parse_variable_name_with_subscript(name: &str) -> (String, Option<Expr>) {
                         .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     {
                         // Bare identifier like "joan" - treat as string literal key
-                        Some(Expr::String(Some(subscript_str.to_string())))
+                        Some(Expr::String(Some(Bytes::copy_from_slice(
+                            subscript_str.as_bytes(),
+                        ))))
                     } else if let Ok((_, expr)) = parse_expression(subscript_str) {
                         // Successfully parsed as expression (e.g., "'key'", "$(var)", complex expression)
                         Some(expr)
@@ -428,7 +430,7 @@ fn assign_attributes_short(attrs: HashMap<String, String>) -> ParseResult {
         Ok((_, expr)) => expr,
         Err(_) => {
             // If parsing fails (e.g., plain text), treat as a string literal
-            Expr::String(Some(value_str))
+            Expr::String(Some(Bytes::from(value_str)))
         }
     };
 
@@ -452,7 +454,7 @@ fn parse_attr_as_expr(value_str: String) -> Expr {
 fn parse_attr_as_expr_with_context(value_str: String, bare_id_as_variable: bool) -> Expr {
     // Fast-path: empty string
     if value_str.is_empty() {
-        return Expr::String(Some(String::new()));
+        return Expr::String(Some(Bytes::new()));
     }
 
     // Try to parse as pure ESI expression first (variables/functions/quoted strings/integers/dict/list literals)
@@ -486,18 +488,16 @@ fn parse_attr_as_expr_with_context(value_str: String, bare_id_as_variable: bool)
             if elements.len() == 1 {
                 match elements.into_iter().next().unwrap() {
                     Element::Expr(expr) => expr,
-                    Element::Text(text) => {
-                        Expr::String(Some(String::from_utf8_lossy(&text).into_owned()))
-                    }
-                    _ => Expr::String(Some(String::from_utf8_lossy(&bytes).into_owned())),
+                    Element::Content(text) => Expr::String(Some(text)),
+                    _ => Expr::String(Some(bytes.clone())),
                 }
             } else if !elements.is_empty() {
                 Expr::Interpolated(elements)
             } else {
-                Expr::String(Some(String::new()))
+                Expr::String(Some(Bytes::new()))
             }
         }
-        _ => Expr::String(Some(String::from_utf8_lossy(&bytes).into_owned())),
+        _ => Expr::String(Some(bytes.clone())),
     }
 }
 
@@ -519,22 +519,24 @@ fn assign_long(attrs: &HashMap<String, String>, mut content: Vec<Element>) -> Pa
     // We need to convert it to a single expression
     let value = if content.is_empty() {
         // Empty content - empty string
-        Expr::String(Some(String::new()))
+        Expr::String(Some(Bytes::new()))
     } else if content.len() == 1 {
         // Single element - pop to take ownership
         match content.pop().expect("checked len == 1") {
             Element::Expr(expr) => expr,
-            Element::Text(text) => {
+            Element::Content(text) => {
                 // Try to parse the text as an expression
-                let text_str = String::from_utf8_lossy(text.as_ref()).to_string();
-                match parse_expression(&text_str) {
-                    Ok((_, expr)) => expr,
-                    Err(_) => Expr::String(Some(text_str)),
+                match std::str::from_utf8(text.as_ref()) {
+                    Ok(text_str) => match parse_expression(text_str) {
+                        Ok((_, expr)) => expr,
+                        Err(_) => Expr::String(Some(text)),
+                    },
+                    Err(_) => Expr::String(Some(text)),
                 }
             }
             _ => {
                 // HTML or other - treat as empty string
-                Expr::String(Some(String::new()))
+                Expr::String(Some(Bytes::new()))
             }
         }
     } else {
@@ -916,7 +918,7 @@ fn parse_content_complete(original: &Bytes, content: &[u8]) -> Vec<Element> {
     ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
         map(
             take_while1(|c| !is_dollar(c) && !is_open_bracket(c)),
-            |s: &[u8]| ParseResult::Single(Element::Text(slice_as_bytes(original, s))),
+            |s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))),
         )(input)
     }
 
@@ -969,7 +971,7 @@ fn parse_content_complete(original: &Bytes, content: &[u8]) -> Vec<Element> {
 
         // Fallback: consume one byte as text if nothing else matches
         // This handles stray $ or < characters that aren't valid expressions/tags
-        elements.push(Element::Text(slice_as_bytes(original, &remaining[..1])));
+        elements.push(Element::Content(slice_as_bytes(original, &remaining[..1])));
         remaining = &remaining[1..];
     }
 
@@ -1018,7 +1020,7 @@ fn esi_text<'a>(
             streaming_bytes::take_until(TAG_ESI_TEXT_CLOSE),
             streaming_bytes::tag(TAG_ESI_TEXT_CLOSE),
         ),
-        |v| ParseResult::Single(Element::Text(slice_as_bytes(original, v))),
+        |v| ParseResult::Single(Element::Content(slice_as_bytes(original, v))),
     )(input)
 }
 fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
@@ -1548,51 +1550,51 @@ fn esi_var_name(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     )(input)
 }
 
-fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
+fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], Bytes, Error<&[u8]>> {
     map(
         take_while(|c| {
             !is_dollar(c) && c != OPEN_BRACE && c != CLOSE_BRACE && c != COMMA && c != DOUBLE_QUOTE
         }),
-        bytes_to_string,
+        Bytes::copy_from_slice,
     )(input)
 }
 
 // TODO: handle escaping
-fn single_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
+fn single_quoted_string(input: &[u8]) -> IResult<&[u8], Bytes, Error<&[u8]>> {
     map(
         delimited(
             tag(&[SINGLE_QUOTE]),
             take_while(|c| !is_single_quote(c)),
             tag(&[SINGLE_QUOTE]),
         ),
-        bytes_to_string,
+        Bytes::copy_from_slice,
     )(input)
 }
-fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
+fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], Bytes, Error<&[u8]>> {
     map(
         delimited(
             tag(QUOTE_TRIPLE),
             take_until(QUOTE_TRIPLE),
             tag(QUOTE_TRIPLE),
         ),
-        bytes_to_string,
+        Bytes::copy_from_slice,
     )(input)
 }
 
 fn string(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     map(
         alt((triple_quoted_string, single_quoted_string)),
-        |string: String| {
-            if string.is_empty() {
+        |bytes: Bytes| {
+            if bytes.is_empty() {
                 Expr::String(None)
             } else {
-                Expr::String(Some(string))
+                Expr::String(Some(bytes))
             }
         },
     )(input)
 }
 
-fn var_key(input: &[u8]) -> IResult<&[u8], String, Error<&[u8]>> {
+fn var_key(input: &[u8]) -> IResult<&[u8], Bytes, Error<&[u8]>> {
     alt((
         triple_quoted_string,
         single_quoted_string,
@@ -1606,7 +1608,7 @@ fn esi_var_key_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
         // Try to parse as a variable first (e.g., $(keyVar))
         esi_variable,
         // Otherwise parse as a string
-        map(var_key, |s: String| Expr::String(Some(s))),
+        map(var_key, |b: Bytes| Expr::String(Some(b))),
     ))(input)
 }
 
@@ -1970,7 +1972,7 @@ exception!
         assert_eq!(
             x,
             [
-                Element::Text(Bytes::from_static(b"hello")),
+                Element::Content(Bytes::from_static(b"hello")),
                 Element::Html(Bytes::from_static(b"<br>")),
             ]
         );
@@ -1987,8 +1989,8 @@ exception!
         assert_eq!(
             elements,
             [
-                Element::Text(Bytes::from_static(b"outer")),
-                Element::Text(Bytes::from_static(b"inner")),
+                Element::Content(Bytes::from_static(b"outer")),
+                Element::Content(Bytes::from_static(b"inner")),
             ]
         );
     }
@@ -2002,9 +2004,9 @@ exception!
 
         assert_eq!(rest.len(), 0, "Should parse completely");
         assert_eq!(elements.len(), 3);
-        assert!(matches!(&elements[0], Element::Text(t) if t.as_ref() == b"Hello "));
+        assert!(matches!(&elements[0], Element::Content(t) if t.as_ref() == b"Hello "));
         assert!(matches!(&elements[1], Element::Expr(_)));
-        assert!(matches!(&elements[2], Element::Text(t) if t.as_ref() == b", welcome!"));
+        assert!(matches!(&elements[2], Element::Content(t) if t.as_ref() == b", welcome!"));
     }
 
     #[test]
@@ -2050,12 +2052,12 @@ exception!
             [Element::Expr(Expr::Comparison {
                 left: Box::new(Expr::Call(
                     "call".to_string(),
-                    vec![Expr::String(Some("hello".to_string()))]
+                    vec![Expr::String(Some(Bytes::from("hello")))]
                 )),
                 operator: Operator::Matches,
                 right: Box::new(Expr::Variable(
                     "var".to_string(),
-                    Some(Box::new(Expr::String(Some("key".to_string())))),
+                    Some(Box::new(Expr::String(Some(Bytes::from("key"))))),
                     None
                 ))
             })]
@@ -2144,7 +2146,7 @@ exception!
         let bytes = Bytes::from_static(input);
         let (rest, x) = parse_remainder(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
-        assert_eq!(x, [Element::Text(Bytes::from_static(b"hello\nthere"))]);
+        assert_eq!(x, [Element::Content(Bytes::from_static(b"hello\nthere"))]);
     }
     #[test]
     fn test_parse_interpolated() {
@@ -2155,8 +2157,8 @@ exception!
         assert_eq!(
             x,
             [
-                Element::Text(Bytes::from_static(b"hello $(foo)")),
-                Element::Text(Bytes::from_static(b"goodbye ")),
+                Element::Content(Bytes::from_static(b"hello $(foo)")),
+                Element::Content(Bytes::from_static(b"goodbye ")),
                 Element::Expr(Expr::Variable("foo".to_string(), None, None)),
             ]
         );
@@ -2304,7 +2306,7 @@ exception!
         assert_eq!(elements.len(), 1);
         if let Element::Esi(Tag::Include { attrs, .. }) = &elements[0] {
             assert!(
-                matches!(&attrs.src, Expr::String(Some(s)) if s == "http://example.com/fragment")
+                matches!(&attrs.src, Expr::String(Some(s)) if s == &Bytes::from("http://example.com/fragment"))
             );
         } else {
             panic!("Expected Include tag");
@@ -2323,7 +2325,7 @@ exception!
         }) = &elements[0]
         {
             assert_eq!(name, "foo");
-            assert_eq!(value, &Expr::String(Some("bar".to_string())));
+            assert_eq!(value, &Expr::String(Some(Bytes::from("bar"))));
         } else {
             panic!("Expected Assign tag");
         }
@@ -2456,7 +2458,7 @@ exception!
                 assert!(subscript.is_some(), "Should have subscript");
                 if let Some(sub) = subscript {
                     // Should be a string literal "joan"
-                    assert!(matches!(sub, Expr::String(Some(s)) if s == "joan"));
+                    assert!(matches!(sub, Expr::String(Some(s)) if s == &Bytes::from("joan")));
                 }
                 assert!(matches!(value, Expr::Integer(28)));
             }
@@ -2482,7 +2484,7 @@ exception!
                 if let Some(sub) = subscript {
                     // Should be a string literal "bob"
                     assert!(
-                        matches!(sub, Expr::String(Some(s)) if s == "bob"),
+                        matches!(sub, Expr::String(Some(s)) if s == &Bytes::from("bob")),
                         "Subscript should be 'bob', got {:?}",
                         sub
                     );
@@ -2549,7 +2551,7 @@ exception!
         assert_eq!(rest.len(), 0, "Should consume all input");
         assert_eq!(elements.len(), 1);
         // The whole thing becomes text since script tag couldn't be fully parsed
-        assert!(matches!(&elements[0], Element::Text(_)));
+        assert!(matches!(&elements[0], Element::Content(_)));
     }
     #[test]
     fn test_partial_esi_tag() {
@@ -2574,7 +2576,7 @@ exception!
             Ok((rest, elements)) => {
                 // Should have parsed "hello " as text
                 assert_eq!(elements.len(), 1);
-                assert!(matches!(&elements[0], Element::Text(t) if t.as_ref() == b"hello "));
+                assert!(matches!(&elements[0], Element::Content(t) if t.as_ref() == b"hello "));
                 // Remaining should be the partial tag
                 assert_eq!(rest, b"<esi:inclu");
             }

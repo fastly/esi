@@ -97,32 +97,55 @@ pub enum Tag {
     },
 }
 
+/// A parsed node in the ESI document tree.
+///
+/// Represents the four kinds of content the parser can produce:
+/// structured ESI tags, dynamic expressions, raw HTML pass-through,
+/// and plain-text content inside ESI constructs.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Element {
+    /// A structured ESI tag (e.g. `<esi:include>`, `<esi:choose>`).
     Esi(Tag),
+    /// A dynamic ESI expression (e.g. `$(HTTP_HOST)`, `$(dict{'key'})`).
     Expr(Expr),
+    /// Raw HTML markup passed through verbatim without interpretation.
     Html(Bytes),
-    Text(Bytes),
+    /// Plain-text content inside ESI constructs that participates in
+    /// expression evaluation (e.g. assign bodies, interpolated segments).
+    Content(Bytes),
 }
 
+/// An ESI expression AST node.
+///
+/// Produced by the expression parser for attribute values, `esi:vars`,
+/// `esi:when` test conditions, and `esi:assign` bodies.  Evaluated at
+/// runtime by [`eval_expr`](crate::expression::eval_expr) to produce
+/// a [`Value`](crate::expression::Value).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
+    /// Integer literal (e.g. `42`, `-1`).
     Integer(i32),
-    String(Option<String>),
+    /// String literal (e.g. `'hello'`). `None` represents the empty string `''`.
+    String(Option<Bytes>),
+    /// Variable reference: name, optional subscript key, optional default value.
+    /// e.g. `$(HTTP_HOST)`, `$(dict{'key'})`, `$(var|'default')`.
     Variable(String, Option<Box<Expr>>, Option<Box<Expr>>),
+    /// Binary comparison or arithmetic: `left operator right`.
     Comparison {
         left: Box<Expr>,
         operator: Operator,
         right: Box<Expr>,
     },
+    /// Function call: name and argument list (e.g. `$base64_encode(...)`).
     Call(String, Vec<Expr>),
+    /// Logical negation: `!(expr)`.
     Not(Box<Expr>),
-    /// Represents a compound expression with interpolated text and expressions
-    /// Used for cases like: <esi:assign name="x">prefix$(VAR)suffix</esi:assign>
+    /// Compound expression mixing literal text and embedded expressions.
+    /// e.g. `prefix$(VAR)suffix` inside `<esi:assign>`.
     Interpolated(Vec<Element>),
-    /// Dictionary literal: {key:value, key:value}
+    /// Dictionary literal: `{key: value, key: value}`.
     DictLiteral(Vec<(Expr, Expr)>),
-    /// List literal: [value, value]
+    /// List literal: `[value, value, ...]`.
     ListLiteral(Vec<Expr>),
 }
 

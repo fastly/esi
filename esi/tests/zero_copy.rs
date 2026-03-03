@@ -112,10 +112,10 @@ fn test_zero_copy_esi_remove() {
     // esi:remove should return empty vec for the tag itself, then "after" as text
     let has_text_after = elements
         .iter()
-        .any(|element| matches!(element, Element::Text(bytes) if bytes.as_ref() == b"after"));
+        .any(|element| matches!(element, Element::Content(bytes) if bytes.as_ref() == b"after"));
 
     let no_removed_content = !elements.iter().any(|element| {
-        matches!(element, Element::Text(bytes) if bytes.as_ref() == b"this should not appear")
+        matches!(element, Element::Content(bytes) if bytes.as_ref() == b"this should not appear")
     });
 
     assert!(has_text_after, "Should have text after remove tag");
@@ -134,7 +134,7 @@ fn test_zero_copy_esi_remove_with_tags_inside() {
     // Everything inside esi:remove should be discarded
     let has_visible = elements
         .iter()
-        .any(|element| matches!(element, Element::Text(bytes) if bytes.as_ref() == b"visible"));
+        .any(|element| matches!(element, Element::Content(bytes) if bytes.as_ref() == b"visible"));
 
     let no_div = !elements
         .iter()
@@ -177,11 +177,11 @@ fn test_zero_copy_text_before_and_after() {
 
     let has_before = elements
         .iter()
-        .any(|element| matches!(element, Element::Text(bytes) if bytes.as_ref() == b"before"));
+        .any(|element| matches!(element, Element::Content(bytes) if bytes.as_ref() == b"before"));
 
     let has_after = elements
         .iter()
-        .any(|element| matches!(element, Element::Text(bytes) if bytes.as_ref() == b"after"));
+        .any(|element| matches!(element, Element::Content(bytes) if bytes.as_ref() == b"after"));
 
     assert!(has_before && has_after, "Should have text before and after");
 }
