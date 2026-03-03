@@ -272,11 +272,18 @@ fn interpolated_element<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    alt((
-        |i| interpolated_text(original, i),
-        interpolated_expression,
-        |i| tag_handler(original, i),
-    ))(input)
+    // Fast path: check the first byte to decide which parser to call.
+    // interpolated_text stops at '<' or '$', so the first byte here is one of those
+    // (or we're at the start of content). If it's '<', skip interpolated_expression entirely.
+    match input.first() {
+        Some(&OPEN_BRACKET) => tag_handler(original, input),
+        Some(&DOLLAR) => alt((interpolated_expression, |i| tag_handler(original, i)))(input),
+        _ => alt((
+            |i| interpolated_text(original, i),
+            interpolated_expression,
+            |i| tag_handler(original, i),
+        ))(input),
+    }
 }
 
 // Parse a sequence of interpolated elements (text + expressions + tags)
@@ -1189,13 +1196,7 @@ fn esi_param(input: &[u8]) -> IResult<&[u8], (String, Expr), Error<&[u8]>> {
 fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<String, String>, Error<&[u8]>> {
     fold_many0(
         separated_pair(
-            preceded(
-                streaming_char::multispace1,
-                // Allow alphanumeric characters and hyphens in attribute names
-                streaming_bytes::take_while1(|c| {
-                    (c as char).is_alphanumeric() || c == HYPHEN || c == UNDERSCORE
-                }),
-            ),
+            preceded(streaming_char::multispace1, streaming_char::alpha1),
             streaming_bytes::tag(EQUALS),
             htmlstring,
         ),
@@ -1636,9 +1637,9 @@ fn esi_function(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (input, parsed) = tuple((
         esi_fn_name,
         delimited(
-            terminated(tag(OPEN_PAREN), multispace0),
+            terminated(tag(&[OPEN_PAREN]), multispace0),
             fn_argument,
-            preceded(multispace0, tag(CLOSE_PAREN)),
+            preceded(multispace0, tag(&[CLOSE_PAREN])),
         ),
     ))(input)?;
 
@@ -1648,7 +1649,7 @@ fn esi_function(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 }
 
 fn esi_variable(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    delimited(tag(VAR_OPEN), esi_var_name, tag(CLOSE_PAREN))(input)
+    delimited(tag(VAR_OPEN), esi_var_name, tag(&[CLOSE_PAREN]))(input)
 }
 
 /// Parse all binary operators
@@ -1679,17 +1680,20 @@ fn operator(input: &[u8]) -> IResult<&[u8], Operator, Error<&[u8]>> {
 }
 
 fn interpolated_expression(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
-    map(
-        alt((
-            dict_literal,
-            list_literal,
-            esi_function,
-            esi_variable,
-            integer,
-            string,
-        )),
-        |expr| ParseResult::Single(Element::Expr(expr)),
-    )(input)
+    let expr = match input.first() {
+        Some(&OPEN_BRACE) => dict_literal(input),
+        Some(&OPEN_SQ_BRACKET) => list_literal(input),
+        Some(&DOLLAR) => alt((esi_function, esi_variable))(input),
+        Some(b'0'..=b'9') => integer(input),
+        Some(&SINGLE_QUOTE) => string(input),
+        _ => {
+            return Err(nom::Err::Error(Error::new(
+                input,
+                nom::error::ErrorKind::Alt,
+            )))
+        }
+    }?;
+    Ok((expr.0, ParseResult::Single(Element::Expr(expr.1))))
 }
 
 fn dict_literal(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
@@ -1748,23 +1752,28 @@ fn list_literal(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 /// Parse primary expressions (highest precedence atoms)
 /// Handles: variables, functions, literals, grouped expressions
 fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    alt((
+    match input.first() {
         // Parse grouped expression: (expr)
-        delimited(
-            tag(OPEN_PAREN),
+        Some(&OPEN_PAREN) => delimited(
+            tag(&[OPEN_PAREN]),
             delimited(multispace0, expr, multispace0),
-            tag(CLOSE_PAREN),
-        ),
+            tag(&[CLOSE_PAREN]),
+        )(input),
         // Parse dictionary literal: {key:value, key:value}
-        dict_literal,
+        Some(&OPEN_BRACE) => dict_literal(input),
         // Parse list literal: [value, value]
-        list_literal,
-        // Parse basic expressions
-        esi_function,
-        esi_variable,
-        integer,
-        string,
-    ))(input)
+        Some(&OPEN_SQ_BRACKET) => list_literal(input),
+        // Parse function call or variable: $func(...) or $(VAR)
+        Some(&DOLLAR) => alt((esi_function, esi_variable))(input),
+        // Parse integer literal (with optional leading minus)
+        Some(b'0'..=b'9') | Some(&HYPHEN) => integer(input),
+        // Parse string literal (single or triple quoted)
+        Some(&SINGLE_QUOTE) => string(input),
+        _ => Err(nom::Err::Error(Error::new(
+            input,
+            nom::error::ErrorKind::Alt,
+        ))),
+    }
 }
 
 /// Entry point for expression parsing

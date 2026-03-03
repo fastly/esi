@@ -117,8 +117,8 @@ pub const DOUBLE_QUOTE: u8 = b'"';
 pub const QUOTE_TRIPLE: &[u8] = b"'''";
 
 // Brackets & Braces
-pub const OPEN_PAREN: &[u8] = b"(";
-pub const CLOSE_PAREN: &[u8] = b")";
+pub const OPEN_PAREN: u8 = b'(';
+pub const CLOSE_PAREN: u8 = b')';
 pub const OPEN_BRACE: u8 = b'{';
 pub const CLOSE_BRACE: u8 = b'}';
 pub const OPEN_SQ_BRACKET: u8 = b'[';
