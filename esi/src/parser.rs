@@ -14,6 +14,7 @@ use nom::error::Error;
 use nom::multi::{fold_many0, many0, separated_list0};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
+
 use std::collections::HashMap;
 
 use crate::literals::*;
@@ -87,7 +88,7 @@ fn parse_loop<'a, F>(
 where
     F: FnMut(&Bytes, &'a [u8]) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>>,
 {
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(8);
     let mut remaining = original.as_ref();
 
     loop {
@@ -171,18 +172,6 @@ pub fn parse_remainder(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8
 #[inline]
 fn bytes_to_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
-}
-
-/// Helper to extract an attribute value from a `HashMap`, removing it
-#[inline]
-fn take_attr(attrs: &mut HashMap<String, String>, key: &str) -> String {
-    attrs.remove(key).unwrap_or_default()
-}
-
-/// Helper to extract an optional attribute value from a `HashMap`, removing it
-#[inline]
-fn take_attr_opt(attrs: &mut HashMap<String, String>, key: &str) -> Option<String> {
-    attrs.remove(key)
 }
 
 // ============================================================================
@@ -409,8 +398,8 @@ fn esi_assign<'a>(
     alt((esi_assign_short, |i| esi_assign_long(original, i)))(input)
 }
 
-fn assign_attributes_short(attrs: HashMap<String, String>) -> ParseResult {
-    let name = attrs.get("name").cloned().unwrap_or_default();
+fn assign_attributes_short(mut attrs: HashMap<String, String>) -> ParseResult {
+    let name = attrs.remove("name").unwrap_or_default();
 
     // Validate variable name according to ESI spec
     if !is_valid_variable_name(&name) {
@@ -422,7 +411,7 @@ fn assign_attributes_short(attrs: HashMap<String, String>) -> ParseResult {
     // Parse name and optional subscript (e.g., "colors{0}" or "ages{joan}")
     let (var_name, subscript) = parse_variable_name_with_subscript(&name);
 
-    let value_str = attrs.get("value").cloned().unwrap_or_default();
+    let value_str = attrs.remove("value").unwrap_or_default();
 
     // Per ESI spec, short form value attribute contains an expression
     // Try to parse as ESI expression. If it fails, treat as string literal.
@@ -679,11 +668,10 @@ fn esi_otherwise<'a>(
             |i| tag_content(original, i),
             streaming_bytes::tag(TAG_ESI_OTHERWISE_CLOSE),
         ),
-        |content| {
-            // Return the Otherwise tag followed by its content elements
-            let mut result = vec![Element::Esi(Tag::Otherwise)];
-            result.extend(content);
-            ParseResult::Multiple(result)
+        |mut content| {
+            // Reuse content Vec — insert marker at front instead of creating a new Vec
+            content.insert(0, Element::Esi(Tag::Otherwise));
+            ParseResult::Multiple(content)
         },
     )(input)
 }
@@ -705,13 +693,13 @@ fn esi_when<'a>(
             |i| tag_content(original, i),
             streaming_bytes::tag(TAG_ESI_WHEN_CLOSE),
         )),
-        |(attrs, content, _)| {
-            let test = attrs.get("test").cloned().unwrap_or_default();
-            let match_name = attrs.get("matchname").cloned();
+        |(mut attrs, content, _)| {
+            let test = attrs.remove("test").unwrap_or_default();
+            let match_name = attrs.remove("matchname");
 
-            // Return the When tag followed by its content elements as a marker
-            let mut result = vec![Element::Esi(Tag::When { test, match_name })];
-            result.extend(content);
+            // Reuse content Vec — insert marker at front instead of creating a new Vec
+            let mut result = content;
+            result.insert(0, Element::Esi(Tag::When { test, match_name }));
             ParseResult::Multiple(result)
         },
     )(input)
@@ -732,10 +720,10 @@ fn esi_foreach<'a>(
             |i| tag_content(original, i),
             streaming_bytes::tag(TAG_ESI_FOREACH_CLOSE),
         )),
-        |(attrs, content, _)| {
-            let collection_str = attrs.get("collection").cloned().unwrap_or_default();
+        |(mut attrs, content, _)| {
+            let collection_str = attrs.remove("collection").unwrap_or_default();
             let collection = parse_attr_as_expr_with_context(collection_str, true);
-            let item = attrs.get("item").cloned();
+            let item = attrs.remove("item");
 
             ParseResult::Single(Element::Esi(Tag::Foreach {
                 collection,
@@ -773,8 +761,8 @@ fn esi_function_tag<'a>(
             |i| tag_content(original, i),
             streaming_bytes::tag(TAG_ESI_FUNCTION_CLOSE),
         )),
-        |(attrs, body, _)| {
-            let name = attrs.get("name").cloned().unwrap_or_default();
+        |(mut attrs, body, _)| {
+            let name = attrs.remove("name").unwrap_or_default();
 
             ParseResult::Single(Element::Esi(Tag::Function { name, body }))
         },
@@ -789,8 +777,8 @@ fn esi_return(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
             attributes,
             preceded(streaming_char::multispace0, streaming_self_closing),
         ),
-        |attrs| {
-            let value_str = attrs.get("value").cloned().unwrap_or_default();
+        |mut attrs| {
+            let value_str = attrs.remove("value").unwrap_or_default();
             let value = parse_attr_as_expr_with_context(value_str, false);
 
             ParseResult::Single(Element::Esi(Tag::Return { value }))
@@ -883,7 +871,7 @@ fn esi_vars<'a>(
 }
 
 fn parse_vars_attributes(mut attrs: HashMap<String, String>) -> Result<ParseResult, &'static str> {
-    take_attr_opt(&mut attrs, "name").map_or_else(
+    attrs.remove("name").map_or_else(
         || Err("no name field in short form vars"),
         |name_val| {
             if let Ok((_, expr)) = parse_expression(&name_val) {
@@ -1027,60 +1015,55 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     alt((esi_include_self_closing, esi_include_with_params))(input)
 }
 
-/// Helper to extract include attributes from the attributes `HashMap`
+/// Helper to extract include attributes from the HashMap
 fn extract_include_attrs(
     mut attrs: HashMap<String, String>,
     params: Vec<(String, Expr)>,
 ) -> IncludeAttributes {
-    let src = parse_attr_as_expr(take_attr(&mut attrs, "src"));
-    let alt = take_attr_opt(&mut attrs, "alt").map(parse_attr_as_expr);
-    let continue_on_error = attrs.get("onerror").is_some_and(|s| s == "continue");
+    let src = parse_attr_as_expr(attrs.remove("src").unwrap_or_default());
+    let alt = attrs.remove("alt").map(parse_attr_as_expr);
+    let continue_on_error = attrs.get("onerror").is_some_and(|v| v == "continue");
 
     // Parse dca attribute - default to None
-    let dca = match attrs.get("dca").map(|s| s.to_lowercase()).as_deref() {
+    let dca = match attrs.get("dca").map(|v| v.to_lowercase()).as_deref() {
         Some("esi") => DcaMode::Esi,
-        _ => DcaMode::None, // Default or unrecognized values
+        _ => DcaMode::None,
     };
 
-    let ttl = take_attr_opt(&mut attrs, "ttl");
-    let maxwait = take_attr_opt(&mut attrs, "maxwait").and_then(|s| s.parse::<u32>().ok());
+    let ttl = attrs.remove("ttl");
+    let maxwait = attrs.remove("maxwait").and_then(|s| s.parse::<u32>().ok());
     let no_store = attrs
         .get("no-store")
-        .is_some_and(|s| s == "on" || s == "true");
-    let method = take_attr_opt(&mut attrs, "method").map(parse_attr_as_expr);
-    let entity = take_attr_opt(&mut attrs, "entity").map(parse_attr_as_expr);
+        .is_some_and(|v| v == "on" || v == "true");
+    let method = attrs.remove("method").map(parse_attr_as_expr);
+    let entity = attrs.remove("entity").map(parse_attr_as_expr);
 
     // Parse header manipulation attributes
     let mut appendheaders = Vec::new();
     let mut setheaders = Vec::new();
     let mut removeheaders = Vec::new();
 
-    // Collect all header attributes (there can be multiple)
+    // Collect header attributes from remaining attrs
     let keys: Vec<String> = attrs.keys().cloned().collect();
     for key in keys {
+        let value = attrs.remove(&key).unwrap();
         if key.starts_with("appendheader") {
-            if let Some(value) = attrs.remove(&key) {
-                // Parse header format: "Header-Name: value"
-                if let Some((name, val)) = value.split_once(':') {
-                    appendheaders.push((
-                        name.trim().to_string(),
-                        parse_attr_as_expr(val.trim().to_string()),
-                    ));
-                }
+            // Parse header format: "Header-Name: value"
+            if let Some((name, val)) = value.split_once(':') {
+                appendheaders.push((
+                    name.trim().to_string(),
+                    parse_attr_as_expr(val.trim().to_string()),
+                ));
             }
         } else if key.starts_with("setheader") {
-            if let Some(value) = attrs.remove(&key) {
-                if let Some((name, val)) = value.split_once(':') {
-                    setheaders.push((
-                        name.trim().to_string(),
-                        parse_attr_as_expr(val.trim().to_string()),
-                    ));
-                }
+            if let Some((name, val)) = value.split_once(':') {
+                setheaders.push((
+                    name.trim().to_string(),
+                    parse_attr_as_expr(val.trim().to_string()),
+                ));
             }
         } else if key.starts_with("removeheader") {
-            if let Some(value) = attrs.remove(&key) {
-                removeheaders.push(value);
-            }
+            removeheaders.push(value);
         }
     }
 
@@ -1196,8 +1179,8 @@ fn esi_param(input: &[u8]) -> IResult<&[u8], (String, Expr), Error<&[u8]>> {
             ),
         ),
         |mut attrs| {
-            let name = take_attr(&mut attrs, "name");
-            let value = parse_attr_as_expr(take_attr(&mut attrs, "value"));
+            let name = attrs.remove("name").unwrap_or_default();
+            let value = parse_attr_as_expr(attrs.remove("value").unwrap_or_default());
             (name, value)
         },
     )(input)
@@ -1324,9 +1307,9 @@ fn tag_name(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     ))(input)
 }
 
-/// Parse a complete opening tag
-/// Returns (`remaining_input`, (`tag_name`, `full_tag_slice`))
-/// Only succeeds when we have a complete tag (ending with > or />)
+/// Parse a complete opening tag (streaming gate)
+/// Ensures the tag is fully available before dispatching to downstream
+/// complete parsers. Returns (`remaining_input`, (`tag_name`, `full_tag_slice`))
 #[allow(clippy::type_complexity)]
 fn esi_opening_tag(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8]), Error<&[u8]>> {
     let start = input;
