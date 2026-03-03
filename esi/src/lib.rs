@@ -260,7 +260,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
     fn on_include(&mut self, attrs: &IncludeAttributes) -> crate::Result<Flow> {
         let queued_element = self
             .processor
-            .dispatch_include_to_element(&attrs, self.dispatch_fragment_request)?;
+            .dispatch_include_to_element(attrs, self.dispatch_fragment_request)?;
         self.processor.queue.push_back(queued_element);
         Ok(Flow::Continue)
     }
@@ -274,7 +274,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
         // Build and dispatch the request (same machinery as include, but blocking)
         let queued_element = self
             .processor
-            .dispatch_include_to_element(&attrs, self.dispatch_fragment_request)?;
+            .dispatch_include_to_element(attrs, self.dispatch_fragment_request)?;
 
         match queued_element {
             QueuedElement::Include(fragment) => {

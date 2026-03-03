@@ -165,14 +165,15 @@ pub fn parse_remainder(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8
     parse_loop(input, element, &ParsingMode::Complete)
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Convert bytes to String using lossy UTF-8 conversion
+/// Convert ASCII bytes to String.
+/// # Safety
+/// All callers guarantee ASCII-only input (alphanumeric + underscore),
+/// so UTF-8 validation is unnecessary.
 #[inline]
 fn bytes_to_string(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+    // SAFETY: callers use take_while1(is_alphanumeric_or_underscore) or similar,
+    // which only matches ASCII bytes — always valid UTF-8.
+    unsafe { std::str::from_utf8_unchecked(bytes) }.to_owned()
 }
 
 // ============================================================================
@@ -1025,9 +1026,13 @@ fn extract_include_attrs(
     let continue_on_error = attrs.get("onerror").is_some_and(|v| *v == "continue");
 
     // Parse dca attribute - default to None
-    let dca = match attrs.get("dca").map(|v| v.to_lowercase()).as_deref() {
-        Some("esi") => DcaMode::Esi,
-        _ => DcaMode::None,
+    let dca = if attrs
+        .get("dca")
+        .is_some_and(|v| v.eq_ignore_ascii_case("esi"))
+    {
+        DcaMode::Esi
+    } else {
+        DcaMode::None
     };
 
     let ttl = attrs.remove("ttl").map(|s| s.to_owned());
@@ -1184,8 +1189,10 @@ fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<&str, &str>, Error<&[u8]>>
         ),
         HashMap::new,
         |mut acc, (k, v)| {
-            // alpha1 guarantees ASCII keys; from_utf8 is validation-only (zero allocation)
-            if let (Ok(key), Ok(val)) = (std::str::from_utf8(k), std::str::from_utf8(v)) {
+            // SAFETY: alpha1 guarantees ASCII-only keys — always valid UTF-8
+            let key = unsafe { std::str::from_utf8_unchecked(k) };
+            // Values come from htmlstring (arbitrary quoted content) — must validate
+            if let Ok(val) = std::str::from_utf8(v) {
                 acc.insert(key, val);
             }
             acc
@@ -1609,7 +1616,12 @@ fn integer(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
         opt(tag(&[HYPHEN] as &[u8])),
         take_while1(|c: u8| c.is_ascii_digit()),
     ))
-    .map_res(|s: &[u8]| String::from_utf8_lossy(s).parse::<i32>().map(Expr::Integer))
+    .map_res(|s: &[u8]| {
+        // SAFETY: s is ASCII digits + optional hyphen — always valid UTF-8
+        unsafe { std::str::from_utf8_unchecked(s) }
+            .parse::<i32>()
+            .map(Expr::Integer)
+    })
     .parse(input)
 }
 
