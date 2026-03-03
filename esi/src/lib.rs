@@ -13,13 +13,13 @@ pub mod parser_types;
 use crate::element_handler::{ElementHandler, Flow};
 use crate::expression::EvalContext;
 use crate::parser_types::{DcaMode, Element, Expr, IncludeAttributes};
-use bytes::{Buf, Bytes, BytesMut};
-use fastly::http::request::{PendingRequest, PollResult};
+use bytes::{Bytes, BytesMut};
+use fastly::http::request::{select, PendingRequest};
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Backend, Request, Response};
 use log::debug;
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
@@ -73,6 +73,7 @@ struct FragmentMetadata {
     continue_on_error: bool,
     /// Optional timeout in milliseconds for this specific request
     maxwait: Option<u32>,
+    /// Dynamic Content Assembly mode for this request I(controls pre-processing)
     dca: DcaMode,
 }
 
@@ -103,26 +104,61 @@ enum QueuedElement {
     },
 }
 
-impl PendingFragmentContent {
-    /// Poll to check if the request is ready without blocking
-    /// Returns the updated `PendingFragmentContent` (either still Pending or now Completed/NoContent)
-    pub fn poll(self) -> Self {
-        match self {
-            Self::PendingRequest(pending_request) => match pending_request.poll() {
-                PollResult::Done(result) => result.map_or_else(
-                    |_| Self::NoContent,
-                    |resp| Self::CompletedRequest(Box::new(resp)),
-                ),
-                PollResult::Pending(pending_request) => {
-                    // Still pending - put it back
-                    Self::PendingRequest(Box::new(pending_request))
-                }
-            },
-            // Already completed - return as-is
-            other => other,
-        }
-    }
+// ---------------------------------------------------------------------------
+// Parallel try-block tracking types (flat-buf design)
+// ---------------------------------------------------------------------------
 
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct RequestKey {
+    method: Method,
+    url: String,
+}
+
+/// Tracks an in-flight `<esi:try>` block in `drain_queue`.
+///
+/// Try-block includes share the main `buf` slots (same as bare includes)
+/// instead of maintaining a separate `content_slots` system.  Each attempt
+/// records which `buf` indices hold its content so that assembly can
+/// concatenate them once every pending include has been resolved.
+struct TryBlockTracker {
+    /// `buf` slot reserved for the assembled try-block output.
+    outer_slot: usize,
+    /// Per-attempt tracking (document order).
+    attempts: Vec<AttemptTracker>,
+    /// Deferred until all attempts resolve; only evaluated if any attempt
+    /// failed.
+    except_elements: Vec<Element>,
+    /// Total in-flight includes across all attempts.  When this reaches
+    /// zero the block is ready to assemble.
+    pending_count: usize,
+}
+
+/// Per-attempt state inside a [`TryBlockTracker`].
+struct AttemptTracker {
+    /// Indices into the main `buf` vec that hold this attempt's content
+    /// (both static text and resolved includes), in document order.
+    buf_slots: Vec<usize>,
+    /// Set to `true` if any include in this attempt returned a non-success
+    /// status without `continue_on_error`.
+    failed: bool,
+}
+
+/// Entry in the `url_map` that correlates a completing `PendingRequest`
+/// back to the `buf` slot it should fill.
+///
+/// A single struct covers both bare `<esi:include>`s and includes inside
+/// `<esi:try>` blocks — the `try_info` field distinguishes the two cases.
+struct SlotEntry {
+    /// Index into the main `buf` vec to fill with the processed response.
+    buf_slot: usize,
+    /// Fragment metadata needed to process the response (alt, headers, dca…).
+    fragment: Box<Fragment>,
+    /// `Some((tracker_idx, attempt_idx))` when this include lives inside a
+    /// try block; `None` for a bare include.
+    try_info: Option<(usize, usize)>,
+}
+
+impl PendingFragmentContent {
     /// Check if the content is ready (completed or no content)
     pub const fn is_ready(&self) -> bool {
         !matches!(self, Self::PendingRequest(_))
@@ -184,9 +220,8 @@ pub struct Processor {
 struct DocumentHandler<'a, W: Write> {
     processor: &'a mut Processor,
     output: &'a mut W,
-    dispatcher: &'a FragmentRequestDispatcher,
-    /// Optional response post-processor; needed by `process_ready_queue_items`.
-    response_processor: Option<&'a FragmentResponseProcessor>,
+    dispatch_fragment_request: &'a FragmentRequestDispatcher,
+    fragment_response_handler: Option<&'a FragmentResponseProcessor>,
 }
 
 impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
@@ -194,11 +229,11 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
         &mut self.processor.ctx
     }
 
-    fn process_ready_queue_items(&mut self) -> crate::Result<()> {
-        self.processor.process_ready_queue_items(
+    fn process_queue(&mut self) -> crate::Result<()> {
+        self.processor.process_queue(
             self.output,
-            self.dispatcher,
-            self.response_processor,
+            self.dispatch_fragment_request,
+            self.fragment_response_handler,
         )
     }
 
@@ -225,7 +260,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
     fn on_include(&mut self, attrs: IncludeAttributes) -> crate::Result<Flow> {
         let queued_element = self
             .processor
-            .dispatch_include_to_element(&attrs, self.dispatcher)?;
+            .dispatch_include_to_element(&attrs, self.dispatch_fragment_request)?;
         self.processor.queue.push_back(queued_element);
         Ok(Flow::Continue)
     }
@@ -239,7 +274,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
         // Build and dispatch the request (same machinery as include, but blocking)
         let queued_element = self
             .processor
-            .dispatch_include_to_element(&attrs, self.dispatcher)?;
+            .dispatch_include_to_element(&attrs, self.dispatch_fragment_request)?;
 
         match queued_element {
             QueuedElement::Include(fragment) => {
@@ -277,22 +312,29 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     // dca="esi": TWO-PHASE processing
                     // Phase 1: Process fragment in ISOLATED context
                     // Reborrow before the exclusive borrow of self.processor below
-                    let dispatcher = self.dispatcher;
+                    let dispatcher = self.dispatch_fragment_request;
                     let mut isolated_processor = Processor::new(
                         Some(self.processor.ctx.get_request().clone_without_body()),
                         self.processor.configuration.clone(),
                     );
                     let mut isolated_output = Vec::new();
 
-                    let mut isolated_handler = DocumentHandler {
-                        processor: &mut isolated_processor,
-                        output: &mut isolated_output,
-                        dispatcher,
-                        response_processor: None,
-                    };
-                    for element in elements {
-                        isolated_handler.process(&element)?;
+                    {
+                        let mut isolated_handler = DocumentHandler {
+                            processor: &mut isolated_processor,
+                            output: &mut isolated_output,
+                            dispatch_fragment_request: dispatcher,
+                            fragment_response_handler: None,
+                        };
+                        for element in elements {
+                            isolated_handler.process(&element)?;
+                        }
+                        // isolated_handler drops here, releasing the mutable borrow of isolated_output
                     }
+
+                    // Drain any includes dispatched during Phase 1 (e.g. <esi:include> inside the eval'd fragment).
+                    // Must happen before we read isolated_output, while isolated_handler has already dropped.
+                    isolated_processor.drain_queue(&mut isolated_output, dispatcher, None)?;
 
                     // Phase 2: Parse the isolated output as ESI and process in PARENT's context
                     // This is why variables don't leak: they only exist in phase 1
@@ -358,6 +400,12 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
     }
 }
 
+/// Implementation of the main Processor methods driving ESI processing
+///
+/// This impl block contains the core logic for processing ESI documents, including
+/// the main streaming loop, fragment dispatching, and queue management. The
+/// DocumentHandler implementation above delegates to these methods for the actual processing work,
+/// allowing the handler to focus on interfacing with the streaming architecture and the evaluation context.
 impl Processor {
     pub fn new(original_request_metadata: Option<Request>, configuration: Configuration) -> Self {
         let mut ctx = EvalContext::new();
@@ -488,6 +536,7 @@ impl Processor {
             }
         }
 
+        // Apply any response headers set during processing
         for (name, value) in self.ctx.response_headers() {
             resp.set_header(name, value);
         }
@@ -510,42 +559,15 @@ impl Processor {
         Ok(())
     }
 
-    /// Process an ESI stream with industry-grade streaming architecture
+    /// Process an ESI stream from any `BufRead` into a `Write`.
     ///
-    /// This is the low-level streaming API that processes ESI markup from any
-    /// `BufRead` source to any `Write` destination. For processing Fastly responses,
-    /// use [`process_response`](Self::process_response) instead.
+    /// - Reads in 8 KB chunks, buffering only what the parser needs
+    /// - Parses incrementally; writes content as soon as it’s parsed
+    /// - Dispatches includes immediately; waits for them later in document order
+    /// - Uses `select()` to harvest in-flight includes while preserving output order
     ///
-    /// This method implements **three levels of streaming** for optimal performance:
-    ///
-    /// ## 1. Chunked Input Reading (Memory Efficient)
-    /// - Reads source stream in 8KB chunks from `BufRead`
-    /// - Accumulates chunks until parser can make progress
-    /// - Prevents loading entire document into memory at once
-    /// - Bounded memory growth with incremental processing
-    ///
-    /// ## 2. Streaming Output (Low Latency)
-    /// - Writes processed content immediately as elements are parsed
-    /// - Non-blocking poll checks for completed fragments
-    /// - Output reaches destination with minimal delay
-    /// - No buffering of final output
-    ///
-    /// ## 3. Streaming Fragments (Maximum Parallelism)
-    /// - Dispatches all includes immediately (non-blocking)
-    /// - Uses `select()` to process whichever fragment completes first
-    /// - All fragments fetch in parallel, no wasted waiting
-    /// - Try blocks dispatch all attempts' includes upfront
-    ///
-    /// ## Key Features:
-    /// - Only fetches fragments that are actually needed (not those in unexecuted branches)
-    /// - Fully recursive nested try/except blocks
-    /// - Proper alt fallback and `continue_on_error` handling
-    /// - Full ESI specification compliance
-    ///
-    /// ## Note on Parsing:
-    /// The parser (nom-based) requires complete input for each parse operation.
-    /// We handle this by buffering input chunks until a successful parse,
-    /// then processing parsed elements immediately while retaining unparsed remainder.
+    /// For Fastly `Response` bodies, prefer [`process_response`], which wires up
+    /// cache headers and response metadata for you.
     ///
     /// # Arguments
     /// * `src_stream` - `BufRead` source containing ESI markup (streams in chunks)
@@ -610,9 +632,10 @@ impl Processor {
                 }
             }
 
-            // Freeze a view of the buffer for zero-copy parsing
-            // We clone here because freeze() consumes, but Bytes cloning is cheap (ref count)
-            let frozen = buffer.clone().freeze();
+            // Create a zero-copy window of the current buffer contents without cloning.
+            // split_off(0) moves the data into a new view while keeping the same backing store.
+            let mut window = buffer.split_off(0);
+            let frozen = window.freeze();
 
             // Try to parse what we have in the buffer
             // Use streaming parser unless we're at EOF, then use complete parser
@@ -630,14 +653,14 @@ impl Processor {
                     let mut handler = DocumentHandler {
                         processor: self,
                         output: output_writer,
-                        dispatcher,
-                        response_processor: process_fragment_response,
+                        dispatch_fragment_request: dispatcher,
+                        fragment_response_handler: process_fragment_response,
                     };
                     for element in elements {
                         // Note: breaks at top-level are ignored
                         handler.process(&element)?;
-                        // After each element, check if any queued includes are ready (non-blocking poll)
-                        handler.process_ready_queue_items()?;
+                        // After each element, check if any queued includes are ready
+                        handler.process_queue()?;
                     }
 
                     // Calculate how many bytes were consumed
@@ -658,8 +681,11 @@ impl Processor {
                             // which treats remainder as Text elements
                             break;
                         }
-                        // Keep remainder for next chunk - advance past consumed bytes
-                        buffer.advance(consumed);
+                        // Reuse the existing backing store without cloning: split_off leaves
+                        // `window` empty; reuse it for the remainder so we avoid copying.
+                        let remainder_bytes = frozen.slice(consumed..);
+                        window = BytesMut::from(remainder_bytes.as_ref());
+                        buffer = window.split_off(0);
                     }
                 }
                 Err(nom::Err::Incomplete(_)) => {
@@ -850,7 +876,7 @@ impl Processor {
     ///
     /// Processes completed fragments, ready content, and try blocks from the front of the
     /// queue without blocking. Stops as soon as it encounters a pending include.
-    fn process_ready_queue_items(
+    fn process_queue(
         &mut self,
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
@@ -864,23 +890,24 @@ impl Processor {
                     output_writer.write_all(&content)?;
                 }
                 Some(QueuedElement::Include(mut fragment)) => {
-                    // Poll the fragment (non-blocking check)
+                    // If the fragment is already completed (cache hit / NoContent),
+                    // process immediately. Otherwise, leave it in place and exit
+                    // to avoid busy-wait polling.
                     let pending_content = std::mem::replace(
                         &mut fragment.pending_fragment,
                         PendingFragmentContent::NoContent,
                     );
-                    fragment.pending_fragment = pending_content.poll();
-                    if fragment.pending_fragment.is_ready() {
-                        self.process_include_from_queue(
-                            *fragment,
-                            output_writer,
-                            dispatcher,
-                            processor,
-                        )?;
-                    } else {
-                        // Still pending - put it back at front and stop
-                        self.queue.push_front(QueuedElement::Include(fragment));
-                        break;
+                    match pending_content {
+                        PendingFragmentContent::PendingRequest(request) => {
+                            fragment.pending_fragment =
+                                PendingFragmentContent::PendingRequest(request);
+                            self.queue.push_front(QueuedElement::Include(fragment));
+                            break;
+                        }
+                        ready => {
+                            fragment.pending_fragment = ready;
+                            self.process_include(*fragment, output_writer, dispatcher, processor)?;
+                        }
                     }
                 }
                 Some(QueuedElement::Try {
@@ -903,50 +930,450 @@ impl Processor {
         Ok(())
     }
 
-    /// Drain the queue to completion, blocking on each element in document order.
+    /// Build a correlation key for matching select() results to dispatched requests.
+    fn make_request_key(req: &Request) -> RequestKey {
+        RequestKey {
+            method: req.get_method().clone(),
+            url: req.get_url_str().to_string(),
+        }
+    }
+
+    /// Drain the queue to completion, preserving document order while using
+    /// `fastly::http::request::select()` to process whichever in-flight include
+    /// finishes first.
     ///
-    /// All fragment requests were pre-dispatched during element parsing and are already
-    /// fetching in parallel. This method harvests them sequentially in document order.
-    ///
-    /// The previous `select()`-based approach was removed because `fastly::http::request::select`
-    /// does not expose which of the original requests completed (no identity on `PendingRequest`),
-    /// making it impossible to correctly correlate the completed response with its fragment
-    /// metadata (alt URL, `onerror` policy, etc.).
+    /// - All includes (bare and inside `<esi:try>`) are dispatched before any
+    ///   waits; a single pending pool feeds `select()`, removing the xN
+    ///   sequential penalty for many consecutive try blocks.
+    /// - Each queued element gets a slot in `buf`; try-block includes use the
+    ///   same `buf` slots as bare includes (no separate content_slots system).
+    ///   A `TryBlockTracker` records which buf indices belong to each attempt
+    ///   so they can be assembled into the outer slot when resolved.
+    /// - Request correlation uses (method + URL) keys via `SlotEntry`; the
+    ///   `try_info` field distinguishes bare includes from try-block includes.
     fn drain_queue(
         &mut self,
         output_writer: &mut impl Write,
-        dispatcher: &FragmentRequestDispatcher,
-        processor: Option<&FragmentResponseProcessor>,
+        dispatch_fragment_request: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
-        while let Some(elem) = self.queue.pop_front() {
-            match elem {
-                QueuedElement::Content(bytes) => {
-                    output_writer.write_all(&bytes)?;
-                }
-                QueuedElement::Include(fragment) => {
-                    self.process_include_from_queue(
-                        *fragment,
-                        output_writer,
-                        dispatcher,
-                        processor,
-                    )?;
-                }
-                QueuedElement::Try {
-                    attempt_elements,
-                    except_elements,
-                } => {
-                    self.process_try_block(
+        // `buf[i]` is `None` while the slot is waiting for a response,
+        // `Some(bytes)` once it is ready.  Try-block includes use the SAME
+        // buf slots as bare includes — no separate content_slots system.
+        let mut buf: Vec<Option<Bytes>> = Vec::new();
+        let mut next_out: usize = 0;
+
+        // RequestKey → FIFO queue of SlotEntry for all in-flight requests.
+        // A single SlotEntry struct covers both bare includes and try-block
+        // includes; the `try_info` field distinguishes the two cases.
+        let mut url_map: HashMap<RequestKey, VecDeque<SlotEntry>> = HashMap::new();
+
+        // PendingRequests handed to select() on each iteration.
+        let mut pending: Vec<PendingRequest> = Vec::new();
+
+        // One tracker per <esi:try> block encountered during Step 1.
+        let mut try_trackers: Vec<TryBlockTracker> = Vec::new();
+
+        loop {
+            // ------------------------------------------------------------------
+            // Step 1: drain self.queue, assigning every element a slot.
+            //
+            // After this inner loop self.queue is guaranteed empty.  That
+            // invariant means DocumentHandler::write_bytes() called from within
+            // `process_include` writes directly to the caller-supplied
+            // slot_buf rather than re-queuing (the correct behaviour for
+            // dca="esi" fragment bodies that contain further ESI directives).
+            // ------------------------------------------------------------------
+            while let Some(elem) = self.queue.pop_front() {
+                match elem {
+                    QueuedElement::Content(bytes) => {
+                        buf.push(Some(bytes));
+                    }
+
+                    QueuedElement::Include(mut fragment) => {
+                        let slot = buf.len();
+                        buf.push(None); // placeholder; filled when response arrives
+
+                        let pending_content = std::mem::replace(
+                            &mut fragment.pending_fragment,
+                            PendingFragmentContent::NoContent,
+                        );
+                        match pending_content {
+                            PendingFragmentContent::PendingRequest(req) => {
+                                let key = Self::make_request_key(&fragment.req);
+                                url_map.entry(key).or_default().push_back(SlotEntry {
+                                    buf_slot: slot,
+                                    fragment,
+                                    try_info: None,
+                                });
+                                pending.push(*req);
+                            }
+                            ready => {
+                                // CompletedRequest or NoContent: process now.
+                                fragment.pending_fragment = ready;
+                                let mut slot_buf = Vec::new();
+                                self.process_include(
+                                    *fragment,
+                                    &mut slot_buf,
+                                    dispatch_fragment_request,
+                                    process_fragment_response,
+                                )?;
+                                buf[slot] = Some(Bytes::from(slot_buf));
+                                // dca="esi" may push new items onto self.queue;
+                                // the outer while picks them up next iteration.
+                            }
+                        }
+                    }
+
+                    QueuedElement::Try {
                         attempt_elements,
                         except_elements,
-                        output_writer,
-                        dispatcher,
-                        processor,
+                    } => {
+                        // Reserve one outer slot for the assembled output.
+                        let outer_slot = buf.len();
+                        buf.push(None);
+
+                        let tracker_idx = try_trackers.len();
+                        try_trackers.push(TryBlockTracker {
+                            outer_slot,
+                            attempts: Vec::with_capacity(attempt_elements.len()),
+                            except_elements,
+                            pending_count: 0,
+                        });
+
+                        // Walk each attempt through DocumentHandler to
+                        // dispatch includes, then flatten results into buf.
+                        for (attempt_idx, attempt_elems) in attempt_elements.into_iter().enumerate()
+                        {
+                            try_trackers[tracker_idx].attempts.push(AttemptTracker {
+                                buf_slots: Vec::new(),
+                                failed: false,
+                            });
+
+                            let mut pre_buf: Vec<u8> = Vec::new();
+                            let mut pre_failed = false;
+                            self.execute_isolated(
+                                &attempt_elems,
+                                &mut pre_buf,
+                                dispatch_fragment_request,
+                                process_fragment_response,
+                                |this, pre_out| {
+                                    // Static content before the first include.
+                                    if !pre_out.is_empty() {
+                                        let slot = buf.len();
+                                        buf.push(Some(Bytes::from(pre_out.to_vec())));
+                                        try_trackers[tracker_idx].attempts[attempt_idx]
+                                            .buf_slots
+                                            .push(slot);
+                                    }
+
+                                    // Remaining queued elements (document order).
+                                    while let Some(qe) = this.queue.pop_front() {
+                                        match qe {
+                                            QueuedElement::Content(bytes) => {
+                                                let slot = buf.len();
+                                                buf.push(Some(bytes));
+                                                try_trackers[tracker_idx].attempts[attempt_idx]
+                                                    .buf_slots
+                                                    .push(slot);
+                                            }
+
+                                            QueuedElement::Include(mut frag) => {
+                                                let slot = buf.len();
+                                                buf.push(None);
+                                                try_trackers[tracker_idx].attempts[attempt_idx]
+                                                    .buf_slots
+                                                    .push(slot);
+
+                                                let pc = std::mem::replace(
+                                                    &mut frag.pending_fragment,
+                                                    PendingFragmentContent::NoContent,
+                                                );
+                                                match pc {
+                                                    PendingFragmentContent::PendingRequest(req) => {
+                                                        let key = Self::make_request_key(&frag.req);
+                                                        url_map.entry(key).or_default().push_back(
+                                                            SlotEntry {
+                                                                buf_slot: slot,
+                                                                fragment: frag,
+                                                                try_info: Some((
+                                                                    tracker_idx,
+                                                                    attempt_idx,
+                                                                )),
+                                                            },
+                                                        );
+                                                        pending.push(*req);
+                                                        try_trackers[tracker_idx].pending_count +=
+                                                            1;
+                                                    }
+                                                    ready => {
+                                                        frag.pending_fragment = ready;
+                                                        let mut slot_buf = Vec::new();
+                                                        if this
+                                                            .process_include(
+                                                                *frag,
+                                                                &mut slot_buf,
+                                                                dispatch_fragment_request,
+                                                                process_fragment_response,
+                                                            )
+                                                            .is_err()
+                                                        {
+                                                            pre_failed = true;
+                                                        }
+                                                        buf[slot] = Some(Bytes::from(slot_buf));
+                                                    }
+                                                }
+                                            }
+
+                                            QueuedElement::Try {
+                                                attempt_elements: nested_attempts,
+                                                except_elements: nested_except,
+                                            } => {
+                                                // Nested try: process synchronously.
+                                                let slot = buf.len();
+                                                buf.push(None);
+                                                try_trackers[tracker_idx].attempts[attempt_idx]
+                                                    .buf_slots
+                                                    .push(slot);
+                                                let mut slot_buf = Vec::new();
+                                                this.process_try_block(
+                                                    nested_attempts,
+                                                    nested_except,
+                                                    &mut slot_buf,
+                                                    dispatch_fragment_request,
+                                                    process_fragment_response,
+                                                )?;
+                                                buf[slot] = Some(Bytes::from(slot_buf));
+                                            }
+                                        }
+                                    }
+                                    Ok(())
+                                },
+                            )?;
+
+                            if pre_failed {
+                                try_trackers[tracker_idx].attempts[attempt_idx].failed = true;
+                            }
+                        }
+
+                        // If no includes are pending, assemble immediately.
+                        if try_trackers[tracker_idx].pending_count == 0 {
+                            Self::assemble_try_block(
+                                self,
+                                tracker_idx,
+                                &mut try_trackers,
+                                &mut buf,
+                                dispatch_fragment_request,
+                                process_fragment_response,
+                            )?;
+                        }
+                    }
+                }
+            }
+
+            // ------------------------------------------------------------------
+            // Step 2: flush consecutive ready slots at next_out.
+            // ------------------------------------------------------------------
+            while next_out < buf.len() {
+                match &buf[next_out] {
+                    Some(bytes) => {
+                        output_writer.write_all(bytes)?;
+                        buf[next_out] = Some(Bytes::new()); // release allocation
+                        next_out += 1;
+                    }
+                    None => break, // head slot still waiting
+                }
+            }
+
+            // ------------------------------------------------------------------
+            // Step 3: done when nothing is pending.
+            // ------------------------------------------------------------------
+            if pending.is_empty() {
+                break;
+            }
+
+            // ------------------------------------------------------------------
+            // Step 4: wait for the next completed request from the shared pool.
+            // ------------------------------------------------------------------
+            let (result, remaining) = select(pending);
+            pending = remaining;
+
+            // ------------------------------------------------------------------
+            // Step 5: correlate the response with its SlotEntry and act.
+            //
+            // Success  → Response::get_backend_request() carries the sent URL.
+            // Failure  → SendError::into_sent_req() recovers the URL; a 500 is
+            //            synthesised so existing alt/onerror logic is unchanged.
+            // ------------------------------------------------------------------
+            let (key, completed_content) = match result {
+                Ok(resp) => {
+                    let key = resp
+                        .get_backend_request()
+                        .map(Self::make_request_key)
+                        .ok_or_else(|| {
+                            ESIError::ExpressionError(
+                                "drain_queue: response missing backend request for correlation"
+                                    .to_string(),
+                            )
+                        })?;
+                    (
+                        key,
+                        PendingFragmentContent::CompletedRequest(Box::new(resp)),
+                    )
+                }
+                Err(e) => {
+                    let req = e.into_sent_req();
+                    let key = Self::make_request_key(&req);
+                    debug!(
+                        "Fragment request to {} {} failed; triggering alt/onerror handling",
+                        key.method, key.url
+                    );
+                    (
+                        key,
+                        PendingFragmentContent::CompletedRequest(Box::new(Response::from_status(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        ))),
+                    )
+                }
+            };
+
+            let entry = url_map
+                .get_mut(&key)
+                .and_then(|q| q.pop_front())
+                .ok_or_else(|| {
+                    ESIError::ExpressionError(format!(
+                        "drain_queue: no in-flight fragment for {}/{}",
+                        key.method, key.url
+                    ))
+                })?;
+
+            let SlotEntry {
+                buf_slot,
+                mut fragment,
+                try_info,
+            } = entry;
+
+            match try_info {
+                // -------------------------------------------------------
+                // Bare <esi:include>: fill the buf slot directly.
+                // -------------------------------------------------------
+                None => {
+                    fragment.pending_fragment = completed_content;
+                    let mut slot_buf = Vec::new();
+                    self.process_include(
+                        *fragment,
+                        &mut slot_buf,
+                        dispatch_fragment_request,
+                        process_fragment_response,
                     )?;
+                    buf[buf_slot] = Some(Bytes::from(slot_buf));
+                    // dca="esi" may push new QueuedElements onto self.queue.
+                    // Loop back to Step 1 to assign them slots.
+                }
+
+                // -------------------------------------------------------
+                // Include inside a <esi:try> attempt: fill the buf slot,
+                // then check if the entire try block is now resolved.
+                // -------------------------------------------------------
+                Some((tracker_idx, attempt_idx)) => {
+                    fragment.pending_fragment = completed_content;
+                    let mut slot_buf = Vec::new();
+                    let include_failed = self
+                        .process_include(
+                            *fragment,
+                            &mut slot_buf,
+                            dispatch_fragment_request,
+                            process_fragment_response,
+                        )
+                        .is_err();
+                    buf[buf_slot] = Some(Bytes::from(slot_buf));
+
+                    if include_failed {
+                        try_trackers[tracker_idx].attempts[attempt_idx].failed = true;
+                    }
+                    try_trackers[tracker_idx].pending_count -= 1;
+
+                    if try_trackers[tracker_idx].pending_count == 0 {
+                        Self::assemble_try_block(
+                            self,
+                            tracker_idx,
+                            &mut try_trackers,
+                            &mut buf,
+                            dispatch_fragment_request,
+                            process_fragment_response,
+                        )?;
+                    }
+                    // dca="esi" inside a try-attempt promotes sub-includes
+                    // to outer slots.  Loop back to Step 1.
                 }
             }
         }
+
+        // Final flush: every slot must be ready at this point.
+        while next_out < buf.len() {
+            match &buf[next_out] {
+                Some(bytes) => {
+                    output_writer.write_all(bytes)?;
+                    next_out += 1;
+                }
+                None => {
+                    return Err(ESIError::ExpressionError(
+                        "drain_queue: slot still pending after all requests resolved".to_string(),
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
+
+    /// Assemble a fully-resolved try block: concatenate successful attempt
+    /// content from `buf` slots, clear inner slots, and set the outer slot.
+    fn assemble_try_block(
+        &mut self,
+        tracker_idx: usize,
+        try_trackers: &mut [TryBlockTracker],
+        buf: &mut [Option<Bytes>],
+        dispatch_fragment_request: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        let mut any_failed = false;
+        let mut output: Vec<u8> = Vec::new();
+
+        for attempt in &try_trackers[tracker_idx].attempts {
+            if attempt.failed {
+                any_failed = true;
+                // Clear failed attempt's inner slots so Step 2 skips them.
+                for &slot_idx in &attempt.buf_slots {
+                    buf[slot_idx] = Some(Bytes::new());
+                }
+            } else {
+                for &slot_idx in &attempt.buf_slots {
+                    if let Some(bytes) = &buf[slot_idx] {
+                        output.extend_from_slice(bytes);
+                    }
+                    // Clear inner slot so Step 2 flushes it as a no-op.
+                    buf[slot_idx] = Some(Bytes::new());
+                }
+            }
+        }
+
+        if any_failed {
+            let except_elements = std::mem::take(&mut try_trackers[tracker_idx].except_elements);
+            if !except_elements.is_empty() {
+                let except_buf = self.process_try_task(
+                    except_elements,
+                    dispatch_fragment_request,
+                    process_fragment_response,
+                )?;
+                output.extend_from_slice(&except_buf);
+            }
+        }
+
+        buf[try_trackers[tracker_idx].outer_slot] = Some(Bytes::from(output));
+        Ok(())
+    }
+
     /// Process a try block: execute ALL attempts in document order (they are
     /// independent statements), then run the except clause if any failed.
     fn process_try_block(
@@ -959,16 +1386,50 @@ impl Processor {
     ) -> Result<()> {
         let mut any_failed = false;
         for attempt in attempt_elements {
-            match self.process_attempt_elements(attempt, dispatcher, processor) {
+            match self.process_try_task(attempt, dispatcher, processor) {
                 Ok(buffer) => output_writer.write_all(&buffer)?,
                 Err(_) => any_failed = true,
             }
         }
         if any_failed {
-            let buf = self.process_attempt_elements(except_elements, dispatcher, processor)?;
+            let buf = self.process_try_task(except_elements, dispatcher, processor)?;
             output_writer.write_all(&buf)?;
         }
         Ok(())
+    }
+
+    /// Execute a `DocumentHandler` with an isolated queue.
+    ///
+    /// Saves `self.queue`, runs the handler writing into `output`, executes the
+    /// provided `after` closure (which can consume the temporary queue), then
+    /// restores the saved queue.
+    fn execute_isolated<R, W: Write>(
+        &mut self,
+        elements: &[Element],
+        output: &mut W,
+        dispatcher: &FragmentRequestDispatcher,
+        processor: Option<&FragmentResponseProcessor>,
+        after: impl FnOnce(&mut Self, &mut W) -> Result<R>,
+    ) -> Result<R> {
+        let saved_queue = std::mem::take(&mut self.queue);
+
+        {
+            let mut handler = DocumentHandler {
+                processor: self,
+                output,
+                dispatch_fragment_request: dispatcher,
+                fragment_response_handler: processor,
+            };
+            for elem in elements {
+                handler.process(elem)?;
+            }
+        }
+
+        let result = after(self, output);
+
+        // Always restore the outer queue, even if `after` failed.
+        self.queue = saved_queue;
+        result
     }
 
     /// Execute a list of raw ESI elements in document order into a fresh buffer.
@@ -983,45 +1444,34 @@ impl Processor {
     ///
     /// After all elements have been walked, any queued includes are drained in
     /// document order (blocking wait per include).
-    fn process_attempt_elements(
+    fn process_try_task(
         &mut self,
         elements: Vec<Element>,
         dispatcher: &FragmentRequestDispatcher,
         processor: Option<&FragmentResponseProcessor>,
     ) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
-
-        // Isolate this attempt's dispatch queue from the outer document queue.
-        let saved_queue = std::mem::take(&mut self.queue);
-
-        {
-            let mut handler = DocumentHandler {
-                processor: self,
-                output: &mut buffer,
-                dispatcher,
-                response_processor: processor,
-            };
-            for elem in &elements {
-                handler.process(elem)?;
-            }
-        }
-
-        // Drain any includes (and nested try blocks) dispatched during the walk.
-        self.drain_queue(&mut buffer, dispatcher, processor)?;
-
-        // Restore the outer document queue.
-        self.queue = saved_queue;
+        self.execute_isolated(
+            &elements,
+            &mut buffer,
+            dispatcher,
+            processor,
+            |this, out| {
+                this.drain_queue(out, dispatcher, processor)?;
+                Ok(())
+            },
+        )?;
 
         Ok(buffer)
     }
 
     /// Process an include from the queue (wait and write, handle alt)
-    fn process_include_from_queue(
+    fn process_include(
         &mut self,
         fragment: Fragment,
         output_writer: &mut impl Write,
-        dispatcher: &FragmentRequestDispatcher,
-        processor: Option<&FragmentResponseProcessor>,
+        dispatch_fragment_request: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
         let continue_on_error = fragment.metadata.continue_on_error;
 
@@ -1030,7 +1480,7 @@ impl Processor {
 
         // Apply processor if provided
         let mut req_for_processor = fragment.req.clone_without_body();
-        let final_response = if let Some(proc) = processor {
+        let final_response = if let Some(proc) = process_fragment_response {
             proc(&mut req_for_processor, response)?
         } else {
             response
@@ -1074,7 +1524,7 @@ impl Processor {
                 body_bytes,
                 &fragment.metadata.dca,
                 output_writer,
-                dispatcher,
+                dispatch_fragment_request,
             )?;
             Ok(())
         } else if let Some(alt_src) = fragment.alt_bytes {
@@ -1088,11 +1538,11 @@ impl Processor {
             )?;
 
             let alt_req_without_body = alt_req.clone_without_body();
-            match dispatcher(alt_req_without_body, fragment.metadata.maxwait) {
+            match dispatch_fragment_request(alt_req_without_body, fragment.metadata.maxwait) {
                 Ok(alt_pending) => {
                     let alt_response = alt_pending.wait()?;
                     let mut alt_req_for_proc = alt_req.clone_without_body();
-                    let final_alt = if let Some(proc) = processor {
+                    let final_alt = if let Some(proc) = process_fragment_response {
                         proc(&mut alt_req_for_proc, alt_response)?
                     } else {
                         alt_response
@@ -1103,7 +1553,7 @@ impl Processor {
                         body_bytes,
                         &fragment.metadata.dca,
                         output_writer,
-                        dispatcher,
+                        dispatch_fragment_request,
                     )?;
                     Ok(())
                 }
@@ -1156,8 +1606,8 @@ impl Processor {
             let mut handler = DocumentHandler {
                 processor: self,
                 output: output_writer,
-                dispatcher,
-                response_processor: None,
+                dispatch_fragment_request: dispatcher,
+                fragment_response_handler: None,
             };
             for element in elements {
                 if matches!(handler.process(&element)?, Flow::Break) {

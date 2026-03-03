@@ -88,7 +88,7 @@ pub(crate) trait ElementHandler {
     ///
     /// Called after processing each top-level element in the main parse loop.
     /// Default is a no-op — only meaningful in the streaming context.
-    fn process_ready_queue_items(&mut self) -> Result<()> {
+    fn process_queue(&mut self) -> Result<()> {
         Ok(())
     }
 

@@ -2107,11 +2107,11 @@ fn test_multi_include_document_order() {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Try block after an include in the same document (fix #11)
-// Previously, process_ready_queue_items skipped Try blocks entirely, so a Try
+// Previously, process_queue skipped Try blocks entirely, so a Try
 // that reached the head of the queue (after a preceding include was consumed)
 // would stall until drain_queue ran at the end - never an outright bug in tests
 // using CompletedRequest, but wrong for real async requests.  The fix makes
-// process_ready_queue_items process Try blocks inline.
+// process_queue process Try blocks inline.
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[test]
