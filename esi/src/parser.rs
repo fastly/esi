@@ -899,43 +899,11 @@ fn esi_vars_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     .parse(input)
 }
 
-/// Parse content for tags that don't support nested ESI (text + expressions + HTML only)
+/// Parse content for tags that don't support nested ESI (text + expressions only)
 /// Uses COMPLETE mode - input must be captured entirely before calling this
-/// Parses: text, expressions ($...), and HTML tags
-/// Does NOT parse: nested ESI tags (treated as literal text)
+/// Parses: text and expressions ($...)
+/// Does NOT parse: nested ESI tags or HTML tags (treated as literal text)
 fn parse_content_complete(original: &Bytes, content: &[u8]) -> Vec<Element> {
-    // Text in complete mode - stops at $ or < for expression/tag parsing
-    fn text_complete<'a>(
-        original: &Bytes,
-        input: &'a [u8],
-    ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-        take_while1(|c| !is_dollar(c) && !is_open_bracket(c))
-            .map(|s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))))
-            .parse(input)
-    }
-
-    // HTML tag in complete mode - any tag that's NOT an ESI tag
-    fn html_tag_complete<'a>(
-        original: &Bytes,
-        input: &'a [u8],
-    ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-        // Check that this is NOT an esi: tag
-        let (_, _) = peek((open_bracket, not(tag(ESI_PREFIX)))).parse(input)?;
-
-        // Parse the HTML tag (simplified - just capture until >)
-        let (rest, html) = recognize((
-            open_bracket,
-            take_until(&[CLOSE_BRACKET][..]),
-            close_bracket,
-        ))
-        .parse(input)?;
-
-        Ok((
-            rest,
-            ParseResult::Single(Element::Html(slice_as_bytes(original, html))),
-        ))
-    }
-
     // Parse content using complete parsers
     let mut elements = Vec::new();
     let mut remaining = content;
@@ -948,22 +916,15 @@ fn parse_content_complete(original: &Bytes, content: &[u8]) -> Vec<Element> {
             continue;
         }
 
-        // Try HTML tag (starts with < but NOT <esi:)
-        if let Ok((rest, result)) = html_tag_complete(original, remaining) {
-            result.append_to(&mut elements);
-            remaining = rest;
-            continue;
-        }
-
-        // Try text (stops at $ or <)
-        if let Ok((rest, result)) = text_complete(original, remaining) {
+        // Try text (stops at $) — reuses interpolated_text_complete
+        if let Ok((rest, result)) = interpolated_text_complete(original, remaining) {
             result.append_to(&mut elements);
             remaining = rest;
             continue;
         }
 
         // Fallback: consume one byte as text if nothing else matches
-        // This handles stray $ or < characters that aren't valid expressions/tags
+        // This handles stray $ or < characters that aren't valid expressions
         elements.push(Element::Content(slice_as_bytes(original, &remaining[..1])));
         remaining = &remaining[1..];
     }
@@ -1228,22 +1189,10 @@ fn streaming_close_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> 
     streaming_bytes::tag(&[CLOSE_BRACKET] as &[u8]).parse(input)
 }
 
-/// Helper to find and consume the closing '>' character
-#[inline]
-fn close_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    tag(&[CLOSE_BRACKET] as &[u8]).parse(input)
-}
-
-/// Helper to find and consume the closing self-closing tag characters '/>'
+/// Helper to find and consume the closing self-closing tag characters '/>
 #[inline]
 fn streaming_self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     streaming_bytes::tag(TAG_SELF_CLOSE).parse(input)
-}
-
-/// Helper to find and consume the opening '<' character
-#[inline]
-fn open_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    tag(&[OPEN_BRACKET] as &[u8]).parse(input)
 }
 
 /// Helper to find and consume the opening '<' character
@@ -1749,29 +1698,26 @@ fn list_literal(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 /// Parse primary expressions (highest precedence atoms)
 /// Handles: variables, functions, literals, grouped expressions
+/// Extends interpolated_expression with grouped expressions and negative integers
 fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     match input.first() {
-        // Parse grouped expression: (expr)
+        // Parse grouped expression: (expr) — only valid in expression context, not interpolated content
         Some(&OPEN_PAREN) => delimited(
             tag(&[OPEN_PAREN] as &[u8]),
             delimited(multispace0, expr, multispace0),
             tag(&[CLOSE_PAREN] as &[u8]),
         )
         .parse(input),
-        // Parse dictionary literal: {key:value, key:value}
-        Some(&OPEN_BRACE) => dict_literal(input),
-        // Parse list literal: [value, value]
-        Some(&OPEN_SQ_BRACKET) => list_literal(input),
-        // Parse function call or variable: $func(...) or $(VAR)
-        Some(&DOLLAR) => alt((esi_function, esi_variable)).parse(input),
-        // Parse integer literal (with optional leading minus)
-        Some(b'0'..=b'9' | &HYPHEN) => integer(input),
-        // Parse string literal (single or triple quoted)
-        Some(&SINGLE_QUOTE) => string(input),
-        _ => Err(nom::Err::Error(Error::new(
-            input,
-            nom::error::ErrorKind::Alt,
-        ))),
+        // Parse negative integer — only valid in expression context
+        Some(&HYPHEN) => integer(input),
+        // Delegate shared cases to interpolated_expression's dispatch
+        _ => {
+            let (rest, result) = interpolated_expression(input)?;
+            match result {
+                ParseResult::Single(Element::Expr(expr)) => Ok((rest, expr)),
+                _ => unreachable!("interpolated_expression always returns Single(Expr)"),
+            }
+        }
     }
 }
 
