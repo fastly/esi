@@ -2237,3 +2237,152 @@ fn test_try_block_at_queue_head_uses_except_on_failure() {
         "Except should appear when attempt fails. Got: {result}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Reference semantics for lists and dictionaries (ESI spec: "Lists and
+// Dictionaries are Referenced, Not Copied")
+// ---------------------------------------------------------------------------
+
+/// Spec example: assigning a list to new names creates aliases, not copies.
+/// Mutating through any alias is visible from every other alias.
+///
+/// ```esi
+/// <esi:assign name="list" value="[1, 2, 3]"/>
+/// <esi:assign name="copy1" value="list"/>   <!-- Does not copy! -->
+/// <esi:assign name="copy2" value="list"/>   <!-- Does not copy! -->
+/// <esi:assign name="copy1{2}" value="9"/>
+/// ```
+///
+/// Expected output for $(list), $(copy1), $(copy2): all `1,2,9`
+#[test]
+fn test_list_reference_semantics() -> Result<(), Error> {
+    let input = r#"<esi:assign name="list" value="[1, 2, 3]"/>
+<esi:assign name="copy1" value="$(list)"/>
+<esi:assign name="copy2" value="$(list)"/>
+<esi:assign name="copy1{2}" value="9"/>
+<esi:vars>$(list)
+$(copy1)
+$(copy2)</esi:vars>"#;
+
+    let dispatcher =
+        |_req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            unreachable!("no fragments in this test")
+        };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default());
+    processor.process_stream(reader, &mut output, Some(&dispatcher), None)?;
+
+    let result = String::from_utf8(output).unwrap();
+    // All three variables refer to the same list — mutation through copy1 is
+    // visible in list and copy2.
+    assert_eq!(
+        result.trim(),
+        "1,2,9\n1,2,9\n1,2,9",
+        "Lists should be assigned by reference, not copied"
+    );
+    Ok(())
+}
+
+/// Spec example: using foreach to iterate a dict and build a real copy,
+/// then mutating the copy — original should be unaffected.
+///
+/// ```esi
+/// <esi:assign name="dict" value="{1 : 'one', 2 : 'two', 3 : 'three'}"/>
+/// <esi:foreach collection="dict">
+///   <esi:assign name="copy{$(item{0})}" value="$(item{1})"/>
+/// </esi:foreach>
+/// <esi:assign name="copy{2}" value="Second"/>
+/// ```
+///
+/// Expected: dict unchanged, copy has key 2 = "Second"
+#[test]
+fn test_dict_copy_by_iteration() -> Result<(), Error> {
+    let input = r#"<esi:assign name="dict" value="{1 : 'one', 2 : 'two', 3 : 'three'}"/>
+<esi:foreach collection="$(dict)">
+<esi:assign name="copy{$(item{0})}" value="$(item{1})"/>
+</esi:foreach>
+<esi:assign name="copy{2}" value="'Second'"/>
+<esi:vars>$(dict)
+$(copy)</esi:vars>"#;
+
+    let dispatcher =
+        |_req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            unreachable!("no fragments in this test")
+        };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default());
+    processor.process_stream(reader, &mut output, Some(&dispatcher), None)?;
+
+    let result = String::from_utf8(output).unwrap();
+    let lines: Vec<&str> = result.trim().lines().collect();
+
+    // dict should be unchanged: {1: 'one', 2: 'two', 3: 'three'}
+    // dict_to_string sorts by key and formats as k=v&k=v
+    assert_eq!(lines[0], "1=one&2=two&3=three", "Original dict should be unchanged");
+
+    // copy should have key 2 replaced: {1: 'one', 2: 'Second', 3: 'three'}
+    assert_eq!(lines[1], "1=one&2=Second&3=three", "Copy should have key 2 = 'Second'");
+
+    Ok(())
+}
+
+/// Dict reference semantics: assigning a dict to another name creates an alias.
+/// Mutating through the alias is visible from the original.
+#[test]
+fn test_dict_reference_semantics() -> Result<(), Error> {
+    let input = r#"<esi:assign name="orig" value="{1 : 'one', 2 : 'two'}"/>
+<esi:assign name="alias" value="$(orig)"/>
+<esi:assign name="alias{2}" value="'TWO'"/>
+<esi:vars>$(orig)
+$(alias)</esi:vars>"#;
+
+    let dispatcher =
+        |_req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            unreachable!("no fragments in this test")
+        };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default());
+    processor.process_stream(reader, &mut output, Some(&dispatcher), None)?;
+
+    let result = String::from_utf8(output).unwrap();
+    // Both should reflect the mutation
+    assert_eq!(
+        result.trim(),
+        "1=one&2=TWO\n1=one&2=TWO",
+        "Dicts should be assigned by reference, not copied"
+    );
+    Ok(())
+}
+
+/// Mutating the original list is visible through the alias.
+#[test]
+fn test_list_mutation_visible_through_alias() -> Result<(), Error> {
+    let input = r#"<esi:assign name="a" value="[10, 20, 30]"/>
+<esi:assign name="b" value="$(a)"/>
+<esi:assign name="a{0}" value="99"/>
+<esi:vars>$(b{0})</esi:vars>"#;
+
+    let dispatcher =
+        |_req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            unreachable!("no fragments in this test")
+        };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default());
+    processor.process_stream(reader, &mut output, Some(&dispatcher), None)?;
+
+    let result = String::from_utf8(output).unwrap();
+    assert_eq!(
+        result.trim(),
+        "99",
+        "Mutation through original should be visible via alias"
+    );
+    Ok(())
+}

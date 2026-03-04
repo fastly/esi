@@ -2,7 +2,7 @@ use bytes::Bytes;
 use fastly::http::Method;
 use fastly::Request;
 use regex::RegexBuilder;
-use std::{collections::HashMap, fmt::Display};
+use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
 
 use crate::{
     element_handler::{ElementHandler, Flow},
@@ -100,14 +100,14 @@ pub fn eval_expr(expr: &Expr, ctx: &mut EvalContext) -> Result<Value> {
                 let val = eval_expr(val_expr, ctx)?;
                 map.insert(key.to_string(), val);
             }
-            Ok(Value::Dict(map))
+            Ok(Value::new_dict(map))
         }
         Expr::ListLiteral(items) => {
             let mut values = Vec::new();
             for item_expr in items {
                 values.push(eval_expr(item_expr, ctx)?);
             }
-            Ok(Value::List(values))
+            Ok(Value::new_list(values))
         }
         Expr::Interpolated(elements) => {
             // Evaluate each element and concatenate the results
@@ -169,7 +169,7 @@ fn eval_comparison(
                         // Descending range: [5..1] -> [5, 4, 3, 2, 1]
                         (*end..=*start).rev().map(Value::Integer).collect()
                     };
-                    Ok(Value::List(values))
+                    Ok(Value::new_list(values))
                 }
                 _ => Err(ExecutionError::ExpressionError(
                     "Range operator (..) requires integer operands".to_string(),
@@ -528,7 +528,7 @@ impl EvalContext {
                         subkey.map_or_else(
                             || {
                                 // $(ARGS) without subscript - return list of all arguments
-                                Value::List(args.clone())
+                                Value::new_list(args.clone())
                             },
                             |sub| {
                                 // $(ARGS{n}) - return nth argument (0-indexed per ESI spec)
@@ -563,13 +563,13 @@ impl EvalContext {
                                 let value = match values.len() {
                                     0 => Value::Null,
                                     1 => Value::Text(values[0].clone()),
-                                    _ => Value::List(
+                                    _ => Value::new_list(
                                         values.iter().map(|v| Value::Text(v.clone())).collect(),
                                     ),
                                 };
                                 dict.insert(key.clone(), value);
                             }
-                            Value::Dict(dict)
+                            Value::new_dict(dict)
                         }
                     },
                     // Look up the field in parsed params
@@ -578,7 +578,7 @@ impl EvalContext {
                         Some(values) if values.is_empty() => Value::Null,
                         Some(values) if values.len() == 1 => Value::Text(values[0].clone()),
                         Some(values) => {
-                            Value::List(values.iter().map(|v| Value::Text(v.clone())).collect())
+                            Value::new_list(values.iter().map(|v| Value::Text(v.clone())).collect())
                         }
                     },
                 )
@@ -639,7 +639,7 @@ impl EvalContext {
                 let entry = self
                     .vars
                     .entry(key.to_string())
-                    .or_insert_with(|| Value::Dict(HashMap::new()));
+                    .or_insert_with(|| Value::new_dict(HashMap::new()));
                 set_subvalue(entry, sub, value)
             }
         }
@@ -721,7 +721,7 @@ fn get_subvalue(parent: &Value, subkey: &str) -> Value {
     if let Ok(idx) = subkey.parse::<usize>() {
         // Try list index first
         if let Value::List(items) = parent {
-            return items.get(idx).cloned().unwrap_or(Value::Null);
+            return items.borrow().get(idx).cloned().unwrap_or(Value::Null);
         }
 
         // String-as-list: byte access by index (ESI is byte/ASCII-oriented)
@@ -734,7 +734,7 @@ fn get_subvalue(parent: &Value, subkey: &str) -> Value {
 
     // Dict string-key lookup
     if let Value::Dict(map) = parent {
-        return map.get(subkey).cloned().unwrap_or(Value::Null);
+        return map.borrow().get(subkey).cloned().unwrap_or(Value::Null);
     }
 
     Value::Null
@@ -745,6 +745,7 @@ fn set_subvalue(parent: &mut Value, subkey: &str, value: Value) -> Result<()> {
     if let Ok(idx) = subkey.parse::<usize>() {
         match parent {
             Value::List(items) => {
+                let mut items = items.borrow_mut();
                 // For existing lists, index must exist - no auto-expansion
                 if idx >= items.len() {
                     return Err(ExecutionError::VariableError(format!(
@@ -758,7 +759,7 @@ fn set_subvalue(parent: &mut Value, subkey: &str, value: Value) -> Result<()> {
             }
             Value::Dict(map) => {
                 // For dicts, numeric indices are just string keys - allow creation
-                map.insert(subkey.to_string(), value);
+                map.borrow_mut().insert(subkey.to_string(), value);
                 return Ok(());
             }
             _ => {
@@ -773,7 +774,7 @@ fn set_subvalue(parent: &mut Value, subkey: &str, value: Value) -> Result<()> {
     // Non-numeric subscript - dictionary key
     match parent {
         Value::Dict(map) => {
-            map.insert(subkey.to_string(), value);
+            map.borrow_mut().insert(subkey.to_string(), value);
             Ok(())
         }
         Value::List(_) => {
@@ -786,7 +787,7 @@ fn set_subvalue(parent: &mut Value, subkey: &str, value: Value) -> Result<()> {
             // Create new dict for non-numeric keys (per ESI spec, dicts can be created on the fly)
             let mut map = HashMap::new();
             map.insert(subkey.to_string(), value);
-            *parent = Value::Dict(map);
+            *parent = Value::new_dict(map);
             Ok(())
         }
     }
@@ -801,24 +802,50 @@ fn set_subvalue(parent: &mut Value, subkey: &str, value: Value) -> Result<()> {
 /// - `List`: A list of values (also used for dict iteration as 2-element lists)
 /// - `Dict`: A dictionary/map of string keys to values
 /// - `Null`: Represents an absence of value
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Integer(i32),
     Text(Bytes),
     Boolean(bool),
-    List(Vec<Value>),
-    Dict(HashMap<String, Value>),
+    List(Rc<RefCell<Vec<Value>>>),
+    Dict(Rc<RefCell<HashMap<String, Value>>>),
     Null,
 }
 
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Integer(a), Self::Integer(b)) => a == b,
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Boolean(a), Self::Boolean(b)) => a == b,
+            (Self::List(a), Self::List(b)) => *a.borrow() == *b.borrow(),
+            (Self::Dict(a), Self::Dict(b)) => *a.borrow() == *b.borrow(),
+            (Self::Null, Self::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
 impl Value {
+    /// Create a new `Value::List` wrapping the given vec in `Rc<RefCell<…>>`.
+    pub fn new_list(items: Vec<Value>) -> Self {
+        Self::List(Rc::new(RefCell::new(items)))
+    }
+
+    /// Create a new `Value::Dict` wrapping the given map in `Rc<RefCell<…>>`.
+    pub fn new_dict(map: HashMap<String, Value>) -> Self {
+        Self::Dict(Rc::new(RefCell::new(map)))
+    }
+
     pub(crate) fn to_bool(&self) -> bool {
         match self {
             &Self::Integer(n) => !matches!(n, 0),
             Self::Text(s) => !s.is_empty(),
             Self::Boolean(b) => *b,
-            Self::List(items) => !items.is_empty(),
-            Self::Dict(map) => !map.is_empty(),
+            Self::List(items) => !items.borrow().is_empty(),
+            Self::Dict(map) => !map.borrow().is_empty(),
             &Self::Null => false,
         }
     }
@@ -835,8 +862,8 @@ impl Value {
                     Bytes::from_static(BOOL_FALSE)
                 }
             }
-            Self::List(items) => Bytes::from(items_to_string(items)),
-            Self::Dict(map) => Bytes::from(dict_to_string(map)),
+            Self::List(items) => Bytes::from(items_to_string(&items.borrow())),
+            Self::Dict(map) => Bytes::from(dict_to_string(&map.borrow())),
             Self::Null => Bytes::new(),
         }
     }
@@ -868,8 +895,8 @@ impl Display for Value {
             Self::Integer(i) => write!(f, "{i}"),
             Self::Text(b) => write!(f, "{}", String::from_utf8_lossy(b.as_ref())),
             Self::Boolean(b) => write!(f, "{}", if *b { "true" } else { "false" }),
-            Self::List(items) => write!(f, "{}", items_to_string(items)),
-            Self::Dict(map) => write!(f, "{}", dict_to_string(map)),
+            Self::List(items) => write!(f, "{}", items_to_string(&items.borrow())),
+            Self::Dict(map) => write!(f, "{}", dict_to_string(&map.borrow())),
             Self::Null => Ok(()), // Empty string for Null
         }
     }
@@ -1196,7 +1223,7 @@ mod tests {
         ctx.set_variable(
             "arr",
             None,
-            Value::List(vec![Value::Null, Value::Null, Value::Null]),
+            Value::new_list(vec![Value::Null, Value::Null, Value::Null]),
         )
         .unwrap();
         ctx.set_variable("arr", Some("0"), Value::Integer(1))
@@ -1206,6 +1233,7 @@ mod tests {
 
         match ctx.get_variable("arr", None) {
             Value::List(items) => {
+                let items = items.borrow();
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0], Value::Integer(1));
                 assert_eq!(items[1], Value::Null);
@@ -1225,7 +1253,7 @@ mod tests {
         ctx.set_variable(
             "colors",
             None,
-            Value::List(vec![
+            Value::new_list(vec![
                 Value::Text("red".into()),
                 Value::Text("blue".into()),
                 Value::Text("green".into()),
@@ -1246,7 +1274,7 @@ mod tests {
         ctx.set_variable(
             "mylist",
             None,
-            Value::List(vec![Value::Integer(1), Value::Integer(2)]),
+            Value::new_list(vec![Value::Integer(1), Value::Integer(2)]),
         )
         .unwrap();
 
@@ -1278,6 +1306,7 @@ mod tests {
         // Verify the dict itself
         let ages_dict = ctx.get_variable("ages", None);
         if let Value::Dict(map) = ages_dict {
+            let map = map.borrow();
             assert_eq!(map.len(), 2, "Dict should have 2 keys");
             assert_eq!(map.get("bob"), Some(&Value::Integer(34)));
             assert_eq!(map.get("joan"), Some(&Value::Integer(28)));
@@ -1302,6 +1331,7 @@ mod tests {
 
         match result {
             Value::List(items) => {
+                let items = items.borrow();
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0], Value::Text("one".into()));
                 assert_eq!(items[2], Value::Text("three".into()));
@@ -1309,6 +1339,7 @@ mod tests {
                 // Check nested list
                 match &items[1] {
                     Value::List(nested) => {
+                        let nested = nested.borrow();
                         assert_eq!(nested.len(), 3);
                         assert_eq!(nested[0], Value::Text("a".into()));
                         assert_eq!(nested[1], Value::Text("x".into()));
@@ -1340,6 +1371,7 @@ mod tests {
         // Should return Dict with one entry: "hello" -> empty Text
         match result {
             Value::Dict(map) => {
+                let map = map.borrow();
                 assert_eq!(map.len(), 1);
                 assert_eq!(map.get("hello"), Some(&Value::Text(Bytes::new())));
             }
@@ -1381,6 +1413,7 @@ mod tests {
         let result = evaluate_expression("$(QUERY_STRING{x})", &mut ctx)?;
         match result {
             Value::List(items) => {
+                let items = items.borrow();
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0], Value::Text("1".into()));
                 assert_eq!(items[1], Value::Text("2".into()));
@@ -1404,10 +1437,12 @@ mod tests {
 
         match result {
             Value::Dict(map) => {
+                let map = map.borrow();
                 assert_eq!(map.len(), 2);
                 // 'x' should be a list
                 match map.get("x") {
                     Some(Value::List(items)) => {
+                        let items = items.borrow();
                         assert_eq!(items.len(), 3);
                         assert_eq!(items[0], Value::Text("1".into()));
                         assert_eq!(items[1], Value::Text("2".into()));
@@ -1717,6 +1752,7 @@ mod tests {
         let result = ctx.get_variable("QUERY_STRING", None);
         match result {
             Value::Dict(map) => {
+                let map = map.borrow();
                 assert_eq!(map.len(), 1);
                 assert_eq!(map.get("param"), Some(&Value::Text("value".into())));
             }
@@ -1784,7 +1820,7 @@ mod tests {
         let result = evaluate_expression("[1..5]", &mut EvalContext::new())?;
         assert_eq!(
             result,
-            Value::List(vec![
+            Value::new_list(vec![
                 Value::Integer(1),
                 Value::Integer(2),
                 Value::Integer(3),
@@ -1800,7 +1836,7 @@ mod tests {
         let result = evaluate_expression("[5..1]", &mut EvalContext::new())?;
         assert_eq!(
             result,
-            Value::List(vec![
+            Value::new_list(vec![
                 Value::Integer(5),
                 Value::Integer(4),
                 Value::Integer(3),
@@ -1814,7 +1850,7 @@ mod tests {
     #[test]
     fn test_range_operator_single_element() -> Result<()> {
         let result = evaluate_expression("[3..3]", &mut EvalContext::new())?;
-        assert_eq!(result, Value::List(vec![Value::Integer(3)]));
+        assert_eq!(result, Value::new_list(vec![Value::Integer(3)]));
         Ok(())
     }
 
@@ -1829,7 +1865,7 @@ mod tests {
         )?;
         assert_eq!(
             result,
-            Value::List(vec![
+            Value::new_list(vec![
                 Value::Integer(1),
                 Value::Integer(2),
                 Value::Integer(3),
@@ -1850,6 +1886,7 @@ mod tests {
         // Test that range can be part of a list literal expression
         let result = evaluate_expression("[1..3]", &mut EvalContext::new())?;
         if let Value::List(items) = result {
+            let items = items.borrow();
             assert_eq!(items.len(), 3);
             assert_eq!(items[0], Value::Integer(1));
             assert_eq!(items[1], Value::Integer(2));
@@ -1865,7 +1902,7 @@ mod tests {
         let result = evaluate_expression("[-2..2]", &mut EvalContext::new())?;
         assert_eq!(
             result,
-            Value::List(vec![
+            Value::new_list(vec![
                 Value::Integer(-2),
                 Value::Integer(-1),
                 Value::Integer(0),
@@ -1908,6 +1945,7 @@ mod tests {
         // Test $(ARGS) - should return list of all arguments
         let result = ctx.get_variable("ARGS", None);
         if let Value::List(items) = result {
+            let items = items.borrow();
             assert_eq!(items.len(), 3);
             assert_eq!(items[0], Value::Text("hello".into()));
             assert_eq!(items[1], Value::Integer(42));

@@ -4,6 +4,8 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use rand::Rng;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn lower(args: &[Value]) -> Result<Value> {
@@ -395,8 +397,8 @@ pub fn len(args: &[Value]) -> Result<Value> {
     let count = match &args[0] {
         Value::Null => 0,
         Value::Text(b) => b.len() as i32,
-        Value::List(items) => items.len() as i32,
-        Value::Dict(map) => map.len() as i32,
+        Value::List(items) => items.borrow().len() as i32,
+        Value::Dict(map) => map.borrow().len() as i32,
         other => other.to_string().len() as i32,
     };
 
@@ -444,8 +446,8 @@ pub fn exists(args: &[Value]) -> Result<Value> {
     let exists = match &args[0] {
         Value::Null => false,
         Value::Text(b) => !b.is_empty(),
-        Value::List(items) => !items.is_empty(),
-        Value::Dict(map) => !map.is_empty(),
+        Value::List(items) => !items.borrow().is_empty(),
+        Value::Dict(map) => !map.borrow().is_empty(),
         _ => true,
     };
 
@@ -463,8 +465,8 @@ pub fn is_empty(args: &[Value]) -> Result<Value> {
     match &args[0] {
         Value::Null => Ok(Value::Boolean(false)),
         Value::Text(b) => Ok(Value::Boolean(b.is_empty())),
-        Value::List(items) => Ok(Value::Boolean(items.is_empty())),
-        Value::Dict(map) => Ok(Value::Boolean(map.is_empty())),
+        Value::List(items) => Ok(Value::Boolean(items.borrow().is_empty())),
+        Value::Dict(map) => Ok(Value::Boolean(map.borrow().is_empty())),
         _ => Ok(Value::Boolean(false)),
     }
 }
@@ -545,12 +547,12 @@ pub fn digest_md5(args: &[Value]) -> Result<Value> {
     let int3 = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
     let int4 = i32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
 
-    Ok(Value::List(vec![
+    Ok(Value::List(Rc::new(RefCell::new(vec![
         Value::Integer(int1),
         Value::Integer(int2),
         Value::Integer(int3),
         Value::Integer(int4),
-    ]))
+    ]))))
 }
 
 /// $digest_md5_hex(text_to_digest) - Returns MD5 digest as a 32 character hex string
@@ -770,7 +772,7 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
     // If max_splits is provided and non-positive, do not split
     if let Some(n) = max_splits {
         if n <= 0 {
-            return Ok(Value::List(vec![Value::Text(source.into())]));
+            return Ok(Value::new_list(vec![Value::Text(source.into())]));
         }
     }
 
@@ -785,7 +787,7 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
                 if splits_done >= limit {
                     // Remaining bytes as one final element
                     out.push(source[i..].to_string());
-                    return Ok(Value::List(
+                    return Ok(Value::new_list(
                         out.into_iter().map(|s| Value::Text(s.into())).collect(),
                     ));
                 }
@@ -809,7 +811,7 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
     };
 
     let values = parts.into_iter().map(|s| Value::Text(s.into())).collect();
-    Ok(Value::List(values))
+    Ok(Value::new_list(values))
 }
 
 pub fn join(args: &[Value]) -> Result<Value> {
@@ -825,12 +827,13 @@ pub fn join(args: &[Value]) -> Result<Value> {
         Some(v) => v.to_string(),
     };
 
-    let Value::List(list) = &args[0] else {
+    let Value::List(list_rc) = &args[0] else {
         return Err(ExecutionError::FunctionError(
             "join expects a list as first argument".to_string(),
         ));
     };
 
+    let list = list_rc.borrow();
     let mut out = String::new();
     for (i, v) in list.iter().enumerate() {
         if i > 0 {
@@ -851,7 +854,7 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
     }
 
     let list = match &args[0] {
-        Value::List(items) => items.clone(),
+        Value::List(items) => items.borrow().clone(),
         Value::Null => Vec::new(),
         _ => {
             return Err(ExecutionError::FunctionError(
@@ -862,7 +865,7 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
 
     let idx = parse_i32("list_delitem", &args[1])?;
     if idx < 0 {
-        return Ok(Value::List(list));
+        return Ok(Value::new_list(list));
     }
 
     let mut items = list;
@@ -870,7 +873,7 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
         items.remove(idx as usize);
     }
 
-    Ok(Value::List(items))
+    Ok(Value::new_list(items))
 }
 
 pub fn replace(args: &[Value]) -> Result<Value> {
@@ -1283,17 +1286,17 @@ mod tests {
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
 
-        match exists(&[Value::List(vec![Value::Integer(1)])]) {
+        match exists(&[Value::new_list(vec![Value::Integer(1)])]) {
             Ok(value) => assert_eq!(value, Value::Boolean(true)),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
 
-        match is_empty(&[Value::List(Vec::new())]) {
+        match is_empty(&[Value::new_list(Vec::new())]) {
             Ok(value) => assert_eq!(value, Value::Boolean(true)),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
 
-        match exists(&[Value::Dict(Default::default())]) {
+        match exists(&[Value::new_dict(Default::default())]) {
             Ok(value) => assert_eq!(value, Value::Boolean(false)),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
@@ -1366,12 +1369,12 @@ mod tests {
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
 
-        match len(&[Value::List(vec![Value::Integer(1), Value::Integer(2)])]) {
+        match len(&[Value::new_list(vec![Value::Integer(1), Value::Integer(2)])]) {
             Ok(value) => assert_eq!(value, Value::Integer(2)),
             Err(err) => panic!("Unexpected error: {:?}", err),
         }
 
-        match len(&[Value::Dict(HashMap::from([
+        match len(&[Value::new_dict(HashMap::from([
             ("a".to_string(), Value::Integer(1)),
             ("b".to_string(), Value::Integer(2)),
         ]))]) {
@@ -1392,13 +1395,14 @@ mod tests {
     #[test]
     fn test_split_join_list_delitem() {
         match string_split(&[Value::Text("a,b,c".into()), Value::Text(",".into())]) {
-            Ok(Value::List(items)) => assert_eq!(items.len(), 3),
+            Ok(Value::List(items)) => assert_eq!(items.borrow().len(), 3),
             other => panic!("Unexpected result: {:?}", other),
         }
 
         // default separator (space) and max_splits
         match string_split(&[Value::Text("a b c".into())]) {
             Ok(Value::List(items)) => {
+                let items = items.borrow();
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0], Value::Text("a".into()));
                 assert_eq!(items[1], Value::Text("b".into()));
@@ -1413,6 +1417,7 @@ mod tests {
             Value::Integer(2),
         ]) {
             Ok(Value::List(items)) => {
+                let items = items.borrow();
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0], Value::Text("a".into()));
                 assert_eq!(items[1], Value::Text("b".into()));
@@ -1424,7 +1429,7 @@ mod tests {
         // empty separator splits to chars unless max_splits == 0
         match string_split(&[Value::Text("abc".into()), Value::Text("".into())]) {
             Ok(Value::List(items)) => {
-                let joined: String = items.iter().map(|v| v.to_string()).collect();
+                let joined: String = items.borrow().iter().map(|v| v.to_string()).collect();
                 assert_eq!(joined, "abc");
             }
             other => panic!("Unexpected result: {:?}", other),
@@ -1436,13 +1441,14 @@ mod tests {
             Value::Integer(0),
         ]) {
             Ok(Value::List(items)) => {
+                let items = items.borrow();
                 assert_eq!(items.len(), 1);
                 assert_eq!(items[0], Value::Text("abc".into()));
             }
             other => panic!("Unexpected result: {other:?}"),
         }
 
-        let list_value = Value::List(vec![Value::Text("x".into()), Value::Text("y".into())]);
+        let list_value = Value::new_list(vec![Value::Text("x".into()), Value::Text("y".into())]);
         match join(&[list_value.clone(), Value::Text("-".into())]) {
             Ok(Value::Text(out)) => assert_eq!(String::from_utf8_lossy(&out), "x-y"),
             other => panic!("Unexpected result: {other:?}"),
@@ -1456,6 +1462,7 @@ mod tests {
 
         match list_delitem(&[list_value, Value::Integer(0)]) {
             Ok(Value::List(items)) => {
+                let items = items.borrow();
                 assert_eq!(items.len(), 1);
                 assert_eq!(items[0], Value::Text("y".into()));
             }
@@ -1540,6 +1547,7 @@ mod tests {
         // Test that digest_md5 returns a list of 4 signed integers
         match digest_md5(&[Value::Text("hello".into())]) {
             Ok(Value::List(ints)) => {
+                let ints = ints.borrow();
                 assert_eq!(ints.len(), 4);
                 // Expected MD5 for "hello": 5d41402abc4b2a76b9719d911017c592
                 // As 4 x i32 little-endian:

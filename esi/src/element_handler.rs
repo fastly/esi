@@ -250,14 +250,15 @@ pub trait ElementHandler {
         // Evaluate the collection expression
         let collection_value = eval_expr(collection, self.ctx()).unwrap_or(Value::Null);
 
-        // Convert to a list if needed
+        // Convert to a list if needed (snapshot items to release any borrow)
         let items = match &collection_value {
-            Value::List(items) => items.clone(),
+            Value::List(items) => items.borrow().clone(),
             Value::Dict(map) => map
+                .borrow()
                 .iter()
                 .map(|(k, v)| {
                     // Convert dict entries to a list of 2-element lists [key, value]
-                    Value::List(vec![Value::Text(k.clone().into()), v.clone()])
+                    Value::new_list(vec![Value::Text(k.clone().into()), v.clone()])
                 })
                 .collect(),
             Value::Null => Vec::new(),
