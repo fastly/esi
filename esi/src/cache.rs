@@ -134,8 +134,8 @@ pub fn parse_ttl(ttl_str: &str) -> Option<u32> {
 
     // Find the last digit position
     let mut num_end = 0;
-    for (i, c) in ttl_str.char_indices() {
-        if c.is_ascii_digit() {
+    for (i, &b) in ttl_str.as_bytes().iter().enumerate() {
+        if b.is_ascii_digit() {
             num_end = i + 1;
         } else if i > 0 {
             break;

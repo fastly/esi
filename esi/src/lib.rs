@@ -285,12 +285,11 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     if fragment.metadata.continue_on_error {
                         // Per ESI spec: onerror="continue" deletes the tag with no output
                         return Ok(Flow::Continue);
-                    } else {
-                        return Err(ExecutionError::ExpressionError(format!(
-                            "Eval request failed with status: {}",
-                            response.get_status()
-                        )));
                     }
+                    return Err(ExecutionError::ExpressionError(format!(
+                        "Eval request failed with status: {}",
+                        response.get_status()
+                    )));
                 }
 
                 // Get the response body
@@ -1450,16 +1449,10 @@ impl Processor {
         processor: Option<&FragmentResponseProcessor>,
     ) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
-        self.execute_isolated(
-            &elements,
-            &mut buffer,
-            dispatcher,
-            processor,
-            |this, out| {
-                this.drain_queue(out, dispatcher, processor)?;
-                Ok(())
-            },
-        )?;
+        self.execute_isolated(elements, &mut buffer, dispatcher, processor, |this, out| {
+            this.drain_queue(out, dispatcher, processor)?;
+            Ok(())
+        })?;
 
         Ok(buffer)
     }

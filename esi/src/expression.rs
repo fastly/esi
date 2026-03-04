@@ -724,14 +724,11 @@ fn get_subvalue(parent: &Value, subkey: &str) -> Value {
             return items.get(idx).cloned().unwrap_or(Value::Null);
         }
 
-        // String-as-list: character access by index
+        // String-as-list: byte access by index (ESI is byte/ASCII-oriented)
         if let Value::Text(s) = parent {
-            let text = std::str::from_utf8(s.as_ref()).unwrap_or("");
-            return text
-                .chars()
-                .nth(idx)
-                .map(|c| Value::Text(c.to_string().into()))
-                .unwrap_or(Value::Null);
+            return s
+                .get(idx..=idx)
+                .map_or(Value::Null, |b| Value::Text(Bytes::copy_from_slice(b)));
         }
     }
 

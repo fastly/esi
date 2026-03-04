@@ -343,25 +343,18 @@ fn is_valid_variable_name(name: &str) -> bool {
 
 /// Validates a base variable name (without subscripts):
 /// - Must start with alphabetic character
-/// - Can only contain alphanumeric characters and underscores
+/// - Can only contain ASCII alphanumeric characters and underscores
+///   (per ESI spec, variable names are ASCII-only \[A-Z a-z 0-9\])
 fn is_valid_base_variable_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
+    let bytes = name.as_bytes();
+    match bytes.first() {
+        Some(b) if b.is_ascii_alphabetic() => {}
+        _ => return false,
     }
-
-    let mut chars = name.chars();
-
-    // First character must be alphabetic
-    if let Some(first) = chars.next() {
-        if !first.is_ascii_alphabetic() {
-            return false;
-        }
-    } else {
-        return false;
-    }
-
-    // Remaining characters must be alphanumeric or underscore
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    // Remaining characters must be ASCII alphanumeric or underscore
+    bytes[1..]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == UNDERSCORE)
 }
 
 // Parse variable name with optional subscript like "colors{0}" or "ages{joan}"
@@ -376,8 +369,8 @@ fn parse_variable_name_with_subscript(name: &str) -> (String, Option<Expr>) {
             let subscript_expr = subscript_str.parse::<i32>().map_or_else(
                 |_| {
                     if subscript_str
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == UNDERSCORE)
                     {
                         // Bare identifier like "joan" - treat as string literal key
                         Some(Expr::String(Some(Bytes::copy_from_slice(
@@ -469,12 +462,12 @@ fn parse_attr_as_expr_with_context(value_str: &str, bare_id_as_variable: bool) -
     // Whether to treat as variable depends on context
     if bare_id_as_variable {
         let is_bare_identifier = value_str
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
             && value_str
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_');
 
         if is_bare_identifier {
             return Expr::Variable(value_str.to_owned(), None, None);
@@ -1763,7 +1756,7 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
         // Parse function call or variable: $func(...) or $(VAR)
         Some(&DOLLAR) => alt((esi_function, esi_variable)).parse(input),
         // Parse integer literal (with optional leading minus)
-        Some(b'0'..=b'9') | Some(&HYPHEN) => integer(input),
+        Some(b'0'..=b'9' | &HYPHEN) => integer(input),
         // Parse string literal (single or triple quoted)
         Some(&SINGLE_QUOTE) => string(input),
         _ => Err(nom::Err::Error(Error::new(

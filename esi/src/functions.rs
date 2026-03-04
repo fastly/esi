@@ -172,7 +172,13 @@ pub fn to_str(args: &[Value]) -> Result<Value> {
         )));
     }
 
-    Ok(Value::Text(args[0].to_string().into()))
+    // $str() converts any value to Text so that + does concatenation, not addition.
+    // Short-circuit if already Text to avoid a round-trip through String.
+    match &args[0] {
+        Value::Text(_) => Ok(args[0].clone()),
+        Value::Null => Ok(Value::Text(Bytes::new())),
+        other => Ok(Value::Text(Bytes::from(other.to_string()))),
+    }
 }
 
 pub fn lstrip(args: &[Value]) -> Result<Value> {
@@ -187,13 +193,13 @@ pub fn lstrip(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    // Zero-copy trim on valid UTF-8 text by slicing the original Bytes
+    // Zero-copy trim: strip ASCII whitespace directly from bytes
     if let Value::Text(bytes) = &args[0] {
-        if let Ok(s) = std::str::from_utf8(bytes.as_ref()) {
-            let trimmed = s.trim_start();
-            let start = s.len() - trimmed.len();
-            return Ok(Value::Text(bytes.slice(start..bytes.len())));
-        }
+        let start = bytes
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(bytes.len());
+        return Ok(Value::Text(bytes.slice(start..bytes.len())));
     }
 
     let s = args[0].to_string();
@@ -212,13 +218,13 @@ pub fn rstrip(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    // Zero-copy trim on valid UTF-8 text by slicing the original Bytes
+    // Zero-copy trim: strip ASCII whitespace directly from bytes
     if let Value::Text(bytes) = &args[0] {
-        if let Ok(s) = std::str::from_utf8(bytes.as_ref()) {
-            let trimmed = s.trim_end();
-            let end = trimmed.len();
-            return Ok(Value::Text(bytes.slice(0..end)));
-        }
+        let end = bytes
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(0, |i| i + 1);
+        return Ok(Value::Text(bytes.slice(0..end)));
     }
 
     let s = args[0].to_string();
@@ -237,15 +243,18 @@ pub fn strip(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    // Zero-copy trim on valid UTF-8 text by slicing the original Bytes
+    // Zero-copy trim: strip ASCII whitespace directly from bytes
     if let Value::Text(bytes) = &args[0] {
-        if let Ok(s) = std::str::from_utf8(bytes.as_ref()) {
-            let trimmed_start = s.trim_start();
-            let start = s.len() - trimmed_start.len();
-            let trimmed = trimmed_start.trim_end();
-            let end = start + trimmed.len();
-            return Ok(Value::Text(bytes.slice(start..end)));
-        }
+        let start = bytes
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(bytes.len());
+        let end = bytes
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(0, |i| i + 1);
+        let (s, e) = if start <= end { (start, end) } else { (0, 0) };
+        return Ok(Value::Text(bytes.slice(s..e)));
     }
 
     let s = args[0].to_string();
@@ -382,12 +391,13 @@ pub fn len(args: &[Value]) -> Result<Value> {
         )));
     }
 
+    // Per ESI spec, string functions are byte/ASCII-oriented.
     let count = match &args[0] {
         Value::Null => 0,
-        Value::Text(b) => String::from_utf8_lossy(b).chars().count() as i32,
+        Value::Text(b) => b.len() as i32,
         Value::List(items) => items.len() as i32,
         Value::Dict(map) => map.len() as i32,
-        other => other.to_string().chars().count() as i32,
+        other => other.to_string().len() as i32,
     };
 
     Ok(Value::Integer(count))
@@ -478,13 +488,10 @@ pub fn index(args: &[Value]) -> Result<Value> {
         return Ok(Value::Integer(0));
     }
 
+    // Per ESI spec, string indexing is byte/ASCII-oriented.
     hay.find(&needle).map_or_else(
         || Ok(Value::Integer(-1)),
-        |byte_idx| {
-            // If the count exceeds i32::MAX, return MAX instead of erroring, since ESI spec doesn't define behavior for that case
-            let pos = i32::try_from(hay[..byte_idx].chars().count()).unwrap_or(i32::MAX);
-            Ok(Value::Integer(pos))
-        },
+        |byte_idx| Ok(Value::Integer(byte_idx as i32)),
     )
 }
 
@@ -504,18 +511,13 @@ pub fn rindex(args: &[Value]) -> Result<Value> {
     let needle = args[1].to_string();
 
     if needle.is_empty() {
-        return Ok(Value::Integer(
-            i32::try_from(hay.chars().count()).unwrap_or(i32::MAX),
-        ));
+        return Ok(Value::Integer(hay.len() as i32));
     }
 
+    // Per ESI spec, string indexing is byte/ASCII-oriented.
     hay.rfind(&needle).map_or_else(
         || Ok(Value::Integer(-1)),
-        |byte_idx| {
-            // If the count exceeds i32::MAX, return MAX instead of erroring, since ESI spec doesn't define behavior for that case
-            let pos = i32::try_from(hay[..byte_idx].chars().count()).unwrap_or(i32::MAX);
-            Ok(Value::Integer(pos))
-        },
+        |byte_idx| Ok(Value::Integer(byte_idx as i32)),
     )
 }
 
@@ -703,9 +705,8 @@ pub fn substr(args: &[Value]) -> Result<Value> {
         }
     };
 
-    // Work in chars to respect the spec's character indexing semantics
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len() as i32;
+    // Per ESI spec, string indexing is byte/ASCII-oriented.
+    let len = s.len() as i32;
 
     let start = if start_i < 0 {
         (len + start_i).max(0)
@@ -723,8 +724,9 @@ pub fn substr(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(Bytes::new()));
     }
 
-    let slice: String = chars[start..end].iter().collect();
-    Ok(Value::Text(slice.into()))
+    Ok(Value::Text(Bytes::copy_from_slice(
+        &s.as_bytes()[start..end],
+    )))
 }
 
 pub fn add_header(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
@@ -773,28 +775,23 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
     }
 
     let parts: Vec<String> = if sep.is_empty() {
+        // Empty separator: split into individual bytes (ESI is byte/ASCII-oriented)
         let mut out = Vec::new();
-        let mut splits_done = 0usize;
         let limit = max_splits.map(|n| n as usize);
+        let bytes = source.as_bytes();
 
-        let mut chars = source.chars();
-        while let Some(ch) = chars.next() {
+        for (splits_done, (i, &b)) in bytes.iter().enumerate().enumerate() {
             if let Some(limit) = limit {
                 if splits_done >= limit {
-                    let mut rest = String::new();
-                    rest.push(ch);
-                    for c in chars.by_ref() {
-                        rest.push(c);
-                    }
-                    out.push(rest);
+                    // Remaining bytes as one final element
+                    out.push(source[i..].to_string());
                     return Ok(Value::List(
                         out.into_iter().map(|s| Value::Text(s.into())).collect(),
                     ));
                 }
             }
 
-            out.push(ch.to_string());
-            splits_done += 1;
+            out.push(String::from(b as char));
         }
 
         out
