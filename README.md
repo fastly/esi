@@ -10,10 +10,12 @@ The implementation is a subset of Akamai ESI 5.0 supporting the following tags:
 - `<esi:vars>` | `<esi:assign>` (with subscript support for dict/list assignment)
 - `<esi:choose>` | `<esi:when>` | `<esi:otherwise>`
 - `<esi:foreach>` | `<esi:break>` (loop over lists and dicts)
+- `<esi:function>` | `<esi:return>` (user-defined functions)
 - `<esi:comment>`
 - `<esi:remove>`
+- `<esi:text>` (raw passthrough — content is emitted verbatim, no ESI processing)
 
-**Note:** The following tags support nested ESI tags: `<esi:try>`, `<esi:attempt>`, `<esi:except>`, `<esi:choose>`, `<esi:when>`, `<esi:otherwise>`, `<esi:foreach>`, and `<esi:assign>` (long form only).
+**Note:** The following tags support nested ESI tags: `<esi:try>`, `<esi:attempt>`, `<esi:except>`, `<esi:choose>`, `<esi:when>`, `<esi:otherwise>`, `<esi:foreach>`, `<esi:function>`, and `<esi:assign>` (long form only).
 
 **Dynamic Content Assembly (DCA)**: Both `<esi:include>` and `<esi:eval>` support the `dca` attribute:
 
@@ -116,7 +118,7 @@ This implementation includes a comprehensive library of ESI functions:
 
 - `$html_encode(string)`, `$html_decode(string)` - HTML entity encoding
 - `$url_encode(string)`, `$url_decode(string)` - URL encoding
-- `$base64_encode(string)` - Base64 encoding
+- `$base64_encode(string)`, `$base64_decode(string)` - Base64 encoding/decoding
 - `$convert_to_unicode(string)`, `$convert_from_unicode(string)` - Unicode conversion
 
 **Quote Helpers:**
@@ -139,7 +141,8 @@ This implementation includes a comprehensive library of ESI functions:
 
 **Cryptographic:**
 
-- `$md5_digest(string)` - Generate MD5 hash
+- `$digest_md5(string)` - Generate MD5 hash (binary)
+- `$digest_md5_hex(string)` - Generate MD5 hash (hex string)
 
 **Time/Date:**
 
@@ -170,7 +173,87 @@ These functions modify the HTTP response sent to the client:
   <esi:vars>$set_redirect('https://example.com/new-location')</esi:vars> <esi:vars>$set_redirect('https://example.com/moved', 301)</esi:vars>
   ```
 
+**Diagnostic:**
+
+- `$ping()` - Returns the string `"pong"` (useful for testing)
+
 **Note:** Response manipulation functions are buffered during ESI processing and applied when `process_response()` sends the final response to the client.
+
+### User-Defined Functions
+
+You can define reusable functions with `<esi:function>` and return values with `<esi:return>`:
+
+```html
+<esi:function name="greet">
+  <esi:assign name="greeting" value="'Hello, ' + $(ARGS{0}) + '!'" />
+  <esi:return value="$(greeting)" />
+</esi:function>
+
+<esi:vars>$greet('World')</esi:vars>
+```
+
+- `<esi:function name="...">` defines a function; the body can contain any ESI tags.
+- `<esi:return value="..."/>` returns a value from the function.
+- Inside a function body, `$(ARGS)` is a list of the positional arguments passed to the call, and individual arguments can be accessed with `$(ARGS{0})`, `$(ARGS{1})`, etc.
+- Functions support recursion up to the configured depth (default: 5, see [Configuration](#configuration)).
+- User-defined functions take priority over built-in functions of the same name.
+
+### Built-in Variables
+
+The following variables are available in ESI expressions:
+
+**Request metadata:**
+
+- `$(REQUEST_METHOD)` - HTTP method of the original client request (e.g. `GET`)
+- `$(REQUEST_PATH)` - Path component of the request URL
+- `$(QUERY_STRING)` - Raw query string from the request URL
+- `$(REMOTE_ADDR)` - Client IP address
+
+**HTTP headers:**
+
+- `$(HTTP_<HEADER>)` - Value of the named request header (e.g. `$(HTTP_HOST)`, `$(HTTP_ACCEPT)`)
+- `$(HTTP_COOKIE{'name'})` - Value of a specific cookie from the `Cookie` header
+
+**Regex captures:**
+
+- `$(MATCHES{0})`, `$(MATCHES{1})`, … - Capture groups from the last `matches` / `matches_i` operator or `<esi:when matchname="...">` test
+
+### Configuration
+
+`Configuration` controls the processor's runtime behaviour. All fields have sensible defaults and can be customised with builder methods:
+
+```rust,no_run
+let config = esi::Configuration::default()
+    .with_escaped(true)                      // unescape HTML entities in URLs (default: true)
+    .with_chunk_size(32768)                  // streaming read buffer, in bytes (default: 16384)
+    .with_max_function_recursion_depth(10)   // max depth for user-defined function calls (default: 5)
+    .with_caching(esi::cache::CacheConfig {
+        is_rendered_cacheable: true,
+        rendered_cache_control: true,
+        rendered_ttl: Some(600),
+        is_includes_cacheable: true,
+        includes_default_ttl: Some(300),
+        includes_force_ttl: None,
+    });
+```
+
+| Field                      | Builder method                             | Default   | Description                                                                                                                        |
+| -------------------------- | ------------------------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `is_escaped_content`       | `with_escaped(bool)`                       | `true`    | Unescape HTML entities in URLs. Set to `false` for non-HTML templates (e.g. JSON).                                                 |
+| `chunk_size`               | `with_chunk_size(usize)`                   | `16384`   | Size (bytes) of the read buffer used when streaming ESI input. Larger values may improve throughput; smaller values reduce memory. |
+| `function_recursion_depth` | `with_max_function_recursion_depth(usize)` | `5`       | Maximum call-stack depth for user-defined ESI functions.                                                                           |
+| `cache`                    | `with_caching(CacheConfig)`                | see below | Cache settings for rendered output and included fragments.                                                                         |
+
+**`CacheConfig` fields:**
+
+| Field                    | Default | Description                                                      |
+| ------------------------ | ------- | ---------------------------------------------------------------- |
+| `is_rendered_cacheable`  | `false` | Whether the final rendered output is cacheable.                  |
+| `rendered_cache_control` | `false` | Emit a `Cache-Control` header on the rendered response.          |
+| `rendered_ttl`           | `None`  | TTL (seconds) for the rendered response.                         |
+| `is_includes_cacheable`  | `false` | Whether individual include responses should be cached.           |
+| `includes_default_ttl`   | `None`  | Default TTL (seconds) for cached includes.                       |
+| `includes_force_ttl`     | `None`  | Force a specific TTL on all includes, overriding origin headers. |
 
 ## Example Usage
 

@@ -559,7 +559,7 @@ impl Processor {
 
     /// Process an ESI stream from any `BufRead` into a `Write`.
     ///
-    /// - Reads in 8 KB chunks, buffering only what the parser needs
+    /// - Reads in configurable-size chunks (default 16 KB), buffering only what the parser needs
     /// - Parses incrementally; writes content as soon as it’s parsed
     /// - Dispatches includes immediately; waits for them later in document order
     /// - Uses `select()` to harvest in-flight includes while preserving output order
@@ -591,15 +591,15 @@ impl Processor {
     ) -> Result<()> {
         // STREAMING INPUT PARSING:
         // Read chunks, parse incrementally, process elements as we parse them
-        const CHUNK_SIZE: usize = 8192; // 8KB chunks
+        let chunk_size = self.configuration.chunk_size;
         const MAX_ITERATIONS: usize = 10000;
 
         // Set up fragment request dispatcher
         let dispatcher = dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
 
         // Using BytesMut for zero-copy parsing
-        let mut buffer = BytesMut::with_capacity(CHUNK_SIZE);
-        let mut read_buf = vec![0u8; CHUNK_SIZE];
+        let mut buffer = BytesMut::with_capacity(chunk_size);
+        let mut read_buf = vec![0u8; chunk_size];
         let mut eof = false;
         let mut iterations = 0;
 

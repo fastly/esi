@@ -23,6 +23,8 @@ pub struct Configuration {
     pub cache: CacheConfig,
     /// Maximum recursion depth for user-defined function calls (per ESI spec, default: 5)
     pub function_recursion_depth: usize,
+    /// Size of the read buffer (in bytes) used when streaming ESI input (default: 16384)
+    pub chunk_size: usize,
 }
 
 impl Default for Configuration {
@@ -31,6 +33,7 @@ impl Default for Configuration {
             is_escaped_content: true,
             cache: CacheConfig::default(),
             function_recursion_depth: 5,
+            chunk_size: 16384,
         }
     }
 }
@@ -51,6 +54,15 @@ impl Configuration {
     /// Configure maximum recursion depth for user-defined function calls
     pub const fn with_max_function_recursion_depth(mut self, depth: usize) -> Self {
         self.function_recursion_depth = depth;
+        self
+    }
+
+    /// Configure the read buffer size (in bytes) for streaming ESI input.
+    ///
+    /// Larger values may improve throughput for big documents; smaller values
+    /// reduce memory usage.  Default: 16384 (16 KB).
+    pub const fn with_chunk_size(mut self, chunk_size: usize) -> Self {
+        self.chunk_size = chunk_size;
         self
     }
 }
