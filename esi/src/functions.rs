@@ -778,13 +778,13 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
 
     let parts: Vec<String> = if sep.is_empty() {
         // Empty separator: split into individual bytes (ESI is byte/ASCII-oriented)
-        let mut out = Vec::new();
         let limit = max_splits.map(|n| n as usize);
         let bytes = source.as_bytes();
+        let mut out = Vec::with_capacity(limit.unwrap_or(bytes.len()));
 
-        for (splits_done, (i, &b)) in bytes.iter().enumerate().enumerate() {
+        for (i, &b) in bytes.iter().enumerate() {
             if let Some(limit) = limit {
-                if splits_done >= limit {
+                if i >= limit {
                     // Remaining bytes as one final element
                     out.push(source[i..].to_string());
                     return Ok(Value::new_list(

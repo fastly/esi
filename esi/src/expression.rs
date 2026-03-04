@@ -83,7 +83,7 @@ pub fn eval_expr(expr: &Expr, ctx: &mut EvalContext) -> Result<Value> {
             eval_comparison(&left_val, &right_val, operator, ctx)
         }
         Expr::Call(func_name, args) => {
-            let mut values = Vec::new();
+            let mut values = Vec::with_capacity(args.len());
             for arg in args {
                 values.push(eval_expr(arg, ctx)?);
             }
@@ -94,7 +94,7 @@ pub fn eval_expr(expr: &Expr, ctx: &mut EvalContext) -> Result<Value> {
             Ok(Value::Boolean(!inner_value.to_bool()))
         }
         Expr::DictLiteral(pairs) => {
-            let mut map = HashMap::new();
+            let mut map = HashMap::with_capacity(pairs.len());
             for (key_expr, val_expr) in pairs {
                 let key = eval_expr(key_expr, ctx)?;
                 let val = eval_expr(val_expr, ctx)?;
@@ -103,7 +103,7 @@ pub fn eval_expr(expr: &Expr, ctx: &mut EvalContext) -> Result<Value> {
             Ok(Value::new_dict(map))
         }
         Expr::ListLiteral(items) => {
-            let mut values = Vec::new();
+            let mut values = Vec::with_capacity(items.len());
             for item_expr in items {
                 values.push(eval_expr(item_expr, ctx)?);
             }
@@ -558,7 +558,7 @@ impl EvalContext {
                         if params.is_empty() {
                             Value::Null
                         } else {
-                            let mut dict = HashMap::new();
+                            let mut dict = HashMap::with_capacity(params.len());
                             for (key, values) in params {
                                 let value = match values.len() {
                                     0 => Value::Null,

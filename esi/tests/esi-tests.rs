@@ -2322,10 +2322,16 @@ $(copy)</esi:vars>"#;
 
     // dict should be unchanged: {1: 'one', 2: 'two', 3: 'three'}
     // dict_to_string sorts by key and formats as k=v&k=v
-    assert_eq!(lines[0], "1=one&2=two&3=three", "Original dict should be unchanged");
+    assert_eq!(
+        lines[0], "1=one&2=two&3=three",
+        "Original dict should be unchanged"
+    );
 
     // copy should have key 2 replaced: {1: 'one', 2: 'Second', 3: 'three'}
-    assert_eq!(lines[1], "1=one&2=Second&3=three", "Copy should have key 2 = 'Second'");
+    assert_eq!(
+        lines[1], "1=one&2=Second&3=three",
+        "Copy should have key 2 = 'Second'"
+    );
 
     Ok(())
 }

@@ -203,11 +203,9 @@ fn interpolated_text<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    recognize(streaming_bytes::take_while1(|c| {
-        !is_open_bracket(c) && !is_dollar(c)
-    }))
-    .map(|s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))))
-    .parse(input)
+    streaming_bytes::take_while1(|c| !is_open_bracket(c) && !is_dollar(c))
+        .map(|s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))))
+        .parse(input)
 }
 
 // Complete version for attribute value parsing - doesn't return Incomplete
@@ -215,7 +213,7 @@ fn interpolated_text_complete<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    recognize(take_while1(|c| !is_open_bracket(c) && !is_dollar(c)))
+    take_while1(|c| !is_open_bracket(c) && !is_dollar(c))
         .map(|s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))))
         .parse(input)
 }
@@ -235,7 +233,7 @@ pub fn interpolated_content(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error
             }))
             .parse(i)
         },
-        Vec::new,
+        || Vec::with_capacity(4),
         |mut acc: Vec<Element>, item: ParseResult| {
             item.append_to(&mut acc);
             acc
@@ -265,7 +263,7 @@ fn top_level_text<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    recognize(streaming_bytes::take_while1(|c| !is_open_bracket(c)))
+    streaming_bytes::take_while1(|c| !is_open_bracket(c))
         .map(|s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))))
         .parse(input)
 }
@@ -632,7 +630,10 @@ fn esi_attempt<'a>(
     )
 }
 
-// Zero-copy version used by both esi_tag and esi_tag_old (via parse_interpolated)
+/// Parse <esi:try> which contains multiple <esi:attempt> and an optional <esi:except>
+///
+/// Per ESI spec, <esi:try> can contain multiple <esi:attempt> blocks and at most one <esi:except> block.
+/// We parse the entire content of <esi:try> and then separate out the attempts and except blocks to construct the Try tag.
 fn esi_try<'a>(
     original: &Bytes,
     input: &'a [u8],
@@ -641,7 +642,7 @@ fn esi_try<'a>(
     let (input, v) = tag_content(original, input)?;
     let (input, _) = streaming_bytes::tag(TAG_ESI_TRY_CLOSE).parse(input)?;
 
-    let mut attempts = vec![];
+    let mut attempts = Vec::with_capacity(v.len());
     let mut except = None;
     for element in v {
         match element {
@@ -746,6 +747,11 @@ fn esi_break(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
 }
 
 /// Parse <esi:function name="...">...</esi:function>
+///
+/// Per ESI spec, the content of <esi:function> is treated as a literal string and not parsed for nested tags or expressions.
+/// However, we still need to capture the content as a Bytes slice for runtime evaluation.
+/// We use tag_content to capture the raw content bytes without parsing nested tags,
+/// and then construct the Function tag with the name and raw body.
 fn esi_function_tag<'a>(
     original: &Bytes,
     input: &'a [u8],
@@ -783,7 +789,10 @@ fn esi_return(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     .parse(input)
 }
 
-/// Zero-copy parser for <esi:choose>...</esi:choose>
+/// Parse <esi:choose> which contains multiple <esi:when> and an optional <esi:otherwise>
+///
+/// Per ESI spec, <esi:choose> can contain multiple <esi:when> blocks and at most one <esi:otherwise> block.
+/// We parse the entire content of <esi:choose> and then separate out the when branches and otherwise block to construct the Choose tag.
 fn esi_choose<'a>(
     original: &Bytes,
     input: &'a [u8],
@@ -792,7 +801,7 @@ fn esi_choose<'a>(
     let (input, v) = tag_content(original, input)?;
     let (input, _) = streaming_bytes::tag(TAG_ESI_CHOOSE_CLOSE).parse(input)?;
 
-    let mut when_branches = vec![];
+    let mut when_branches = Vec::with_capacity(v.len());
     let mut otherwise_events = Vec::new();
     let mut current_when: Option<WhenBranch> = None;
     let mut in_otherwise = false;

@@ -52,7 +52,7 @@ impl Configuration {
     }
 
     /// Configure maximum recursion depth for user-defined function calls
-    pub const fn with_max_function_recursion_depth(mut self, depth: usize) -> Self {
+    pub const fn with_function_recursion_depth(mut self, depth: usize) -> Self {
         self.function_recursion_depth = depth;
         self
     }

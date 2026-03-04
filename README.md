@@ -226,7 +226,7 @@ The following variables are available in ESI expressions:
 let config = esi::Configuration::default()
     .with_escaped(true)                      // unescape HTML entities in URLs (default: true)
     .with_chunk_size(32768)                  // streaming read buffer, in bytes (default: 16384)
-    .with_max_function_recursion_depth(10)   // max depth for user-defined function calls (default: 5)
+    .with_function_recursion_depth(10)       // max depth for user-defined function calls (default: 5)
     .with_caching(esi::cache::CacheConfig {
         is_rendered_cacheable: true,
         rendered_cache_control: true,
@@ -237,12 +237,12 @@ let config = esi::Configuration::default()
     });
 ```
 
-| Field                      | Builder method                             | Default   | Description                                                                                                                        |
-| -------------------------- | ------------------------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `is_escaped_content`       | `with_escaped(bool)`                       | `true`    | Unescape HTML entities in URLs. Set to `false` for non-HTML templates (e.g. JSON).                                                 |
-| `chunk_size`               | `with_chunk_size(usize)`                   | `16384`   | Size (bytes) of the read buffer used when streaming ESI input. Larger values may improve throughput; smaller values reduce memory. |
-| `function_recursion_depth` | `with_max_function_recursion_depth(usize)` | `5`       | Maximum call-stack depth for user-defined ESI functions.                                                                           |
-| `cache`                    | `with_caching(CacheConfig)`                | see below | Cache settings for rendered output and included fragments.                                                                         |
+| Field                      | Builder method                         | Default   | Description                                                                                                                        |
+| -------------------------- | -------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `is_escaped_content`       | `with_escaped(bool)`                   | `true`    | Unescape HTML entities in URLs. Set to `false` for non-HTML templates (e.g. JSON).                                                 |
+| `chunk_size`               | `with_chunk_size(usize)`               | `16384`   | Size (bytes) of the read buffer used when streaming ESI input. Larger values may improve throughput; smaller values reduce memory. |
+| `function_recursion_depth` | `with_function_recursion_depth(usize)` | `5`       | Maximum call-stack depth for user-defined ESI functions.                                                                           |
+| `cache`                    | `with_caching(CacheConfig)`            | see below | Cache settings for rendered output and included fragments.                                                                         |
 
 **`CacheConfig` fields:**
 

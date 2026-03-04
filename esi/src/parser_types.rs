@@ -119,8 +119,8 @@ pub enum Element {
 ///
 /// Produced by the expression parser for attribute values, `esi:vars`,
 /// `esi:when` test conditions, and `esi:assign` bodies.  Evaluated at
-/// runtime by [`eval_expr`](crate::expression::eval_expr) to produce
-/// a [`Value`](crate::expression::Value).
+/// runtime by `eval_expr` to produce
+/// a `Value`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     /// Integer literal (e.g. `42`, `-1`).

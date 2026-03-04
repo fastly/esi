@@ -564,7 +564,7 @@ impl Processor {
     /// - Dispatches includes immediately; waits for them later in document order
     /// - Uses `select()` to harvest in-flight includes while preserving output order
     ///
-    /// For Fastly `Response` bodies, prefer [`process_response`], which wires up
+    /// For Fastly `Response` bodies, prefer `process_response`, which wires up
     /// cache headers and response metadata for you.
     ///
     /// # Arguments
@@ -958,7 +958,7 @@ impl Processor {
         // `buf[i]` is `None` while the slot is waiting for a response,
         // `Some(bytes)` once it is ready.  Try-block includes use the SAME
         // buf slots as bare includes — no separate content_slots system.
-        let mut buf: Vec<Option<Bytes>> = Vec::new();
+        let mut buf: Vec<Option<Bytes>> = Vec::with_capacity(self.queue.len());
         let mut next_out: usize = 0;
 
         // RequestKey → FIFO queue of SlotEntry for all in-flight requests.
