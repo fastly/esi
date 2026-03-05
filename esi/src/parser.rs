@@ -293,12 +293,18 @@ fn tag_content<'a>(
     let mut acc = Vec::with_capacity(10);
     let mut rest = input;
 
-    while let Ok((r, item)) = interpolated_element(original, rest) {
-        item.append_to(&mut acc);
-        if r.len() == rest.len() {
-            break;
+    loop {
+        match interpolated_element(original, rest) {
+            Ok((r, item)) => {
+                item.append_to(&mut acc);
+                if r.len() == rest.len() {
+                    break;
+                }
+                rest = r;
+            }
+            Err(nom::Err::Incomplete(needed)) => return Err(nom::Err::Incomplete(needed)),
+            Err(_) => break,
         }
-        rest = r;
     }
 
     Ok((rest, acc))
@@ -1070,12 +1076,18 @@ fn esi_include_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[
     let mut params = Vec::new();
     let mut rest = rest;
     loop {
-        let Ok((r, _)) = streaming_char::multispace0::<_, Error<&[u8]>>(rest) else {
-            break;
-        };
-        let Ok((r, param)) = esi_param(r) else { break };
-        params.push(param);
-        rest = r;
+        match streaming_char::multispace0::<_, Error<&[u8]>>(rest) {
+            Err(nom::Err::Incomplete(needed)) => return Err(nom::Err::Incomplete(needed)),
+            Err(_) => break,
+            Ok((r, _)) => match esi_param(r) {
+                Ok((r, param)) => {
+                    params.push(param);
+                    rest = r;
+                }
+                Err(nom::Err::Incomplete(needed)) => return Err(nom::Err::Incomplete(needed)),
+                Err(_) => break,
+            },
+        }
     }
     let (rest, _) = preceded(
         streaming_char::multispace0,
@@ -1121,12 +1133,18 @@ fn esi_eval_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]
     let mut params = Vec::new();
     let mut rest = rest;
     loop {
-        let Ok((r, _)) = streaming_char::multispace0::<_, Error<&[u8]>>(rest) else {
-            break;
-        };
-        let Ok((r, param)) = esi_param(r) else { break };
-        params.push(param);
-        rest = r;
+        match streaming_char::multispace0::<_, Error<&[u8]>>(rest) {
+            Err(nom::Err::Incomplete(needed)) => return Err(nom::Err::Incomplete(needed)),
+            Err(_) => break,
+            Ok((r, _)) => match esi_param(r) {
+                Ok((r, param)) => {
+                    params.push(param);
+                    rest = r;
+                }
+                Err(nom::Err::Incomplete(needed)) => return Err(nom::Err::Incomplete(needed)),
+                Err(_) => break,
+            },
+        }
     }
     let (rest, _) = preceded(
         streaming_char::multispace0,
@@ -1139,22 +1157,27 @@ fn esi_eval_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]
 }
 
 fn esi_param(input: &[u8]) -> IResult<&[u8], (String, Expr), Error<&[u8]>> {
-    delimited(
-        streaming_bytes::tag(TAG_ESI_PARAM_OPEN),
+    // Streaming gate: ensure the full <esi:param ... > or <esi:param ... /> is available
+    let (after, _) = esi_opening_tag(input)?;
+    let tag_slice = &input[..input.len() - after.len()];
+
+    // Complete parse of the gated tag content
+    let (_, mut attrs) = delimited(
+        tag(TAG_ESI_PARAM_OPEN),
         attributes,
         preceded(
-            streaming_char::multispace0,
-            alt((streaming_close_bracket, streaming_self_closing)),
+            multispace0,
+            alt((tag(TAG_SELF_CLOSE), tag(&[CLOSE_BRACKET] as &[u8]))),
         ),
     )
-    .map(|mut attrs| {
-        let name = attrs.remove("name").unwrap_or_default().to_owned();
-        let value = parse_attr_as_expr(attrs.remove("value").unwrap_or_default());
-        (name, value)
-    })
-    .parse(input)
+    .parse(tag_slice)?;
+
+    let name = attrs.remove("name").unwrap_or_default().to_owned();
+    let value = parse_attr_as_expr(attrs.remove("value").unwrap_or_default());
+    Ok((after, (name, value)))
 }
 
+/// Parse tag attributes (complete mode — caller must ensure full tag is available).
 fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<&str, &str>, Error<&[u8]>> {
     let mut acc = HashMap::new();
     let mut rest = input;
@@ -1182,17 +1205,18 @@ fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<&str, &str>, Error<&[u8]>>
     Ok((rest, acc))
 }
 
+/// Parse a quoted attribute value (complete mode — caller must ensure full tag is available).
 fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     alt((
         delimited(
-            double_quote,
-            streaming_bytes::take_while(|c| !is_double_quote(c)),
-            double_quote,
+            tag(&[DOUBLE_QUOTE] as &[u8]),
+            take_while(|c: u8| !is_double_quote(c)),
+            tag(&[DOUBLE_QUOTE] as &[u8]),
         ),
         delimited(
-            single_quote,
-            streaming_bytes::take_while(|c| !is_single_quote(c)),
-            single_quote,
+            tag(&[SINGLE_QUOTE] as &[u8]),
+            take_while(|c: u8| !is_single_quote(c)),
+            tag(&[SINGLE_QUOTE] as &[u8]),
         ),
     ))
     .parse(input)
@@ -1217,18 +1241,6 @@ fn streaming_self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 #[inline]
 fn streaming_open_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     streaming_bytes::tag(&[OPEN_BRACKET] as &[u8]).parse(input)
-}
-
-/// Helper to find and consume the closing double quote character
-#[inline]
-fn double_quote(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    streaming_bytes::tag(&[DOUBLE_QUOTE] as &[u8]).parse(input)
-}
-
-/// Helper to find and consume the closing single quote character
-#[inline]
-fn single_quote(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    streaming_bytes::tag(&[SINGLE_QUOTE] as &[u8]).parse(input)
 }
 
 /// Check if byte is an opening bracket '<'
@@ -1272,9 +1284,35 @@ fn tag_name(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     .parse(input)
 }
 
+/// Streaming: skip forward past attribute content, respecting quoted strings.
+/// Stops at (but does not consume) the first unquoted `>`.
+/// Returns `Incomplete` if input ends before finding an unquoted `>`.
+fn skip_tag_attrs(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    let mut i = 0;
+    while i < input.len() {
+        match input[i] {
+            CLOSE_BRACKET => return Ok((&input[i..], &input[..i])),
+            DOUBLE_QUOTE | SINGLE_QUOTE => {
+                let quote = input[i];
+                i += 1;
+                while i < input.len() && input[i] != quote {
+                    i += 1;
+                }
+                if i >= input.len() {
+                    return Err(nom::Err::Incomplete(nom::Needed::Unknown));
+                }
+                i += 1; // skip closing quote
+            }
+            _ => i += 1,
+        }
+    }
+    Err(nom::Err::Incomplete(nom::Needed::Unknown))
+}
+
 /// Parse a complete opening tag (streaming gate)
 /// Ensures the tag is fully available before dispatching to downstream
-/// complete parsers. Returns (`remaining_input`, (`tag_name`, `full_tag_slice`))
+/// complete parsers. Respects quoted strings (skips `>` inside quotes).
+/// Returns (`remaining_input`, (`tag_name`, `full_tag_slice`))
 #[allow(clippy::type_complexity)]
 fn esi_opening_tag(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8]), Error<&[u8]>> {
     let start = input;
@@ -1283,8 +1321,8 @@ fn esi_opening_tag(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8]), Error<&[u8]>>
     let (rest, _) = streaming_open_bracket(input)?;
     let (rest, name) = tag_name(rest)?;
 
-    // Parse attributes - consume everything up to '>'
-    let (rest, _) = streaming_bytes::take_till(is_close_bracket).parse(rest)?;
+    // Skip attributes, respecting quoted strings
+    let (rest, _) = skip_tag_attrs(rest)?;
 
     // Must have > to be complete
     let (rest, _) = streaming_close_bracket(rest)?;
@@ -1822,6 +1860,39 @@ mod tests {
             Err(e) => {
                 panic!("Parse failed with error: {:?}", e);
             }
+        }
+    }
+
+    #[test]
+    fn test_greater_than_in_quoted_attribute() {
+        // `>` inside a quoted test expression must not confuse the tag gate
+        let input = b"<esi:choose><esi:when test=\"$(x) > 5\">big</esi:when></esi:choose>";
+        let bytes = Bytes::from_static(input);
+        let result = parse_remainder(&bytes);
+        match result {
+            Ok((rest, _)) => {
+                assert!(
+                    rest.is_empty(),
+                    "Should parse completely, remaining: {:?}",
+                    String::from_utf8_lossy(rest)
+                );
+            }
+            Err(e) => panic!("Parse failed: {:?}", e),
+        }
+
+        // Single-quoted variant
+        let input = b"<esi:choose><esi:when test='$(x) > 5'>big</esi:when></esi:choose>";
+        let bytes = Bytes::from_static(input);
+        let result = parse_remainder(&bytes);
+        match result {
+            Ok((rest, _)) => {
+                assert!(
+                    rest.is_empty(),
+                    "Should parse completely, remaining: {:?}",
+                    String::from_utf8_lossy(rest)
+                );
+            }
+            Err(e) => panic!("Parse failed: {:?}", e),
         }
     }
 
