@@ -18,7 +18,6 @@
 
 pub const UNDERSCORE: u8 = b'_';
 pub const HYPHEN: u8 = b'-';
-pub const DOT: u8 = b'.';
 pub const DOLLAR: u8 = b'$';
 pub const EXCLAMATION: u8 = b'!';
 

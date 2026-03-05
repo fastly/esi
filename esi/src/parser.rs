@@ -1,11 +1,11 @@
 use bytes::Bytes;
-// Using STREAMING parsers for document structure - they return Incomplete when they need more data
-// This enables TRUE bounded-memory streaming for the main document parsing
+// STREAMING parsers: for document structure (content between tags, closing tags).
+// They return Incomplete when they need more data, enabling bounded-memory streaming.
 use nom::bytes::streaming as streaming_bytes;
 use nom::character::streaming as streaming_char;
-// Using COMPLETE parsers for expression parsing - expressions are always complete
-// (they come from attribute values which are fully extracted before parsing)
-use nom::bytes::complete::{tag, take_until, take_while, take_while1};
+// COMPLETE parsers: for (1) expression parsing (attribute values are fully extracted)
+// and (2) re-parsing gated opening tags (esi_opening_tag guarantees all bytes are buffered).
+use nom::bytes::complete::{tag, tag_no_case, take_until, take_while, take_while1};
 use nom::character::complete::{multispace0, multispace1};
 
 use nom::branch::alt;
@@ -553,9 +553,9 @@ fn assign_long(attrs: &HashMap<&str, &str>, mut content: Vec<Element>) -> ParseR
 
 fn esi_assign_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     delimited(
-        streaming_bytes::tag(TAG_ESI_ASSIGN_OPEN),
+        tag(TAG_ESI_ASSIGN_OPEN),
         attributes,
-        preceded(streaming_char::multispace0, streaming_self_closing),
+        preceded(multispace0, self_closing),
     )
     .map(assign_attributes_short)
     .parse(input)
@@ -569,9 +569,9 @@ fn esi_assign_long<'a>(
     // Capture content first with take_until, then parse as complete
     (
         delimited(
-            streaming_bytes::tag(TAG_ESI_ASSIGN_OPEN),
+            tag(TAG_ESI_ASSIGN_OPEN),
             attributes,
-            preceded(streaming_char::multispace0, streaming_close_bracket),
+            preceded(multispace0, close_bracket),
         ),
         streaming_bytes::take_until(TAG_ESI_ASSIGN_CLOSE),
         streaming_bytes::tag(TAG_ESI_ASSIGN_CLOSE),
@@ -598,9 +598,9 @@ fn parse_container_tag<'a>(
     constructor: impl FnOnce(Vec<Element>) -> Tag,
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     let (input, content) = delimited(
-        streaming_bytes::tag(opening_tag),
+        tag(opening_tag), // complete: opening tag is gated
         |i| tag_content(original, i),
-        streaming_bytes::tag(closing_tag),
+        streaming_bytes::tag(closing_tag), // streaming: closing tag not gated
     )
     .parse(input)?;
 
@@ -644,7 +644,7 @@ fn esi_try<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    let (input, _) = streaming_bytes::tag(TAG_ESI_TRY_OPEN).parse(input)?;
+    let (input, _) = tag(TAG_ESI_TRY_OPEN).parse(input)?;
     let (input, v) = tag_content(original, input)?;
     let (input, _) = streaming_bytes::tag(TAG_ESI_TRY_CLOSE).parse(input)?;
 
@@ -673,7 +673,7 @@ fn esi_otherwise<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     delimited(
-        streaming_bytes::tag(TAG_ESI_OTHERWISE_OPEN),
+        tag(TAG_ESI_OTHERWISE_OPEN),
         |i| tag_content(original, i),
         streaming_bytes::tag(TAG_ESI_OTHERWISE_CLOSE),
     )
@@ -691,12 +691,9 @@ fn esi_when<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     (
         delimited(
-            streaming_bytes::tag(TAG_ESI_WHEN_OPEN),
+            tag(TAG_ESI_WHEN_OPEN),
             attributes,
-            preceded(
-                streaming_char::multispace0,
-                alt((streaming_close_bracket, streaming_self_closing)),
-            ),
+            preceded(multispace0, alt((close_bracket, self_closing))),
         ),
         |i| tag_content(original, i),
         streaming_bytes::tag(TAG_ESI_WHEN_CLOSE),
@@ -720,9 +717,9 @@ fn esi_foreach<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     (
         delimited(
-            streaming_bytes::tag(TAG_ESI_FOREACH_OPEN),
+            tag(TAG_ESI_FOREACH_OPEN),
             attributes,
-            preceded(streaming_char::multispace0, streaming_close_bracket),
+            preceded(multispace0, close_bracket),
         ),
         |i| tag_content(original, i),
         streaming_bytes::tag(TAG_ESI_FOREACH_CLOSE),
@@ -743,13 +740,9 @@ fn esi_foreach<'a>(
 
 /// Parse <esi:break />
 fn esi_break(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
-    delimited(
-        streaming_bytes::tag(TAG_ESI_BREAK_OPEN),
-        streaming_char::multispace0,
-        streaming_self_closing,
-    )
-    .map(|_| ParseResult::Single(Element::Esi(Tag::Break)))
-    .parse(input)
+    delimited(tag(TAG_ESI_BREAK_OPEN), multispace0, self_closing)
+        .map(|_| ParseResult::Single(Element::Esi(Tag::Break)))
+        .parse(input)
 }
 
 /// Parse <esi:function name="...">...</esi:function>
@@ -764,9 +757,9 @@ fn esi_function_tag<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     (
         delimited(
-            streaming_bytes::tag(TAG_ESI_FUNCTION_OPEN),
+            tag(TAG_ESI_FUNCTION_OPEN),
             attributes,
-            preceded(streaming_char::multispace0, streaming_close_bracket),
+            preceded(multispace0, close_bracket),
         ),
         |i| tag_content(original, i),
         streaming_bytes::tag(TAG_ESI_FUNCTION_CLOSE),
@@ -782,9 +775,9 @@ fn esi_function_tag<'a>(
 /// Parse <esi:return value="..." />
 fn esi_return(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     delimited(
-        streaming_bytes::tag(TAG_ESI_RETURN_OPEN),
+        tag(TAG_ESI_RETURN_OPEN),
         attributes,
-        preceded(streaming_char::multispace0, streaming_self_closing),
+        preceded(multispace0, self_closing),
     )
     .map(|mut attrs| {
         let value_str = attrs.remove("value").unwrap_or_default();
@@ -803,7 +796,7 @@ fn esi_choose<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    let (input, _) = streaming_bytes::tag(TAG_ESI_CHOOSE_OPEN).parse(input)?;
+    let (input, _) = tag(TAG_ESI_CHOOSE_OPEN).parse(input)?;
     let (input, v) = tag_content(original, input)?;
     let (input, _) = streaming_bytes::tag(TAG_ESI_CHOOSE_CLOSE).parse(input)?;
 
@@ -897,9 +890,9 @@ fn parse_vars_attributes(mut attrs: HashMap<&str, &str>) -> Result<ParseResult, 
 
 fn esi_vars_short(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     delimited(
-        streaming_bytes::tag(TAG_ESI_VARS_OPEN),
+        tag(TAG_ESI_VARS_OPEN),
         attributes,
-        preceded(streaming_char::multispace0, streaming_self_closing), // Short form must be self-closing per ESI spec
+        preceded(multispace0, self_closing), // Short form must be self-closing per ESI spec
     )
     .map_res(parse_vars_attributes)
     .parse(input)
@@ -943,7 +936,7 @@ fn esi_vars_long<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     // esi:vars supports nested ESI tags (like esi:assign) per common usage patterns
-    let (input, _) = streaming_bytes::tag(TAG_ESI_VARS_OPEN_COMPLETE).parse(input)?;
+    let (input, _) = tag(TAG_ESI_VARS_OPEN_COMPLETE).parse(input)?;
     let (input, elements) = tag_content(original, input)?;
     let (input, _) = streaming_bytes::tag(TAG_ESI_VARS_CLOSE).parse(input)?;
 
@@ -952,9 +945,9 @@ fn esi_vars_long<'a>(
 
 fn esi_comment(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     delimited(
-        streaming_bytes::tag(TAG_ESI_COMMENT_OPEN),
+        tag(TAG_ESI_COMMENT_OPEN),
         attributes,
-        preceded(streaming_char::multispace0, streaming_self_closing), // ESI comment must be self-closing per ESI spec
+        preceded(multispace0, self_closing), // ESI comment must be self-closing per ESI spec
     )
     .map(|_| ParseResult::Empty)
     .parse(input)
@@ -963,7 +956,7 @@ fn esi_comment(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
 /// Zero-copy esi:remove parser
 /// Per ESI spec, esi:remove content is discarded - no nested ESI processing needed
 fn esi_remove(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
-    let (input, _) = streaming_bytes::tag(TAG_ESI_REMOVE_OPEN).parse(input)?;
+    let (input, _) = tag(TAG_ESI_REMOVE_OPEN).parse(input)?;
     let (input, _) = streaming_bytes::take_until(TAG_ESI_REMOVE_CLOSE).parse(input)?;
     let (input, _) = streaming_bytes::tag(TAG_ESI_REMOVE_CLOSE).parse(input)?;
     Ok((input, ParseResult::Empty))
@@ -974,7 +967,7 @@ fn esi_text<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     delimited(
-        streaming_bytes::tag(TAG_ESI_TEXT_OPEN),
+        tag(TAG_ESI_TEXT_OPEN),
         streaming_bytes::take_until(TAG_ESI_TEXT_CLOSE),
         streaming_bytes::tag(TAG_ESI_TEXT_CLOSE),
     )
@@ -1054,9 +1047,9 @@ fn extract_include_attrs(
 
 fn esi_include_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     delimited(
-        streaming_bytes::tag(TAG_ESI_INCLUDE_OPEN),
+        tag(TAG_ESI_INCLUDE_OPEN),
         attributes,
-        preceded(streaming_char::multispace0, streaming_self_closing),
+        preceded(multispace0, self_closing),
     )
     .map(|attrs| {
         let attrs = extract_include_attrs(attrs, Vec::new());
@@ -1068,9 +1061,9 @@ fn esi_include_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&
 
 fn esi_include_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     let (rest, attrs) = delimited(
-        streaming_bytes::tag(TAG_ESI_INCLUDE_OPEN),
+        tag(TAG_ESI_INCLUDE_OPEN),
         attributes,
-        preceded(streaming_char::multispace0, streaming_close_bracket),
+        preceded(multispace0, close_bracket),
     )
     .parse(input)?;
     let mut params = Vec::new();
@@ -1109,9 +1102,9 @@ fn esi_eval(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
 
 fn esi_eval_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     delimited(
-        streaming_bytes::tag(TAG_ESI_EVAL_OPEN),
+        tag(TAG_ESI_EVAL_OPEN),
         attributes,
-        preceded(streaming_char::multispace0, streaming_self_closing),
+        preceded(multispace0, self_closing),
     )
     .map(|attrs| {
         let mut attrs = extract_include_attrs(attrs, Vec::new());
@@ -1125,9 +1118,9 @@ fn esi_eval_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8
 
 fn esi_eval_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     let (rest, attrs) = delimited(
-        streaming_bytes::tag(TAG_ESI_EVAL_OPEN),
+        tag(TAG_ESI_EVAL_OPEN),
         attributes,
-        preceded(streaming_char::multispace0, streaming_close_bracket),
+        preceded(multispace0, close_bracket),
     )
     .parse(input)?;
     let mut params = Vec::new();
@@ -1225,16 +1218,27 @@ fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
 // ============================================================================
 // Zero-Copy HTML/Text Parsers
 // ============================================================================
-/// Helper to find and consume the closing '>' character
+
+// -- Complete-mode helpers (for re-parsing gated opening tags) ----------------
+
+/// Complete: consume the closing '>' character
+#[inline]
+fn close_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    tag(&[CLOSE_BRACKET] as &[u8]).parse(input)
+}
+
+/// Complete: consume the self-closing '/>' sequence
+#[inline]
+fn self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
+    tag(TAG_SELF_CLOSE).parse(input)
+}
+
+// -- Streaming-mode helpers (for ungated content / closing tags) --------------
+
+/// Streaming: consume the closing '>' character
 #[inline]
 fn streaming_close_bracket(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
     streaming_bytes::tag(&[CLOSE_BRACKET] as &[u8]).parse(input)
-}
-
-/// Helper to find and consume the closing self-closing tag characters '/>
-#[inline]
-fn streaming_self_closing(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    streaming_bytes::tag(TAG_SELF_CLOSE).parse(input)
 }
 
 /// Helper to find and consume the opening '<' character
@@ -1261,23 +1265,25 @@ const fn is_single_quote(b: u8) -> bool {
     b == SINGLE_QUOTE
 }
 
-/// Check if byte can start an HTML/XML tag name (including special constructs like <!--, <!DOCTYPE, <![CDATA[)
+/// Check if byte can start a tag name (alphanumeric or `!` for comments/DOCTYPE)
 #[inline]
 const fn is_tag_start(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == EXCLAMATION
 }
 
-/// Check if byte can continue an HTML/XML tag name
+/// Check if byte can continue a tag name
+/// Covers ESI (`esi:include` → colon), HTML custom elements (`my-component` → hyphen),
+/// and underscores for safety. Unknown tags become opaque `Element::Html` blobs.
 #[inline]
 const fn is_tag_cont(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, HYPHEN | UNDERSCORE | DOT | COLON | OPEN_SQ_BRACKET)
+    b.is_ascii_alphanumeric() || matches!(b, HYPHEN | UNDERSCORE | COLON)
 }
 
 /// Parse an HTML/XML-style tag name.
 /// Returns the subslice of the original input containing only the tag name.
 #[inline]
 fn tag_name(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
-    recognize(nom::sequence::pair(
+    recognize((
         streaming_bytes::take_while_m_n(1, 1, is_tag_start), // first letter
         streaming_bytes::take_while(is_tag_cont),            // rest of name
     ))
@@ -1435,11 +1441,11 @@ fn html_script_tag<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     let start = input;
 
-    // Parse opening tag
+    // Parse opening tag (complete: gated by esi_opening_tag)
     let (input, _) = recognize(delimited(
-        streaming_bytes::tag_no_case(TAG_SCRIPT_OPEN),
-        streaming_bytes::take_till(is_close_bracket),
-        streaming_close_bracket,
+        tag_no_case(TAG_SCRIPT_OPEN),
+        take_while(|c: u8| !is_close_bracket(c)),
+        close_bracket,
     ))
     .parse(input)?;
 
