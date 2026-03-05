@@ -11,8 +11,8 @@ use nom::character::complete::{multispace0, multispace1};
 use nom::branch::alt;
 use nom::combinator::{not, opt, peek, recognize};
 use nom::error::Error;
-use nom::multi::{fold_many0, many0, separated_list0};
-use nom::sequence::{delimited, preceded, separated_pair, terminated};
+use nom::multi::separated_list0;
+use nom::sequence::{delimited, preceded, terminated};
 use nom::IResult;
 use nom::Parser;
 
@@ -223,21 +223,20 @@ fn interpolated_text_complete<'a>(
 /// Returns an error if the string contains invalid ESI expressions (e.g., unclosed $(, invalid variable names)
 pub fn interpolated_content(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     // NOTE: This function parses complete strings (like attribute values), not streaming input
-    // Uses fold_many0 with COMPLETE parsers to avoid Incomplete errors at string boundaries
-    fold_many0(
-        |i| {
-            alt((interpolated_expression, |ii| {
-                interpolated_text_complete(input, ii)
-            }))
-            .parse(i)
-        },
-        || Vec::with_capacity(4),
-        |mut acc: Vec<Element>, item: ParseResult| {
+    let mut acc = Vec::with_capacity(4);
+    let mut rest = input.as_ref();
+    loop {
+        if let Ok((r, item)) = interpolated_expression(rest) {
             item.append_to(&mut acc);
-            acc
-        },
-    )
-    .parse(input.as_ref())
+            rest = r;
+        } else if let Ok((r, item)) = interpolated_text_complete(input, rest) {
+            item.append_to(&mut acc);
+            rest = r;
+        } else {
+            break;
+        }
+    }
+    Ok((rest, acc))
 }
 
 /// Zero-copy element parser - dispatches to text or tags
@@ -291,15 +290,18 @@ fn tag_content<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], Vec<Element>, Error<&'a [u8]>> {
-    fold_many0(
-        |i| interpolated_element(original, i),
-        || Vec::with_capacity(10),
-        |mut acc: Vec<Element>, item: ParseResult| {
-            item.append_to(&mut acc);
-            acc
-        },
-    )
-    .parse(input)
+    let mut acc = Vec::with_capacity(10);
+    let mut rest = input;
+
+    while let Ok((r, item)) = interpolated_element(original, rest) {
+        item.append_to(&mut acc);
+        if r.len() == rest.len() {
+            break;
+        }
+        rest = r;
+    }
+
+    Ok((rest, acc))
 }
 
 /// Validates a variable name according to ESI spec:
@@ -1059,24 +1061,32 @@ fn esi_include_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&
 }
 
 fn esi_include_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
-    (
-        delimited(
-            streaming_bytes::tag(TAG_ESI_INCLUDE_OPEN),
-            attributes,
-            preceded(streaming_char::multispace0, streaming_close_bracket),
-        ),
-        many0(preceded(streaming_char::multispace0, esi_param)),
-        preceded(
-            streaming_char::multispace0,
-            streaming_bytes::tag(TAG_ESI_INCLUDE_CLOSE),
-        ),
+    let (rest, attrs) = delimited(
+        streaming_bytes::tag(TAG_ESI_INCLUDE_OPEN),
+        attributes,
+        preceded(streaming_char::multispace0, streaming_close_bracket),
     )
-        .map(|(attrs, params, _)| {
-            let attrs = extract_include_attrs(attrs, params);
-
-            ParseResult::Single(Element::Esi(Tag::Include { attrs }))
-        })
-        .parse(input)
+    .parse(input)?;
+    let mut params = Vec::new();
+    let mut rest = rest;
+    loop {
+        let Ok((r, _)) = streaming_char::multispace0::<_, Error<&[u8]>>(rest) else {
+            break;
+        };
+        let Ok((r, param)) = esi_param(r) else { break };
+        params.push(param);
+        rest = r;
+    }
+    let (rest, _) = preceded(
+        streaming_char::multispace0,
+        streaming_bytes::tag(TAG_ESI_INCLUDE_CLOSE),
+    )
+    .parse(rest)?;
+    let attrs = extract_include_attrs(attrs, params);
+    Ok((
+        rest,
+        ParseResult::Single(Element::Esi(Tag::Include { attrs })),
+    ))
 }
 
 /// Parse <esi:eval> tag - similar to include but always evaluates as ESI
@@ -1102,26 +1112,30 @@ fn esi_eval_self_closing(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8
 }
 
 fn esi_eval_with_params(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
-    (
-        delimited(
-            streaming_bytes::tag(TAG_ESI_EVAL_OPEN),
-            attributes,
-            preceded(streaming_char::multispace0, streaming_close_bracket),
-        ),
-        many0(preceded(streaming_char::multispace0, esi_param)),
-        preceded(
-            streaming_char::multispace0,
-            streaming_bytes::tag(TAG_ESI_EVAL_CLOSE),
-        ),
+    let (rest, attrs) = delimited(
+        streaming_bytes::tag(TAG_ESI_EVAL_OPEN),
+        attributes,
+        preceded(streaming_char::multispace0, streaming_close_bracket),
     )
-        .map(|(attrs, params, _)| {
-            let mut attrs = extract_include_attrs(attrs, params);
-            // Eval does not support alt - clear it if somehow present
-            attrs.alt = None;
-
-            ParseResult::Single(Element::Esi(Tag::Eval { attrs }))
-        })
-        .parse(input)
+    .parse(input)?;
+    let mut params = Vec::new();
+    let mut rest = rest;
+    loop {
+        let Ok((r, _)) = streaming_char::multispace0::<_, Error<&[u8]>>(rest) else {
+            break;
+        };
+        let Ok((r, param)) = esi_param(r) else { break };
+        params.push(param);
+        rest = r;
+    }
+    let (rest, _) = preceded(
+        streaming_char::multispace0,
+        streaming_bytes::tag(TAG_ESI_EVAL_CLOSE),
+    )
+    .parse(rest)?;
+    let mut attrs = extract_include_attrs(attrs, params);
+    attrs.alt = None;
+    Ok((rest, ParseResult::Single(Element::Esi(Tag::Eval { attrs }))))
 }
 
 fn esi_param(input: &[u8]) -> IResult<&[u8], (String, Expr), Error<&[u8]>> {
@@ -1142,27 +1156,30 @@ fn esi_param(input: &[u8]) -> IResult<&[u8], (String, Expr), Error<&[u8]>> {
 }
 
 fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<&str, &str>, Error<&[u8]>> {
-    fold_many0(
-        separated_pair(
-            preceded(
-                multispace1,
-                take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'-'),
-            ),
-            tag(EQUALS),
-            htmlstring,
-        ),
-        HashMap::new,
-        |mut acc, (k, v)| {
-            // SAFETY: key parser only allows ASCII attribute-name bytes
-            let key = unsafe { std::str::from_utf8_unchecked(k) };
-            // Values come from htmlstring (arbitrary quoted content) — must validate
-            if let Ok(val) = std::str::from_utf8(v) {
-                acc.insert(key, val);
-            }
-            acc
-        },
-    )
-    .parse(input)
+    let mut acc = HashMap::new();
+    let mut rest = input;
+    loop {
+        let Ok((r, _)) = multispace1::<_, Error<&[u8]>>(rest) else {
+            break;
+        };
+        let Ok((r, k)): Result<_, nom::Err<Error<&[u8]>>> =
+            take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'-').parse(r)
+        else {
+            break;
+        };
+        let Ok((r, _)): Result<_, nom::Err<Error<&[u8]>>> = tag(EQUALS).parse(r) else {
+            break;
+        };
+        let Ok((r, v)) = htmlstring(r) else { break };
+        // SAFETY: key parser only allows ASCII attribute-name bytes
+        let key = unsafe { std::str::from_utf8_unchecked(k) };
+        // Values come from htmlstring (arbitrary quoted content) — must validate
+        if let Ok(val) = std::str::from_utf8(v) {
+            acc.insert(key, val);
+        }
+        rest = r;
+    }
+    Ok((rest, acc))
 }
 
 fn htmlstring(input: &[u8]) -> IResult<&[u8], &[u8], Error<&[u8]>> {
@@ -1729,18 +1746,24 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 /// Format: `unary_expr` (operator `unary_expr`)*
 /// Left-associative: A op B op C -> (A op B) op C
 fn expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
-    let (input, first) = unary_expr(input)?;
-
-    fold_many0(
-        (delimited(multispace0, operator, multispace0), unary_expr),
-        move || first.clone(),
-        |left, (op, right)| Expr::Comparison {
+    let (mut rest, mut left) = unary_expr(input)?;
+    loop {
+        let Ok((r, _)) = multispace0::<_, Error<&[u8]>>(rest) else {
+            break;
+        };
+        let Ok((r, op)) = operator(r) else { break };
+        let Ok((r, _)) = multispace0::<_, Error<&[u8]>>(r) else {
+            break;
+        };
+        let Ok((r, right)) = unary_expr(r) else { break };
+        left = Expr::Comparison {
             left: Box::new(left),
             operator: op,
             right: Box::new(right),
-        },
-    )
-    .parse(input)
+        };
+        rest = r;
+    }
+    Ok((rest, left))
 }
 
 /// Parse unary expressions (!, highest precedence for operators)
