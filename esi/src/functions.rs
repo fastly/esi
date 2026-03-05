@@ -3,7 +3,6 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
-use rand::Rng;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -120,7 +119,7 @@ pub fn convert_from_unicode(args: &[Value]) -> Result<Value> {
 pub fn set_response_code(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
     validate_args_range!(args, 1, 2, "set_response_code");
 
-    let status = parse_i32("set_response_code", &args[0])?;
+    let status = args[0].as_i32("set_response_code")?;
     if !(100..=599).contains(&status) {
         return Err(ExecutionError::FunctionError(
             "set_response_code: invalid status code".to_string(),
@@ -317,31 +316,6 @@ pub fn url_decode(args: &[Value]) -> Result<Value> {
     Ok(Value::Text(Bytes::from(decoded.into_owned())))
 }
 
-fn parse_i32(name: &str, v: &Value) -> Result<i32> {
-    match v {
-        Value::Integer(i) => Ok(*i),
-        Value::Text(b) => std::str::from_utf8(b)
-            .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .ok_or_else(|| ExecutionError::FunctionError(format!("{name}: invalid integer"))),
-        Value::Null => Ok(0),
-        _ => Err(ExecutionError::FunctionError(format!(
-            "{name}: invalid integer"
-        ))),
-    }
-}
-
-fn parse_str<'a>(name: &str, v: &'a Value) -> Result<&'a str> {
-    if let Value::Text(b) = v {
-        std::str::from_utf8(b)
-            .map_err(|_| ExecutionError::FunctionError(format!("{name}: invalid string")))
-    } else {
-        Err(ExecutionError::FunctionError(format!(
-            "{name}: invalid string"
-        )))
-    }
-}
-
 pub fn len(args: &[Value]) -> Result<Value> {
     validate_args!(args, 1, "len");
 
@@ -377,7 +351,7 @@ pub fn len(args: &[Value]) -> Result<Value> {
 }
 
 fn parse_positive_bound(name: &str, v: &Value) -> Result<i32> {
-    let n = parse_i32(name, v)?;
+    let n = v.as_i32(name)?;
     if n <= 0 {
         return Err(ExecutionError::FunctionError(format!(
             "{name}: invalid bound"
@@ -528,7 +502,7 @@ pub fn http_time(args: &[Value]) -> Result<Value> {
     let secs = if matches!(args[0], Value::Null) {
         Utc::now().timestamp()
     } else {
-        i64::from(parse_i32("http_time", &args[0])?)
+        i64::from(args[0].as_i32("http_time")?)
     };
 
     let dt = DateTime::<Utc>::from_timestamp(secs, 0)
@@ -543,10 +517,10 @@ pub fn strftime(args: &[Value]) -> Result<Value> {
 
     let secs = match &args[0] {
         Value::Null => Utc::now().timestamp(),
-        v => i64::from(parse_i32("strftime", v)?),
+        v => i64::from(v.as_i32("strftime")?),
     };
 
-    let fmt = parse_str("strftime", &args[1])?;
+    let fmt = args[1].as_str("strftime")?;
 
     let dt = DateTime::<Utc>::from_timestamp(secs, 0)
         .ok_or_else(|| ExecutionError::FunctionError("strftime: invalid timestamp".to_string()))?;
@@ -565,8 +539,7 @@ pub fn rand(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
         }
     };
 
-    let mut rng = rand::thread_rng();
-    let v: i32 = rng.gen_range(0..bound);
+    let v: i32 = rand::random_range(0..bound);
     ctx.set_last_rand(v);
     Ok(Value::Integer(v))
 }
@@ -776,7 +749,7 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
         }
     };
 
-    let idx = parse_i32("list_delitem", &args[1])?;
+    let idx = args[1].as_i32("list_delitem")?;
     if idx < 0 {
         return Ok(Value::new_list(list.borrow().clone()));
     }

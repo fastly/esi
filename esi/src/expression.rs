@@ -824,6 +824,33 @@ impl Value {
         Self::Dict(Rc::new(RefCell::new(map)))
     }
 
+    /// Try to interpret this value as an `i32`.
+    /// `ctx` is used only for error messages (typically the calling function name).
+    pub fn as_i32(&self, ctx: &str) -> Result<i32> {
+        match self {
+            Self::Integer(i) => Ok(*i),
+            Self::Text(b) => atoi::atoi::<i32>(b.as_ref().trim_ascii())
+                .ok_or_else(|| ExecutionError::FunctionError(format!("{ctx}: invalid integer"))),
+            Self::Null => Ok(0),
+            _ => Err(ExecutionError::FunctionError(format!(
+                "{ctx}: invalid integer"
+            ))),
+        }
+    }
+
+    /// Try to interpret this value as a `&str`.
+    /// `ctx` is used only for error messages (typically the calling function name).
+    pub fn as_str(&self, ctx: &str) -> Result<&str> {
+        if let Self::Text(b) = self {
+            std::str::from_utf8(b)
+                .map_err(|_| ExecutionError::FunctionError(format!("{ctx}: invalid string")))
+        } else {
+            Err(ExecutionError::FunctionError(format!(
+                "{ctx}: invalid string"
+            )))
+        }
+    }
+
     pub(crate) fn to_bool(&self) -> bool {
         match self {
             &Self::Integer(n) => !matches!(n, 0),
