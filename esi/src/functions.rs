@@ -362,17 +362,7 @@ fn parse_positive_bound(name: &str, v: &Value) -> Result<i32> {
 
 pub fn int(args: &[Value]) -> Result<Value> {
     validate_args!(args, 1, "int");
-
-    if let Value::Integer(i) = args[0] {
-        return Ok(Value::Integer(i));
-    }
-
-    if matches!(args[0], Value::Null) {
-        return Ok(Value::Integer(0));
-    }
-
-    let parsed = args[0].as_cow_str().trim().parse::<i32>().unwrap_or(0);
-    Ok(Value::Integer(parsed))
+    Ok(Value::Integer(args[0].as_i32("int").unwrap_or(0)))
 }
 
 pub fn exists(args: &[Value]) -> Result<Value> {
@@ -557,12 +547,7 @@ pub fn last_rand(args: &[Value], ctx: &EvalContext) -> Result<Value> {
 pub fn bin_int(args: &[Value]) -> Result<Value> {
     validate_args!(args, 1, "bin_int");
 
-    let Value::Integer(value) = args[0] else {
-        return Err(ExecutionError::FunctionError(
-            "incorrect type passed to 'bin_int'".to_string(),
-        ));
-    };
-
+    let value = args[0].as_i32("bin_int")?;
     let bytes = value.to_le_bytes();
     Ok(Value::Text(Bytes::copy_from_slice(&bytes)))
 }
@@ -574,20 +559,11 @@ pub fn substr(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    let Value::Integer(start_i) = args[1] else {
-        return Err(ExecutionError::FunctionError(
-            "incorrect type for 'substr' start".to_string(),
-        ));
-    };
+    let start_i = args[1].as_i32("substr")?;
 
     let end_i: Option<i32> = match args.get(2) {
         None => None,
-        Some(Value::Integer(j)) => Some(*j),
-        Some(_) => {
-            return Err(ExecutionError::FunctionError(
-                "incorrect type for 'substr' end".to_string(),
-            ))
-        }
+        Some(v) => Some(v.as_i32("substr")?),
     };
 
     // Fast path: if already Text, use zero-copy Bytes::slice
@@ -657,12 +633,7 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
 
     let max_splits = match args.get(2) {
         None | Some(Value::Null) => None,
-        Some(Value::Integer(n)) => Some(*n),
-        Some(_) => {
-            return Err(ExecutionError::FunctionError(
-                "string_split: invalid max_sep".to_string(),
-            ))
-        }
+        Some(v) => Some(v.as_i32("string_split")?),
     };
 
     // If max_splits is provided and non-positive, do not split
@@ -791,19 +762,15 @@ pub fn replace(args: &[Value]) -> Result<Value> {
 
     // count is optional, default to usize::MAX; non-positive counts mean "no replacements"
     let count = match args.get(3) {
-        Some(Value::Integer(n)) => {
-            if *n <= 0 {
+        None | Some(Value::Null) => usize::MAX,
+        Some(v) => {
+            let n = v.as_i32("replace")?;
+            if n <= 0 {
                 0
             } else {
-                *n as usize
+                n as usize
             }
         }
-        Some(_) => {
-            return Err(ExecutionError::FunctionError(
-                "incorrect type passed to 'replace'".to_string(),
-            ));
-        }
-        None => usize::MAX,
     };
 
     if needle.is_empty() {
@@ -1413,8 +1380,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("incorrect type passed to 'bin_int'".to_string())
-                    .to_string()
+                ExecutionError::FunctionError("bin_int: invalid integer".to_string()).to_string()
             ),
         }
 
@@ -1783,8 +1749,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("incorrect type passed to 'replace'".to_string())
-                    .to_string()
+                ExecutionError::FunctionError("replace: invalid integer".to_string()).to_string()
             ),
         };
 
