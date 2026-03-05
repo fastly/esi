@@ -84,7 +84,7 @@ pub const TAG_ESI_REMOVE_CLOSE: &[u8] = b"</esi:remove>";
 pub const TAG_ESI_FUNCTION_CLOSE: &[u8] = b"</esi:function>";
 
 // ESI prefix for detection
-pub const ESI_PREFIX: &[u8] = b"esi:";
+//pub const ESI_PREFIX: &[u8] = b"esi:";
 pub const ESI_CLOSE_PREFIX: &[u8] = b"</esi:";
 
 // ESI tag names (for dispatcher matching)

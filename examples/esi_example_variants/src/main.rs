@@ -52,8 +52,7 @@ fn main() {
                 let original_url = req.get_url().to_string();
                 let variant_url = get_variant_url(&original_url);
                 info!(
-                    "Sending request - original URL: ({}) variant URL: ({})",
-                    original_url, variant_url
+                    "Sending request - original URL: ({original_url}) variant URL: ({variant_url})",
                 );
                 Ok(req
                     .with_url(&variant_url)

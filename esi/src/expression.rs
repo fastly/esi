@@ -2,7 +2,7 @@ use bytes::Bytes;
 use fastly::http::Method;
 use fastly::Request;
 use regex::RegexBuilder;
-use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
 
 use crate::{
     element_handler::{ElementHandler, Flow},
@@ -177,21 +177,28 @@ fn eval_comparison(
             }
         }
         Operator::Matches | Operator::MatchesInsensitive => {
-            let test = left_val.to_string();
-            let pattern = right_val.to_string();
+            let test = left_val.as_cow_str();
+            let pattern = right_val.as_cow_str();
 
             let re = if *operator == Operator::Matches {
-                RegexBuilder::new(&pattern).build()?
+                RegexBuilder::new(pattern.as_ref()).build()?
             } else {
-                RegexBuilder::new(&pattern).case_insensitive(true).build()?
+                RegexBuilder::new(pattern.as_ref())
+                    .case_insensitive(true)
+                    .build()?
             };
 
-            if let Some(captures) = re.captures(&test) {
+            if let Some(captures) = re.captures(test.as_ref()) {
+                let match_name = ctx.match_name.clone();
+                let mut idx_buf = String::new();
                 for (i, cap) in captures.iter().enumerate() {
                     let capval = cap.map_or(Value::Null, |s| {
-                        Value::Text(Bytes::from(s.as_str().to_string()))
+                        Value::Text(Bytes::copy_from_slice(s.as_str().as_bytes()))
                     });
-                    ctx.set_variable(&ctx.match_name.clone(), Some(&i.to_string()), capval)?;
+                    idx_buf.clear();
+                    use std::fmt::Write;
+                    let _ = write!(idx_buf, "{i}");
+                    ctx.set_variable(&match_name, Some(&idx_buf), capval)?;
                 }
                 Ok(Value::Boolean(true))
             } else {
@@ -199,66 +206,53 @@ fn eval_comparison(
             }
         }
         Operator::Has => {
-            let haystack = left_val.to_string();
-            let needle = right_val.to_string();
-            Ok(Value::Boolean(haystack.contains(&needle)))
+            let haystack = left_val.as_cow_str();
+            let needle = right_val.as_cow_str();
+            Ok(Value::Boolean(haystack.contains(needle.as_ref())))
         }
         Operator::HasInsensitive => {
-            let haystack = left_val.to_string().to_lowercase();
-            let needle = right_val.to_string().to_lowercase();
+            let haystack = left_val.as_cow_str().to_lowercase();
+            let needle = right_val.as_cow_str().to_lowercase();
             Ok(Value::Boolean(haystack.contains(&needle)))
         }
-        Operator::Equals => {
-            // Try numeric comparison first, then string comparison
-            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                Ok(Value::Boolean(l == r))
-            } else {
-                Ok(Value::Boolean(
-                    left_val.to_string() == right_val.to_string(),
-                ))
-            }
-        }
-        Operator::NotEquals => {
-            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                Ok(Value::Boolean(l != r))
-            } else {
-                Ok(Value::Boolean(
-                    left_val.to_string() != right_val.to_string(),
-                ))
-            }
-        }
-        Operator::LessThan => {
-            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                Ok(Value::Boolean(l < r))
-            } else {
-                Ok(Value::Boolean(left_val.to_string() < right_val.to_string()))
-            }
-        }
-        Operator::LessThanOrEqual => {
-            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                Ok(Value::Boolean(l <= r))
-            } else {
-                Ok(Value::Boolean(
-                    left_val.to_string() <= right_val.to_string(),
-                ))
-            }
-        }
-        Operator::GreaterThan => {
-            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                Ok(Value::Boolean(l > r))
-            } else {
-                Ok(Value::Boolean(left_val.to_string() > right_val.to_string()))
-            }
-        }
-        Operator::GreaterThanOrEqual => {
-            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                Ok(Value::Boolean(l >= r))
-            } else {
-                Ok(Value::Boolean(
-                    left_val.to_string() >= right_val.to_string(),
-                ))
-            }
-        }
+        Operator::Equals => match (left_val, right_val) {
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l == r)),
+            (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l == r)),
+            _ => Ok(Value::Boolean(
+                left_val.to_string() == right_val.to_string(),
+            )),
+        },
+        Operator::NotEquals => match (left_val, right_val) {
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l != r)),
+            (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l != r)),
+            _ => Ok(Value::Boolean(
+                left_val.to_string() != right_val.to_string(),
+            )),
+        },
+        Operator::LessThan => match (left_val, right_val) {
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l < r)),
+            (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l < r)),
+            _ => Ok(Value::Boolean(left_val.to_string() < right_val.to_string())),
+        },
+        Operator::LessThanOrEqual => match (left_val, right_val) {
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l <= r)),
+            (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l <= r)),
+            _ => Ok(Value::Boolean(
+                left_val.to_string() <= right_val.to_string(),
+            )),
+        },
+        Operator::GreaterThan => match (left_val, right_val) {
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l > r)),
+            (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l > r)),
+            _ => Ok(Value::Boolean(left_val.to_string() > right_val.to_string())),
+        },
+        Operator::GreaterThanOrEqual => match (left_val, right_val) {
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l >= r)),
+            (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l >= r)),
+            _ => Ok(Value::Boolean(
+                left_val.to_string() >= right_val.to_string(),
+            )),
+        },
         Operator::And => Ok(Value::Boolean(left_val.to_bool() && right_val.to_bool())),
         Operator::Or => Ok(Value::Boolean(left_val.to_bool() || right_val.to_bool())),
         // Arithmetic operators
@@ -336,13 +330,13 @@ pub struct EvalContext {
     match_name: String,
     /// HTTP request metadata (method, path, headers, query params) for variable resolution
     request: Request,
-    /// Custom headers to add to the response (set by $add_header function)
+    /// Custom headers to add to the response (set by $`add_header()` function)
     response_headers: Vec<(String, String)>,
-    /// Last random value generated by $rand() function (for $last_rand() function)
+    /// Last random value generated by $`rand()` function (for $`last_rand()` function)
     last_rand: Option<i32>,
-    /// HTTP status code override (set by $set_response_code or $set_redirect functions)
+    /// HTTP status code override (set by $`set_response_code()` or $`set_redirect()` functions)
     response_status: Option<i32>,
-    /// Complete response body override (set by $set_response_code function)
+    /// Complete response body override (set by $`set_response_code()` function)
     response_body_override: Option<Bytes>,
     /// Cached parsed query string parameters (lazy-loaded for performance)
     query_params_cache: std::cell::RefCell<Option<HashMap<String, Vec<Bytes>>>>,
@@ -386,19 +380,7 @@ impl EvalContext {
     pub fn new_with_vars(vars: HashMap<String, Value>) -> Self {
         Self {
             vars,
-            match_name: VAR_MATCHES.to_string(),
-            request: Request::new(Method::GET, URL_LOCALHOST),
-            response_headers: Vec::new(),
-            last_rand: None,
-            response_status: None,
-            response_body_override: None,
-            query_params_cache: std::cell::RefCell::new(None),
-            http_headers_cache: std::cell::RefCell::new(HashMap::new()),
-            min_ttl: None,
-            is_uncacheable: false,
-            args_stack: Vec::new(),
-            function_registry: FunctionRegistry::new(),
-            function_recursion_depth: 5,
+            ..Self::default()
         }
     }
 
@@ -466,10 +448,9 @@ impl EvalContext {
 
     fn parse_http_header(&self, header: &str) -> Option<HashMap<String, Value>> {
         let value = self.request.get_header(header)?.to_str().ok()?;
-        let header_lower = header.to_lowercase();
 
         // Cookie: semicolon-separated key=value pairs
-        if header_lower == "cookie" {
+        if header.eq_ignore_ascii_case("cookie") {
             let mut dict = HashMap::new();
             for pair in value.split(';') {
                 let trimmed = pair.trim();
@@ -487,7 +468,7 @@ impl EvalContext {
         // Creates Dict where key=value for membership testing: {"gzip": "gzip", "br": "br"}
         let mut dict = HashMap::new();
         for item in value.split(',') {
-            // Strip quality value: "gzip;q=0.9" → "gzip"
+            // Strip quality value: "gzip;q=0.9" -> "gzip"
             let item_value = item.split(';').next().unwrap_or("").trim();
             if !item_value.is_empty() {
                 dict.insert(
@@ -724,11 +705,13 @@ fn get_subvalue(parent: &Value, subkey: &str) -> Value {
             return items.borrow().get(idx).cloned().unwrap_or(Value::Null);
         }
 
-        // String-as-list: byte access by index (ESI is byte/ASCII-oriented)
+        // String-as-list: byte access by index — zero-copy via Bytes::slice
         if let Value::Text(s) = parent {
-            return s
-                .get(idx..=idx)
-                .map_or(Value::Null, |b| Value::Text(Bytes::copy_from_slice(b)));
+            return if idx < s.len() {
+                Value::Text(s.slice(idx..=idx))
+            } else {
+                Value::Null
+            };
         }
     }
 
@@ -830,12 +813,12 @@ impl Eq for Value {}
 
 impl Value {
     /// Create a new `Value::List` wrapping the given vec in `Rc<RefCell<…>>`.
-    pub fn new_list(items: Vec<Value>) -> Self {
+    pub fn new_list(items: Vec<Self>) -> Self {
         Self::List(Rc::new(RefCell::new(items)))
     }
 
     /// Create a new `Value::Dict` wrapping the given map in `Rc<RefCell<…>>`.
-    pub fn new_dict(map: HashMap<String, Value>) -> Self {
+    pub fn new_dict(map: HashMap<String, Self>) -> Self {
         Self::Dict(Rc::new(RefCell::new(map)))
     }
 
@@ -865,6 +848,16 @@ impl Value {
             Self::List(items) => Bytes::from(items_to_string(&items.borrow())),
             Self::Dict(map) => Bytes::from(dict_to_string(&map.borrow())),
             Self::Null => Bytes::new(),
+        }
+    }
+
+    /// Returns the value as a `Cow<str>`, avoiding allocation when the inner
+    /// bytes are valid UTF-8.  Prefer this over `to_string()` when only a
+    /// `&str` reference is needed.
+    pub fn as_cow_str(&self) -> Cow<'_, str> {
+        match self {
+            Self::Text(b) => String::from_utf8_lossy(b.as_ref()),
+            _ => Cow::Owned(self.to_string()),
         }
     }
 }
@@ -908,13 +901,16 @@ fn items_to_string(items: &[Value]) -> String {
         if i > 0 {
             out.push(',');
         }
-        out.push_str(&v.to_string());
+        out.push_str(&v.as_cow_str());
     }
     out
 }
 
 fn dict_to_string(map: &HashMap<String, Value>) -> String {
-    let mut parts: Vec<_> = map.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let mut parts: Vec<_> = map
+        .iter()
+        .map(|(k, v)| format!("{k}={}", v.as_cow_str()))
+        .collect();
     parts.sort();
     parts.join("&")
 }

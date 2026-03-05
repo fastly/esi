@@ -161,6 +161,91 @@ fn test_parse_include_self_closing_has_no_params() {
 }
 
 #[test]
+fn test_parse_include_no_store_attribute() {
+    let input = br#"<esi:include src="/test" no-store="on"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
+            esi::parser_types::Tag::Include { attrs, .. }
+        ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "/test")
+            && attrs.no_store)
+    });
+
+    assert!(
+        include_found,
+        "Should parse include with no-store attribute"
+    );
+}
+
+#[test]
+fn test_parse_include_no_store_off_attribute() {
+    let input = br#"<esi:include src="/test" no-store="off"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
+            esi::parser_types::Tag::Include { attrs, .. }
+        ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "/test")
+            && !attrs.no_store)
+    });
+
+    assert!(
+        include_found,
+        "Should parse include with no-store=off as cacheable"
+    );
+}
+
+#[test]
+fn test_parse_include_no_store_true_is_not_enabled() {
+    let input = br#"<esi:include src="/test" no-store="true"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
+            esi::parser_types::Tag::Include { attrs, .. }
+        ) if matches!(&attrs.src, esi::parser_types::Expr::String(Some(s)) if s == "/test")
+            && !attrs.no_store)
+    });
+
+    assert!(
+        include_found,
+        "no-store=true should not enable no-store; only on/off are supported"
+    );
+}
+
+#[test]
+fn test_parse_include_numbered_header_attributes() {
+    let input = br#"<esi:include src="/frag" setheader1="X-A: one" appendheader2="X-B: two" removeheader1="X-C"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let include_found = elements.iter().any(|element| {
+        matches!(element, esi::parser_types::Element::Esi(
+            esi::parser_types::Tag::Include { attrs, .. }
+        ) if attrs.setheaders.iter().any(|(k, _)| k == "X-A")
+            && attrs.appendheaders.iter().any(|(k, _)| k == "X-B")
+            && attrs.removeheaders.iter().any(|h| h == "X-C"))
+    });
+
+    assert!(
+        include_found,
+        "Should parse include with numbered set/append/remove header attributes"
+    );
+}
+
+#[test]
 fn test_parse_include_with_query_string_variable() {
     // Example from Akamai ESI spec
     // Mixed text+variable interpolation is now properly parsed at parse-time

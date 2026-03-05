@@ -6,7 +6,7 @@ use nom::character::streaming as streaming_char;
 // Using COMPLETE parsers for expression parsing - expressions are always complete
 // (they come from attribute values which are fully extracted before parsing)
 use nom::bytes::complete::{tag, take_until, take_while, take_while1};
-use nom::character::complete::multispace0;
+use nom::character::complete::{multispace0, multispace1};
 
 use nom::branch::alt;
 use nom::combinator::{not, opt, peek, recognize};
@@ -143,8 +143,7 @@ where
 /// Uses streaming parsers that return `Incomplete` when they need more data.
 /// The caller (typically lib.rs) must handle `Incomplete` by reading more data into the buffer.
 ///
-/// # Returns
-/// - `Ok((remaining, elements))` - Successfully parsed elements with zero-copy `Bytes` slices
+/// # Errors
 /// - `Err(Incomplete)` - Parser needs more data to continue
 /// - `Err(Error)` - Parse error occurred
 pub fn parse(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
@@ -157,10 +156,9 @@ pub fn parse(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
 /// treats the remaining unparseable bytes as literal text instead of requesting more data.
 /// Use this when you've reached EOF and want to finalize parsing.
 ///
-/// # Returns
-/// - `Ok((remaining, elements))` - Successfully parsed elements, with any unparseable remainder
-///   converted to `Text` elements
-/// - `Err(Error)` - Parse error occurred (but not `Incomplete`)
+/// # Errors
+/// Returns `Err` if a parse error occurs (but not `Incomplete`, which is handled internally
+/// by converting unparseable remainder to `Text` elements).
 pub fn parse_remainder(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     parse_loop(input, element, &ParsingMode::Complete)
 }
@@ -1002,7 +1000,7 @@ fn extract_include_attrs(
     let maxwait = attrs.remove("maxwait").and_then(|s| s.parse::<u32>().ok());
     let no_store = attrs
         .get("no-store")
-        .is_some_and(|v| *v == "on" || *v == "true");
+        .is_some_and(|v| v.eq_ignore_ascii_case("on"));
     let method = attrs.remove("method").map(parse_attr_as_expr);
     let entity = attrs.remove("entity").map(parse_attr_as_expr);
 
@@ -1146,13 +1144,16 @@ fn esi_param(input: &[u8]) -> IResult<&[u8], (String, Expr), Error<&[u8]>> {
 fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<&str, &str>, Error<&[u8]>> {
     fold_many0(
         separated_pair(
-            preceded(streaming_char::multispace1, streaming_char::alpha1),
-            streaming_bytes::tag(EQUALS),
+            preceded(
+                multispace1,
+                take_while1(|c: u8| c.is_ascii_alphanumeric() || c == b'-'),
+            ),
+            tag(EQUALS),
             htmlstring,
         ),
         HashMap::new,
         |mut acc, (k, v)| {
-            // SAFETY: alpha1 guarantees ASCII-only keys — always valid UTF-8
+            // SAFETY: key parser only allows ASCII attribute-name bytes
             let key = unsafe { std::str::from_utf8_unchecked(k) };
             // Values come from htmlstring (arbitrary quoted content) — must validate
             if let Ok(val) = std::str::from_utf8(v) {
@@ -1726,7 +1727,7 @@ fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 /// Per ESI spec: "Operands associate from left to right"
 /// All operators at same precedence, evaluated left-to-right
 /// Format: `unary_expr` (operator `unary_expr`)*
-/// Left-associative: A op B op C → (A op B) op C
+/// Left-associative: A op B op C -> (A op B) op C
 fn expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     let (input, first) = unary_expr(input)?;
 

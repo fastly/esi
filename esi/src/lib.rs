@@ -260,7 +260,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
     fn on_include(&mut self, attrs: &IncludeAttributes) -> crate::Result<Flow> {
         let queued_element = self
             .processor
-            .dispatch_include_to_element(attrs, self.dispatch_fragment_request)?;
+            .dispatch_include(attrs, self.dispatch_fragment_request)?;
         self.processor.queue.push_back(queued_element);
         Ok(Flow::Continue)
     }
@@ -274,7 +274,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
         // Build and dispatch the request (same machinery as include, but blocking)
         let queued_element = self
             .processor
-            .dispatch_include_to_element(attrs, self.dispatch_fragment_request)?;
+            .dispatch_include(attrs, self.dispatch_fragment_request)?;
 
         match queued_element {
             QueuedElement::Include(fragment) => {
@@ -552,7 +552,7 @@ impl Processor {
             .cloned()
             .unwrap_or_else(|| Bytes::from(output));
 
-        resp.set_body(body_bytes.to_vec());
+        resp.set_body(body_bytes.as_ref());
         resp.send_to_client();
         Ok(())
     }
@@ -773,7 +773,7 @@ impl Processor {
 
     /// Dispatch an include and return a `QueuedElement` (for flexible queue insertion)
     /// This is the single source of truth for include dispatching logic
-    fn dispatch_include_to_element(
+    fn dispatch_include(
         &mut self,
         attrs: &IncludeAttributes,
         dispatcher: &FragmentRequestDispatcher,
@@ -917,7 +917,7 @@ impl Processor {
                     // reached the front after a preceding include was consumed.
                     self.process_try_block(
                         attempt_elements,
-                        except_elements,
+                        &except_elements,
                         output_writer,
                         dispatcher,
                         processor,
@@ -961,7 +961,7 @@ impl Processor {
         let mut buf: Vec<Option<Bytes>> = Vec::with_capacity(self.queue.len());
         let mut next_out: usize = 0;
 
-        // RequestKey → FIFO queue of SlotEntry for all in-flight requests.
+        // RequestKey -> FIFO queue of SlotEntry for all in-flight requests.
         // A single SlotEntry struct covers both bare includes and try-block
         // includes; the `try_info` field distinguishes the two cases.
         let mut url_map: HashMap<RequestKey, VecDeque<SlotEntry>> = HashMap::new();
@@ -1136,7 +1136,7 @@ impl Processor {
                                                 let mut slot_buf = Vec::new();
                                                 this.process_try_block(
                                                     nested_attempts,
-                                                    nested_except,
+                                                    &nested_except,
                                                     &mut slot_buf,
                                                     dispatch_fragment_request,
                                                     process_fragment_response,
@@ -1199,8 +1199,8 @@ impl Processor {
             // ------------------------------------------------------------------
             // Step 5: correlate the response with its SlotEntry and act.
             //
-            // Success  → Response::get_backend_request() carries the sent URL.
-            // Failure  → SendError::into_sent_req() recovers the URL; a 500 is
+            // Success -> Response::get_backend_request() carries the sent URL.
+            // Failure -> SendError::into_sent_req() recovers the URL; a 500 is
             //            synthesised so existing alt/onerror logic is unchanged.
             // ------------------------------------------------------------------
             let (key, completed_content) = match result {
@@ -1377,7 +1377,7 @@ impl Processor {
     fn process_try_block(
         &mut self,
         attempt_elements: Vec<Vec<Element>>,
-        except_elements: Vec<Element>,
+        except_elements: &[Element],
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
         processor: Option<&FragmentResponseProcessor>,
@@ -1390,7 +1390,7 @@ impl Processor {
             }
         }
         if any_failed {
-            let buf = self.process_try_task(&except_elements, dispatcher, processor)?;
+            let buf = self.process_try_task(except_elements, dispatcher, processor)?;
             output_writer.write_all(&buf)?;
         }
         Ok(())
@@ -1470,9 +1470,9 @@ impl Processor {
         // Wait for response
         let response = fragment.pending_fragment.wait()?;
 
-        // Apply processor if provided
-        let mut req_for_processor = fragment.req.clone_without_body();
+        // Apply processor if provided (only clone the request when a processor exists)
         let final_response = if let Some(proc) = process_fragment_response {
+            let mut req_for_processor = fragment.req.clone_without_body();
             proc(&mut req_for_processor, response)?
         } else {
             response
@@ -1533,8 +1533,8 @@ impl Processor {
             match dispatch_fragment_request(alt_req_without_body, fragment.metadata.maxwait) {
                 Ok(alt_pending) => {
                     let alt_response = alt_pending.wait()?;
-                    let mut alt_req_for_proc = alt_req.clone_without_body();
                     let final_alt = if let Some(proc) = process_fragment_response {
+                        let mut alt_req_for_proc = alt_req.clone_without_body();
                         proc(&mut alt_req_for_proc, alt_response)?
                     } else {
                         alt_response

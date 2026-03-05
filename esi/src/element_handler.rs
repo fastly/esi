@@ -108,14 +108,12 @@ pub trait ElementHandler {
             }
 
             Element::Expr(expr) => {
-                match eval_expr(expr, self.ctx()) {
-                    Ok(val) if !matches!(val, Value::Null) => {
-                        let bytes = val.to_bytes();
-                        if !bytes.is_empty() {
-                            self.write_bytes(bytes)?;
-                        }
+                let val = eval_expr(expr, self.ctx())?;
+                if !matches!(val, Value::Null) {
+                    let bytes = val.to_bytes();
+                    if !bytes.is_empty() {
+                        self.write_bytes(bytes)?;
                     }
-                    _ => {} // Skip null values or evaluation errors
                 }
                 Ok(Flow::Continue)
             }

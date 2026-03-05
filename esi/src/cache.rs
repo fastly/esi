@@ -46,7 +46,7 @@ impl Default for CacheConfig {
 pub fn calculate_ttl(response: &Response, config: &CacheConfig) -> Result<Option<u32>> {
     // If includes_force_ttl is set, everything is cacheable
     if let Some(force_ttl) = config.includes_force_ttl {
-        trace!("Using includes_force_ttl: {}s", force_ttl);
+        trace!("Using includes_force_ttl: {force_ttl}s");
         return Ok(Some(force_ttl));
     }
 
@@ -58,19 +58,18 @@ pub fn calculate_ttl(response: &Response, config: &CacheConfig) -> Result<Option
 
     // Parse Cache-Control header
     if let Some(cache_control) = response.get_header_str(CACHE_CONTROL) {
-        trace!("Parsing Cache-Control: {}", cache_control);
+        trace!("Parsing Cache-Control: {cache_control}");
 
         let directives: Vec<&str> = cache_control.split(',').map(str::trim).collect();
 
         // Check for directives that prevent caching
         for directive in &directives {
-            let directive_lower = directive.to_lowercase();
-            if directive_lower == "private"
-                || directive_lower == "no-cache"
-                || directive_lower == "no-store"
-                || directive_lower == "must-revalidate"
+            if directive.eq_ignore_ascii_case("private")
+                || directive.eq_ignore_ascii_case("no-cache")
+                || directive.eq_ignore_ascii_case("no-store")
+                || directive.eq_ignore_ascii_case("must-revalidate")
             {
-                trace!("Response has {} directive, not caching", directive);
+                trace!("Response has {directive} directive, not caching");
                 return Ok(None);
             }
         }
@@ -80,7 +79,7 @@ pub fn calculate_ttl(response: &Response, config: &CacheConfig) -> Result<Option
         for directive in &directives {
             if let Some(value) = directive.strip_prefix("s-maxage=") {
                 if let Ok(seconds) = value.parse::<u32>() {
-                    trace!("Found s-maxage={}", seconds);
+                    trace!("Found s-maxage={seconds}");
                     ttl = Some(seconds);
                     break; // s-maxage takes precedence
                 }
@@ -92,7 +91,7 @@ pub fn calculate_ttl(response: &Response, config: &CacheConfig) -> Result<Option
             for directive in &directives {
                 if let Some(value) = directive.strip_prefix("max-age=") {
                     if let Ok(seconds) = value.parse::<u32>() {
-                        trace!("Found max-age={}", seconds);
+                        trace!("Found max-age={seconds}");
                         ttl = Some(seconds);
                         break;
                     }
@@ -108,7 +107,7 @@ pub fn calculate_ttl(response: &Response, config: &CacheConfig) -> Result<Option
 
     // No Cache-Control or no max-age/s-maxage, use includes_default_ttl if set
     if let Some(default_ttl) = config.includes_default_ttl {
-        trace!("Using includes_default_ttl: {}s", default_ttl);
+        trace!("Using includes_default_ttl: {default_ttl}s");
         return Ok(Some(default_ttl));
     }
 

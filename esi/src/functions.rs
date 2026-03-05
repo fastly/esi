@@ -43,8 +43,8 @@ pub fn html_encode(args: &[Value]) -> Result<Value> {
 
     // Per ESI spec: encode only 4 special characters: > < & "
     // html_escape::encode_double_quoted_attribute does exactly this
-    let encoded =
-        html_escape::encode_double_quoted_attribute(args[0].to_string().as_str()).to_string();
+    let input = args[0].as_cow_str();
+    let encoded = html_escape::encode_double_quoted_attribute(&input).to_string();
     Ok(Value::Text(encoded.into()))
 }
 
@@ -56,7 +56,8 @@ pub fn html_decode(args: &[Value]) -> Result<Value> {
         )));
     }
 
-    let decoded = html_escape::decode_html_entities(args[0].to_string().as_str()).to_string();
+    let input = args[0].as_cow_str();
+    let decoded = html_escape::decode_html_entities(&input).to_string();
     Ok(Value::Text(decoded.into()))
 }
 
@@ -119,7 +120,9 @@ pub fn set_response_code(args: &[Value], ctx: &mut EvalContext) -> Result<Value>
         if matches!(body_val, Value::Null) {
             ctx.set_response_body_override(None);
         } else {
-            ctx.set_response_body_override(Some(Bytes::from(body_val.to_string())));
+            ctx.set_response_body_override(Some(Bytes::copy_from_slice(
+                body_val.as_cow_str().as_bytes(),
+            )));
         }
     }
 
@@ -134,7 +137,7 @@ pub fn set_redirect(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
         )));
     }
 
-    let location = args[0].to_string();
+    let location = args[0].as_cow_str().into_owned();
     ctx.set_response_status(302);
     ctx.add_response_header("Location".to_string(), location);
     ctx.set_response_body_override(None);
@@ -179,7 +182,9 @@ pub fn to_str(args: &[Value]) -> Result<Value> {
     match &args[0] {
         Value::Text(_) => Ok(args[0].clone()),
         Value::Null => Ok(Value::Text(Bytes::new())),
-        other => Ok(Value::Text(Bytes::from(other.to_string()))),
+        other => Ok(Value::Text(Bytes::copy_from_slice(
+            other.as_cow_str().as_bytes(),
+        ))),
     }
 }
 
@@ -204,8 +209,10 @@ pub fn lstrip(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(bytes.slice(start..bytes.len())));
     }
 
-    let s = args[0].to_string();
-    Ok(Value::Text(s.trim_start().to_string().into()))
+    let s = args[0].as_cow_str();
+    Ok(Value::Text(Bytes::copy_from_slice(
+        s.trim_start().as_bytes(),
+    )))
 }
 
 pub fn rstrip(args: &[Value]) -> Result<Value> {
@@ -229,8 +236,8 @@ pub fn rstrip(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(bytes.slice(0..end)));
     }
 
-    let s = args[0].to_string();
-    Ok(Value::Text(s.trim_end().to_string().into()))
+    let s = args[0].as_cow_str();
+    Ok(Value::Text(Bytes::copy_from_slice(s.trim_end().as_bytes())))
 }
 
 pub fn strip(args: &[Value]) -> Result<Value> {
@@ -259,8 +266,8 @@ pub fn strip(args: &[Value]) -> Result<Value> {
         return Ok(Value::Text(bytes.slice(s..e)));
     }
 
-    let s = args[0].to_string();
-    Ok(Value::Text(s.trim().to_string().into()))
+    let s = args[0].as_cow_str();
+    Ok(Value::Text(Bytes::copy_from_slice(s.trim().as_bytes())))
 }
 
 pub fn dollar(args: &[Value]) -> Result<Value> {
@@ -304,7 +311,8 @@ pub fn base64_encode(args: &[Value]) -> Result<Value> {
         )));
     }
 
-    let encoded = STANDARD.encode(args[0].to_string().as_bytes());
+    let input_bytes = args[0].to_bytes();
+    let encoded = STANDARD.encode(&input_bytes);
     Ok(Value::Text(encoded.into()))
 }
 
@@ -320,16 +328,16 @@ pub fn base64_decode(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    let input = args[0].to_string();
+    let input = args[0].as_cow_str();
     let decoded = STANDARD
         .decode(input.as_bytes())
         .map_err(|_| ExecutionError::FunctionError("base64_decode: invalid base64".to_string()))?;
 
     // Try to convert to UTF-8 string, but return raw bytes if it fails
-    String::from_utf8(decoded.clone()).map_or_else(
-        |_| Ok(Value::Text(Bytes::from(decoded))),
-        |s| Ok(Value::Text(s.into())),
-    )
+    match String::from_utf8(decoded) {
+        Ok(s) => Ok(Value::Text(s.into())),
+        Err(e) => Ok(Value::Text(Bytes::from(e.into_bytes()))),
+    }
 }
 
 pub fn url_encode(args: &[Value]) -> Result<Value> {
@@ -340,7 +348,8 @@ pub fn url_encode(args: &[Value]) -> Result<Value> {
         )));
     }
 
-    let encoded = utf8_percent_encode(&args[0].to_string(), NON_ALPHANUMERIC).to_string();
+    let input = args[0].as_cow_str();
+    let encoded = utf8_percent_encode(&input, NON_ALPHANUMERIC).to_string();
     Ok(Value::Text(encoded.into()))
 }
 
@@ -352,12 +361,12 @@ pub fn url_decode(args: &[Value]) -> Result<Value> {
         )));
     }
 
-    let input = args[0].to_string();
+    let input = args[0].as_cow_str();
     let decoded = percent_decode_str(&input)
         .decode_utf8()
         .map_err(|_| ExecutionError::FunctionError("invalid UTF-8 in 'url_decode'".to_string()))?;
 
-    Ok(Value::Text(Bytes::from(decoded.to_string())))
+    Ok(Value::Text(Bytes::from(decoded.into_owned())))
 }
 
 fn parse_i32(name: &str, v: &Value) -> Result<i32> {
@@ -431,7 +440,7 @@ pub fn int(args: &[Value]) -> Result<Value> {
         return Ok(Value::Integer(0));
     }
 
-    let parsed = args[0].to_string().trim().parse::<i32>().unwrap_or(0);
+    let parsed = args[0].as_cow_str().trim().parse::<i32>().unwrap_or(0);
     Ok(Value::Integer(parsed))
 }
 
@@ -483,15 +492,15 @@ pub fn index(args: &[Value]) -> Result<Value> {
         return Ok(Value::Integer(-1));
     }
 
-    let hay = args[0].to_string();
-    let needle = args[1].to_string();
+    let hay = args[0].as_cow_str();
+    let needle = args[1].as_cow_str();
 
     if needle.is_empty() {
         return Ok(Value::Integer(0));
     }
 
     // Per ESI spec, string indexing is byte/ASCII-oriented.
-    hay.find(&needle).map_or_else(
+    hay.find(&*needle).map_or_else(
         || Ok(Value::Integer(-1)),
         |byte_idx| Ok(Value::Integer(byte_idx as i32)),
     )
@@ -509,21 +518,21 @@ pub fn rindex(args: &[Value]) -> Result<Value> {
         return Ok(Value::Integer(-1));
     }
 
-    let hay = args[0].to_string();
-    let needle = args[1].to_string();
+    let hay = args[0].as_cow_str();
+    let needle = args[1].as_cow_str();
 
     if needle.is_empty() {
         return Ok(Value::Integer(hay.len() as i32));
     }
 
     // Per ESI spec, string indexing is byte/ASCII-oriented.
-    hay.rfind(&needle).map_or_else(
+    hay.rfind(&*needle).map_or_else(
         || Ok(Value::Integer(-1)),
         |byte_idx| Ok(Value::Integer(byte_idx as i32)),
     )
 }
 
-/// $digest_md5(text_to_digest) - Returns MD5 digest as a list of 4 (32 bit) signed integers
+/// $`digest_md5(text_to_digest)` - Returns MD5 digest as a list of 4 (32 bit) signed integers
 pub fn digest_md5(args: &[Value]) -> Result<Value> {
     if args.len() != 1 {
         return Err(ExecutionError::FunctionError(format!(
@@ -536,8 +545,8 @@ pub fn digest_md5(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    let input = args[0].to_string();
-    let digest = md5::compute(input.as_bytes());
+    let input_bytes = args[0].to_bytes();
+    let digest = md5::compute(&input_bytes);
 
     // MD5 produces 128 bits = 16 bytes, which we split into 4 x 32-bit signed integers
     // Convert bytes to i32s (little-endian interpretation)
@@ -555,7 +564,7 @@ pub fn digest_md5(args: &[Value]) -> Result<Value> {
     ]))))
 }
 
-/// $digest_md5_hex(text_to_digest) - Returns MD5 digest as a 32 character hex string
+/// $`digest_md5_hex(text_to_digest)` - Returns MD5 digest as a 32 character hex string
 pub fn digest_md5_hex(args: &[Value]) -> Result<Value> {
     if args.len() != 1 {
         return Err(ExecutionError::FunctionError(format!(
@@ -568,8 +577,8 @@ pub fn digest_md5_hex(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    let input = args[0].to_string();
-    let digest = md5::compute(input.as_bytes());
+    let input_bytes = args[0].to_bytes();
+    let digest = md5::compute(&input_bytes);
     let hex = format!("{digest:x}");
     Ok(Value::Text(hex.into()))
 }
@@ -690,7 +699,6 @@ pub fn substr(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    let s = args[0].to_string();
     let Value::Integer(start_i) = args[1] else {
         return Err(ExecutionError::FunctionError(
             "incorrect type for 'substr' start".to_string(),
@@ -707,8 +715,32 @@ pub fn substr(args: &[Value]) -> Result<Value> {
         }
     };
 
+    // Fast path: if already Text, use zero-copy Bytes::slice
+    if let Value::Text(bytes) = &args[0] {
+        let len = bytes.len() as i32;
+
+        let start = if start_i < 0 {
+            (len + start_i).max(0)
+        } else {
+            start_i.min(len)
+        } as usize;
+
+        let end = match end_i {
+            None => len,
+            Some(j) if j < 0 => (len + j).max(0),
+            Some(j) => j.min(len),
+        } as usize;
+
+        return if end <= start {
+            Ok(Value::Text(Bytes::new()))
+        } else {
+            Ok(Value::Text(bytes.slice(start..end)))
+        };
+    }
+
+    let bytes = args[0].to_bytes();
     // Per ESI spec, string indexing is byte/ASCII-oriented.
-    let len = s.len() as i32;
+    let len = bytes.len() as i32;
 
     let start = if start_i < 0 {
         (len + start_i).max(0)
@@ -722,13 +754,11 @@ pub fn substr(args: &[Value]) -> Result<Value> {
         Some(j) => j.min(len),
     } as usize;
 
-    if end < start {
+    if end <= start {
         return Ok(Value::Text(Bytes::new()));
     }
 
-    Ok(Value::Text(Bytes::copy_from_slice(
-        &s.as_bytes()[start..end],
-    )))
+    Ok(Value::Text(bytes.slice(start..end)))
 }
 
 pub fn add_header(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
@@ -739,8 +769,8 @@ pub fn add_header(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
         )));
     }
 
-    let name = args[0].to_string();
-    let value = args[1].to_string();
+    let name = args[0].as_cow_str().into_owned();
+    let value = args[1].as_cow_str().into_owned();
     ctx.add_response_header(name, value);
 
     Ok(Value::Null)
@@ -753,10 +783,10 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
         ));
     }
 
-    let source = args[0].to_string();
+    let source = args[0].as_cow_str().into_owned();
     let sep = match args.get(1) {
         None | Some(Value::Null) => " ".to_string(),
-        Some(v) => v.to_string(),
+        Some(v) => v.as_cow_str().into_owned(),
     };
 
     let max_splits = match args.get(2) {
@@ -824,7 +854,7 @@ pub fn join(args: &[Value]) -> Result<Value> {
 
     let sep = match args.get(1) {
         None | Some(Value::Null) => " ".to_string(),
-        Some(v) => v.to_string(),
+        Some(v) => v.as_cow_str().into_owned(),
     };
 
     let Value::List(list_rc) = &args[0] else {
@@ -839,7 +869,7 @@ pub fn join(args: &[Value]) -> Result<Value> {
         if i > 0 {
             out.push_str(&sep);
         }
-        out.push_str(&v.to_string());
+        out.push_str(&v.as_cow_str());
     }
 
     Ok(Value::Text(out.into()))
@@ -854,8 +884,8 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
     }
 
     let list = match &args[0] {
-        Value::List(items) => items.borrow().clone(),
-        Value::Null => Vec::new(),
+        Value::List(items) => items,
+        Value::Null => return Ok(Value::new_list(Vec::new())),
         _ => {
             return Err(ExecutionError::FunctionError(
                 "list_delitem expects a list as first argument".to_string(),
@@ -865,15 +895,20 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
 
     let idx = parse_i32("list_delitem", &args[1])?;
     if idx < 0 {
-        return Ok(Value::new_list(list));
+        return Ok(Value::new_list(list.borrow().clone()));
     }
 
-    let mut items = list;
-    if (idx as usize) < items.len() {
-        items.remove(idx as usize);
+    let idx = idx as usize;
+    let borrowed = list.borrow();
+    if idx < borrowed.len() {
+        // Build new list skipping the removed index — avoids cloning then removing
+        let mut items = Vec::with_capacity(borrowed.len() - 1);
+        items.extend_from_slice(&borrowed[..idx]);
+        items.extend_from_slice(&borrowed[idx + 1..]);
+        Ok(Value::new_list(items))
+    } else {
+        Ok(Value::new_list(borrowed.clone()))
     }
-
-    Ok(Value::new_list(items))
 }
 
 pub fn replace(args: &[Value]) -> Result<Value> {
