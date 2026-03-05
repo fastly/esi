@@ -385,7 +385,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "esi"
-version = "0.7.0-beta.1"
+version = "0.7.0-beta.2"
 dependencies = [
  "atoi",
  "base64",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "esi_example_advanced_error_handling"
-version = "0.7.0-beta.1"
+version = "0.7.0-beta.2"
 dependencies = [
  "env_logger",
  "esi",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "esi_example_minimal"
-version = "0.7.0-beta.1"
+version = "0.7.0-beta.2"
 dependencies = [
  "env_logger",
  "esi",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "esi_example_variants"
-version = "0.7.0-beta.1"
+version = "0.7.0-beta.2"
 dependencies = [
  "env_logger",
  "esi",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "esi_try_example"
-version = "0.7.0-beta.1"
+version = "0.7.0-beta.2"
 dependencies = [
  "env_logger",
  "esi",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "esi_vars_example"
-version = "0.7.0-beta.1"
+version = "0.7.0-beta.2"
 dependencies = [
  "env_logger",
  "esi",

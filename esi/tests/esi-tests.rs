@@ -2195,7 +2195,7 @@ fn test_content_order_around_try_block() {
 fn test_try_block_at_queue_head_uses_except_on_failure() {
     init_logs();
 
-    // An include followed by a try whose attempt fails → except should show
+    // An include followed by a try whose attempt fails -> except should show
     let input = r#"<esi:include src="http://example.com/first"/>
 <esi:try>
   <esi:attempt><esi:include src="http://example.com/attempt"/></esi:attempt>
