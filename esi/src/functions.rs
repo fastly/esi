@@ -8,13 +8,51 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Macro to validate function arguments and return appropriate error
+macro_rules! validate_args {
+    ($args:expr, $expected:expr, $func_name:expr) => {
+        if $args.len() != $expected {
+            return Err(ExecutionError::FunctionError(format!(
+                "{}: expected {} argument{}, got {}",
+                $func_name,
+                $expected,
+                if $expected == 1 { "" } else { "s" },
+                $args.len()
+            )));
+        }
+    };
+}
+
+/// Macro to validate that a function takes no arguments
+macro_rules! validate_no_args {
+    ($args:expr, $func_name:expr) => {
+        if !$args.is_empty() {
+            return Err(ExecutionError::FunctionError(format!(
+                "{}: expected 0 arguments, got {}",
+                $func_name,
+                $args.len()
+            )));
+        }
+    };
+}
+
+/// Macro to validate function arguments with a range
+macro_rules! validate_args_range {
+    ($args:expr, $min:expr, $max:expr, $func_name:expr) => {
+        if $args.len() < $min || $args.len() > $max {
+            return Err(ExecutionError::FunctionError(format!(
+                "{}: expected {}-{} arguments, got {}",
+                $func_name,
+                $min,
+                $max,
+                $args.len()
+            )));
+        }
+    };
+}
+
 pub fn lower(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "lower: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "lower");
 
     // If the argument is Null, return Null (don't convert to "null" string)
     if matches!(args[0], Value::Null) {
@@ -34,12 +72,7 @@ pub fn lower(args: &[Value]) -> Result<Value> {
 }
 
 pub fn html_encode(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "html_encode: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "html_encode");
 
     // Per ESI spec: encode only 4 special characters: > < & "
     // html_escape::encode_double_quoted_attribute does exactly this
@@ -49,12 +82,7 @@ pub fn html_encode(args: &[Value]) -> Result<Value> {
 }
 
 pub fn html_decode(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "html_decode: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "html_decode");
 
     let input = args[0].as_cow_str();
     let decoded = html_escape::decode_html_entities(&input).to_string();
@@ -62,12 +90,7 @@ pub fn html_decode(args: &[Value]) -> Result<Value> {
 }
 
 pub fn convert_to_unicode(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "convert_to_unicode: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "convert_to_unicode");
 
     if let Value::Text(b) = &args[0] {
         return Ok(Value::Text(b.clone()));
@@ -81,12 +104,7 @@ pub fn convert_to_unicode(args: &[Value]) -> Result<Value> {
 }
 
 pub fn convert_from_unicode(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "convert_from_unicode: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "convert_from_unicode");
 
     if let Value::Text(b) = &args[0] {
         return Ok(Value::Text(b.clone()));
@@ -100,12 +118,7 @@ pub fn convert_from_unicode(args: &[Value]) -> Result<Value> {
 }
 
 pub fn set_response_code(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(ExecutionError::FunctionError(format!(
-            "set_response_code: expected 1-2 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args_range!(args, 1, 2, "set_response_code");
 
     let status = parse_i32("set_response_code", &args[0])?;
     if !(100..=599).contains(&status) {
@@ -130,12 +143,7 @@ pub fn set_response_code(args: &[Value], ctx: &mut EvalContext) -> Result<Value>
 }
 
 pub fn set_redirect(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "set_redirect: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "set_redirect");
 
     let location = args[0].as_cow_str().into_owned();
     ctx.set_response_status(302);
@@ -146,12 +154,7 @@ pub fn set_redirect(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
 }
 
 pub fn upper(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "upper: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "upper");
 
     if matches!(args[0], Value::Null) {
         return Ok(Value::Null);
@@ -170,12 +173,7 @@ pub fn upper(args: &[Value]) -> Result<Value> {
 }
 
 pub fn to_str(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "str: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "str");
 
     // $str() converts any value to Text so that + does concatenation, not addition.
     // Short-circuit if already Text to avoid a round-trip through String.
@@ -189,12 +187,7 @@ pub fn to_str(args: &[Value]) -> Result<Value> {
 }
 
 pub fn lstrip(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "lstrip: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "lstrip");
 
     if matches!(args[0], Value::Null) {
         return Ok(Value::Null);
@@ -216,12 +209,7 @@ pub fn lstrip(args: &[Value]) -> Result<Value> {
 }
 
 pub fn rstrip(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "rstrip: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "rstrip");
 
     if matches!(args[0], Value::Null) {
         return Ok(Value::Null);
@@ -241,12 +229,7 @@ pub fn rstrip(args: &[Value]) -> Result<Value> {
 }
 
 pub fn strip(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "strip: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "strip");
 
     if matches!(args[0], Value::Null) {
         return Ok(Value::Null);
@@ -271,45 +254,25 @@ pub fn strip(args: &[Value]) -> Result<Value> {
 }
 
 pub fn dollar(args: &[Value]) -> Result<Value> {
-    if !args.is_empty() {
-        return Err(ExecutionError::FunctionError(format!(
-            "dollar: expected 0 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_no_args!(args, "dollar");
 
     Ok(Value::Text(Bytes::from("$")))
 }
 
 pub fn dquote(args: &[Value]) -> Result<Value> {
-    if !args.is_empty() {
-        return Err(ExecutionError::FunctionError(format!(
-            "dquote: expected 0 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_no_args!(args, "dquote");
 
     Ok(Value::Text(Bytes::from("\"")))
 }
 
 pub fn squote(args: &[Value]) -> Result<Value> {
-    if !args.is_empty() {
-        return Err(ExecutionError::FunctionError(format!(
-            "squote: expected 0 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_no_args!(args, "squote");
 
     Ok(Value::Text(Bytes::from("'")))
 }
 
 pub fn base64_encode(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "base64_encode: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "base64_encode");
 
     let input_bytes = args[0].to_bytes();
     let encoded = STANDARD.encode(&input_bytes);
@@ -317,12 +280,7 @@ pub fn base64_encode(args: &[Value]) -> Result<Value> {
 }
 
 pub fn base64_decode(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "base64_decode: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "base64_decode");
 
     if matches!(args[0], Value::Null) {
         return Ok(Value::Null);
@@ -341,12 +299,7 @@ pub fn base64_decode(args: &[Value]) -> Result<Value> {
 }
 
 pub fn url_encode(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "url_encode: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "url_encode");
 
     let input = args[0].as_cow_str();
     let encoded = utf8_percent_encode(&input, NON_ALPHANUMERIC).to_string();
@@ -354,12 +307,7 @@ pub fn url_encode(args: &[Value]) -> Result<Value> {
 }
 
 pub fn url_decode(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "url_decode: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "url_decode");
 
     let input = args[0].as_cow_str();
     let decoded = percent_decode_str(&input)
@@ -395,12 +343,7 @@ fn parse_str<'a>(name: &str, v: &'a Value) -> Result<&'a str> {
 }
 
 pub fn len(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "len: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "len");
 
     // Per ESI spec, string functions are byte/ASCII-oriented.
     let count = match &args[0] {
@@ -408,7 +351,26 @@ pub fn len(args: &[Value]) -> Result<Value> {
         Value::Text(b) => b.len() as i32,
         Value::List(items) => items.borrow().len() as i32,
         Value::Dict(map) => map.borrow().len() as i32,
-        other => other.to_string().len() as i32,
+        Value::Integer(i) => {
+            if *i == 0 {
+                1
+            } else {
+                let mut n = i.abs();
+                let mut len = if *i < 0 { 1 } else { 0 };
+                while n > 0 {
+                    len += 1;
+                    n /= 10;
+                }
+                len
+            }
+        }
+        Value::Boolean(b) => {
+            if *b {
+                4
+            } else {
+                5
+            }
+        } // "true" or "false"
     };
 
     Ok(Value::Integer(count))
@@ -425,12 +387,7 @@ fn parse_positive_bound(name: &str, v: &Value) -> Result<i32> {
 }
 
 pub fn int(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "int: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "int");
 
     if let Value::Integer(i) = args[0] {
         return Ok(Value::Integer(i));
@@ -445,12 +402,7 @@ pub fn int(args: &[Value]) -> Result<Value> {
 }
 
 pub fn exists(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "exists: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "exists");
 
     let exists = match &args[0] {
         Value::Null => false,
@@ -464,12 +416,7 @@ pub fn exists(args: &[Value]) -> Result<Value> {
 }
 
 pub fn is_empty(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "is_empty: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "is_empty");
 
     match &args[0] {
         Value::Null => Ok(Value::Boolean(false)),
@@ -481,12 +428,7 @@ pub fn is_empty(args: &[Value]) -> Result<Value> {
 }
 
 pub fn index(args: &[Value]) -> Result<Value> {
-    if args.len() != 2 {
-        return Err(ExecutionError::FunctionError(format!(
-            "index: expected 2 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 2, "index");
 
     if matches!(args[0], Value::Null) || matches!(args[1], Value::Null) {
         return Ok(Value::Integer(-1));
@@ -507,12 +449,7 @@ pub fn index(args: &[Value]) -> Result<Value> {
 }
 
 pub fn rindex(args: &[Value]) -> Result<Value> {
-    if args.len() != 2 {
-        return Err(ExecutionError::FunctionError(format!(
-            "rindex: expected 2 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 2, "rindex");
 
     if matches!(args[0], Value::Null) || matches!(args[1], Value::Null) {
         return Ok(Value::Integer(-1));
@@ -534,12 +471,7 @@ pub fn rindex(args: &[Value]) -> Result<Value> {
 
 /// $`digest_md5(text_to_digest)` - Returns MD5 digest as a list of 4 (32 bit) signed integers
 pub fn digest_md5(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "digest_md5: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "digest_md5");
 
     if matches!(args[0], Value::Null) {
         return Ok(Value::Null);
@@ -566,12 +498,7 @@ pub fn digest_md5(args: &[Value]) -> Result<Value> {
 
 /// $`digest_md5_hex(text_to_digest)` - Returns MD5 digest as a 32 character hex string
 pub fn digest_md5_hex(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "digest_md5_hex: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "digest_md5_hex");
 
     if matches!(args[0], Value::Null) {
         return Ok(Value::Null);
@@ -584,12 +511,7 @@ pub fn digest_md5_hex(args: &[Value]) -> Result<Value> {
 }
 
 pub fn time(args: &[Value]) -> Result<Value> {
-    if !args.is_empty() {
-        return Err(ExecutionError::FunctionError(format!(
-            "time: expected 0 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_no_args!(args, "time");
 
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -601,14 +523,9 @@ pub fn time(args: &[Value]) -> Result<Value> {
 }
 
 pub fn http_time(args: &[Value]) -> Result<Value> {
-    if args.len() > 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "http_time: expected 0-1 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "http_time");
 
-    let secs = if args.is_empty() || matches!(args[0], Value::Null) {
+    let secs = if matches!(args[0], Value::Null) {
         Utc::now().timestamp()
     } else {
         i64::from(parse_i32("http_time", &args[0])?)
@@ -622,12 +539,7 @@ pub fn http_time(args: &[Value]) -> Result<Value> {
 }
 
 pub fn strftime(args: &[Value]) -> Result<Value> {
-    if args.len() != 2 {
-        return Err(ExecutionError::FunctionError(format!(
-            "strftime: expected 2 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 2, "strftime");
 
     let secs = match &args[0] {
         Value::Null => Utc::now().timestamp(),
@@ -670,12 +582,7 @@ pub fn last_rand(args: &[Value], ctx: &EvalContext) -> Result<Value> {
 }
 
 pub fn bin_int(args: &[Value]) -> Result<Value> {
-    if args.len() != 1 {
-        return Err(ExecutionError::FunctionError(format!(
-            "bin_int: expected 1 argument, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 1, "bin_int");
 
     let Value::Integer(value) = args[0] else {
         return Err(ExecutionError::FunctionError(
@@ -688,12 +595,7 @@ pub fn bin_int(args: &[Value]) -> Result<Value> {
 }
 
 pub fn substr(args: &[Value]) -> Result<Value> {
-    if args.len() < 2 || args.len() > 3 {
-        return Err(ExecutionError::FunctionError(format!(
-            "substr: expected 2-3 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args_range!(args, 2, 3, "substr");
 
     if matches!(args[0], Value::Null) {
         return Ok(Value::Null);
@@ -762,12 +664,7 @@ pub fn substr(args: &[Value]) -> Result<Value> {
 }
 
 pub fn add_header(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
-    if args.len() != 2 {
-        return Err(ExecutionError::FunctionError(format!(
-            "add_header: expected 2 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 2, "add_header");
 
     let name = args[0].as_cow_str().into_owned();
     let value = args[1].as_cow_str().into_owned();
@@ -777,11 +674,7 @@ pub fn add_header(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
 }
 
 pub fn string_split(args: &[Value]) -> Result<Value> {
-    if args.is_empty() || args.len() > 3 {
-        return Err(ExecutionError::FunctionError(
-            "wrong number of arguments to 'string_split'".to_string(),
-        ));
-    }
+    validate_args_range!(args, 1, 3, "string_split");
 
     let source = args[0].as_cow_str().into_owned();
     let sep = match args.get(1) {
@@ -845,12 +738,7 @@ pub fn string_split(args: &[Value]) -> Result<Value> {
 }
 
 pub fn join(args: &[Value]) -> Result<Value> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(ExecutionError::FunctionError(format!(
-            "join: expected 1-2 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args_range!(args, 1, 2, "join");
 
     let sep = match args.get(1) {
         None | Some(Value::Null) => " ".to_string(),
@@ -876,12 +764,7 @@ pub fn join(args: &[Value]) -> Result<Value> {
 }
 
 pub fn list_delitem(args: &[Value]) -> Result<Value> {
-    if args.len() != 2 {
-        return Err(ExecutionError::FunctionError(format!(
-            "list_delitem: expected 2 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args!(args, 2, "list_delitem");
 
     let list = match &args[0] {
         Value::List(items) => items,
@@ -912,12 +795,7 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
 }
 
 pub fn replace(args: &[Value]) -> Result<Value> {
-    if args.len() < 3 || args.len() > 4 {
-        return Err(ExecutionError::FunctionError(format!(
-            "replace: expected 3-4 arguments, got {}",
-            args.len()
-        )));
-    }
+    validate_args_range!(args, 3, 4, "replace");
     let Value::Text(haystack) = &args[0] else {
         return Err(ExecutionError::FunctionError(
             "incorrect haystack passed to 'replace'".to_string(),
@@ -1660,7 +1538,7 @@ mod tests {
 
     #[test]
     fn test_http_time() {
-        match http_time(&[]) {
+        match http_time(&[Value::Null]) {
             Ok(Value::Text(s)) => {
                 let trimmed = String::from_utf8_lossy(&s).trim().to_string();
                 assert!(trimmed.ends_with("GMT"));

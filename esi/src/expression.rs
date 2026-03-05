@@ -181,14 +181,12 @@ fn eval_comparison(
             let pattern = right_val.as_cow_str();
 
             let re = if *operator == Operator::Matches {
-                RegexBuilder::new(pattern.as_ref()).build()?
+                RegexBuilder::new(&pattern).build()?
             } else {
-                RegexBuilder::new(pattern.as_ref())
-                    .case_insensitive(true)
-                    .build()?
+                RegexBuilder::new(&pattern).case_insensitive(true).build()?
             };
 
-            if let Some(captures) = re.captures(test.as_ref()) {
+            if let Some(captures) = re.captures(&test) {
                 let match_name = ctx.match_name.clone();
                 let mut idx_buf = String::new();
                 for (i, cap) in captures.iter().enumerate() {
@@ -206,51 +204,55 @@ fn eval_comparison(
             }
         }
         Operator::Has => {
-            let haystack = left_val.as_cow_str();
-            let needle = right_val.as_cow_str();
-            Ok(Value::Boolean(haystack.contains(needle.as_ref())))
+            let haystack: &str = &left_val.as_cow_str();
+            let needle: &str = &right_val.as_cow_str();
+            Ok(Value::Boolean(haystack.contains(needle)))
         }
         Operator::HasInsensitive => {
-            let haystack = left_val.as_cow_str().to_lowercase();
-            let needle = right_val.as_cow_str().to_lowercase();
-            Ok(Value::Boolean(haystack.contains(&needle)))
+            let haystack: String = left_val.as_cow_str().to_lowercase();
+            let needle: &str = &right_val.as_cow_str().to_lowercase();
+            Ok(Value::Boolean(haystack.as_str().contains(needle)))
         }
         Operator::Equals => match (left_val, right_val) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l == r)),
             (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l == r)),
             _ => Ok(Value::Boolean(
-                left_val.to_string() == right_val.to_string(),
+                left_val.as_cow_str() == right_val.as_cow_str(),
             )),
         },
         Operator::NotEquals => match (left_val, right_val) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l != r)),
             (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l != r)),
             _ => Ok(Value::Boolean(
-                left_val.to_string() != right_val.to_string(),
+                left_val.as_cow_str() != right_val.as_cow_str(),
             )),
         },
         Operator::LessThan => match (left_val, right_val) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l < r)),
             (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l < r)),
-            _ => Ok(Value::Boolean(left_val.to_string() < right_val.to_string())),
+            _ => Ok(Value::Boolean(
+                left_val.as_cow_str() < right_val.as_cow_str(),
+            )),
         },
         Operator::LessThanOrEqual => match (left_val, right_val) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l <= r)),
             (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l <= r)),
             _ => Ok(Value::Boolean(
-                left_val.to_string() <= right_val.to_string(),
+                left_val.as_cow_str() <= right_val.as_cow_str(),
             )),
         },
         Operator::GreaterThan => match (left_val, right_val) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l > r)),
             (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l > r)),
-            _ => Ok(Value::Boolean(left_val.to_string() > right_val.to_string())),
+            _ => Ok(Value::Boolean(
+                left_val.as_cow_str() > right_val.as_cow_str(),
+            )),
         },
         Operator::GreaterThanOrEqual => match (left_val, right_val) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l >= r)),
             (Value::Text(l), Value::Text(r)) => Ok(Value::Boolean(l >= r)),
             _ => Ok(Value::Boolean(
-                left_val.to_string() >= right_val.to_string(),
+                left_val.as_cow_str() >= right_val.as_cow_str(),
             )),
         },
         Operator::And => Ok(Value::Boolean(left_val.to_bool() && right_val.to_bool())),
