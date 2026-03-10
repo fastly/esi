@@ -286,9 +286,7 @@ fn test_parse_param_value_with_variable_expression() {
 
     // Check what the param value looks like
     let include_found = elements.iter().find_map(|element| {
-        if let esi::Element::Esi(esi::Tag::Include { attrs, .. }) =
-            element
-        {
+        if let esi::Element::Esi(esi::Tag::Include { attrs, .. }) = element {
             Some(&attrs.params)
         } else {
             None
@@ -402,12 +400,9 @@ fn test_parse_nested_try() {
 
             // Check outer attempt contains nested Try
             let has_nested_try = attempt_events.iter().any(|attempt_elements| {
-                attempt_elements.iter().any(|c| {
-                    matches!(
-                        c,
-                        esi::Element::Esi(esi::Tag::Try { .. })
-                    )
-                })
+                attempt_elements
+                    .iter()
+                    .any(|c| matches!(c, esi::Element::Esi(esi::Tag::Try { .. })))
             });
 
             // Check outer except contains /xyz
@@ -443,8 +438,7 @@ fn test_parse_assign() {
         {
             // Value is now a pre-parsed Expr
             // "bar" (not a valid ESI expression) becomes Expr::String(Some(ref s)) if s == "bar"
-            *name == "foo"
-                && matches!(value, esi::Expr::String(Some(ref s)) if s == "bar")
+            *name == "foo" && matches!(value, esi::Expr::String(Some(ref s)) if s == "bar")
         } else {
             false
         }
@@ -489,10 +483,14 @@ fn test_parse_assign_short_with_variable() {
     assert_eq!(remaining, b"");
 
     let assign_found = elements.iter().any(|element| {
-        if let esi::Element::Esi(
-            esi::Tag::Assign { name, subscript: _, value }
-        ) = element {
-            *name == "copy" && matches!(value, esi::Expr::Variable(ref n, None, None) if n == "HTTP_HOST")
+        if let esi::Element::Esi(esi::Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = element
+        {
+            *name == "copy"
+                && matches!(value, esi::Expr::Variable(ref n, None, None) if n == "HTTP_HOST")
         } else {
             false
         }
@@ -510,9 +508,12 @@ fn test_parse_assign_short_with_quoted_string() {
     assert_eq!(remaining, b"");
 
     let assign_found = elements.iter().any(|element| {
-        if let esi::Element::Esi(
-            esi::Tag::Assign { name, subscript: _, value }
-        ) = element {
+        if let esi::Element::Esi(esi::Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = element
+        {
             *name == "text" && matches!(value, esi::Expr::String(Some(ref s)) if s == "hello world")
         } else {
             false
@@ -557,10 +558,14 @@ fn test_parse_assign_long_with_variable() {
     assert_eq!(remaining, b"");
 
     let assign_found = elements.iter().any(|element| {
-        if let esi::Element::Esi(
-            esi::Tag::Assign { name, subscript: _, value }
-        ) = element {
-            *name == "host" && matches!(value, esi::Expr::Variable(ref n, None, None) if n == "HTTP_HOST")
+        if let esi::Element::Esi(esi::Tag::Assign {
+            name,
+            subscript: _,
+            value,
+        }) = element
+        {
+            *name == "host"
+                && matches!(value, esi::Expr::Variable(ref n, None, None) if n == "HTTP_HOST")
         } else {
             false
         }
@@ -584,8 +589,7 @@ fn test_parse_assign_with_function() {
             value,
         }) = element
         {
-            *name == "result"
-                && matches!(value, esi::Expr::Call(ref n, _) if n == "url_encode")
+            *name == "result" && matches!(value, esi::Expr::Call(ref n, _) if n == "url_encode")
         } else {
             false
         }
@@ -618,28 +622,26 @@ fn test_parse_assign_long_with_interpolation() {
                         return false;
                     }
                     // Check first element is Text("Hello ")
-                    let first_ok =
-                        if let esi::Element::Content(ref bytes) = elements[0] {
-                            &bytes[..] == b"Hello "
-                        } else {
-                            false
-                        };
-                    // Check second element is Variable("name", None, None)
-                    let second_ok = if let esi::Element::Expr(
-                        esi::Expr::Variable(ref n, None, None),
-                    ) = &elements[1]
-                    {
-                        n == "name"
+                    let first_ok = if let esi::Element::Content(ref bytes) = elements[0] {
+                        &bytes[..] == b"Hello "
                     } else {
                         false
                     };
-                    // Check third element is Text("!")
-                    let third_ok =
-                        if let esi::Element::Content(ref bytes) = elements[2] {
-                            &bytes[..] == b"!"
+                    // Check second element is Variable("name", None, None)
+                    let second_ok =
+                        if let esi::Element::Expr(esi::Expr::Variable(ref n, None, None)) =
+                            &elements[1]
+                        {
+                            n == "name"
                         } else {
                             false
                         };
+                    // Check third element is Text("!")
+                    let third_ok = if let esi::Element::Content(ref bytes) = elements[2] {
+                        &bytes[..] == b"!"
+                    } else {
+                        false
+                    };
                     first_ok && second_ok && third_ok
                 } else {
                     false
@@ -698,12 +700,7 @@ fn test_parse_vars_short_form() {
 
     // Short form vars should produce an expression element
     let var_found = elements.iter().any(|element| {
-        if let esi::Element::Expr(esi::Expr::Variable(
-            ref n,
-            None,
-            None,
-        )) = element
-        {
+        if let esi::Element::Expr(esi::Expr::Variable(ref n, None, None)) = element {
             n == "foo"
         } else {
             false
@@ -726,12 +723,7 @@ fn test_parse_vars_long_form() {
 
     // Long form vars should produce an expression element
     let var_found = elements.iter().any(|element| {
-        if let esi::Element::Expr(esi::Expr::Variable(
-            ref n,
-            None,
-            None,
-        )) = element
-        {
+        if let esi::Element::Expr(esi::Expr::Variable(ref n, None, None)) = element {
             n == "foo"
         } else {
             false
@@ -772,10 +764,7 @@ fn test_parse_choose_when_otherwise() {
             // Verify the new WhenBranch structure
             if let Some(first_when) = when_branches.first() {
                 // Test is now a pre-parsed Expr, so we check it's a Variable expression
-                assert!(matches!(
-                    first_when.test,
-                    esi::Expr::Variable(..)
-                ));
+                assert!(matches!(first_when.test, esi::Expr::Variable(..)));
                 assert!(first_when.match_name.is_none());
                 assert!(!first_when.content.is_empty());
             }
@@ -894,12 +883,7 @@ fn test_parse_comment() {
     // esi:comment should not produce any elements
     let comment_count = elements
         .iter()
-        .filter(|element| {
-            matches!(
-                element,
-                esi::Element::Esi(esi::Tag::Vars { .. })
-            )
-        })
+        .filter(|element| matches!(element, esi::Element::Esi(esi::Tag::Vars { .. })))
         .count();
 
     assert_eq!(comment_count, 0, "Comments should not produce elements");
@@ -949,15 +933,9 @@ fn test_parse_mixed_content() {
     assert_eq!(remaining, b"");
 
     // Should have HTML, expressions, ESI tags, and text
-    let has_html = elements
-        .iter()
-        .any(|c| matches!(c, esi::Element::Html(_)));
-    let has_expr = elements
-        .iter()
-        .any(|c| matches!(c, esi::Element::Expr(_)));
-    let has_esi = elements
-        .iter()
-        .any(|c| matches!(c, esi::Element::Esi(_)));
+    let has_html = elements.iter().any(|c| matches!(c, esi::Element::Html(_)));
+    let has_expr = elements.iter().any(|c| matches!(c, esi::Element::Expr(_)));
+    let has_esi = elements.iter().any(|c| matches!(c, esi::Element::Esi(_)));
     let has_text = elements
         .iter()
         .any(|c| matches!(c, esi::Element::Content(_)));
@@ -981,12 +959,9 @@ fn test_parse_include_with_esi_attributes() {
             // Just verify that we got some elements
             assert!(!elements.is_empty(), "Should have parsed some elements");
             // Check that at least one is an Include tag
-            let has_include = elements.iter().any(|e| {
-                matches!(
-                    e,
-                    esi::Element::Esi(esi::Tag::Include { .. })
-                )
-            });
+            let has_include = elements
+                .iter()
+                .any(|e| matches!(e, esi::Element::Esi(esi::Tag::Include { .. })));
             assert!(has_include, "Should have an Include tag");
         }
         Err(e) => {

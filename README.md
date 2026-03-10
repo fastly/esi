@@ -226,8 +226,8 @@ The following variables are available in ESI expressions:
 let config = esi::Configuration::default()
     .with_escaped(true)                      // unescape HTML entities in URLs (default: true)
     .with_chunk_size(32768)                  // streaming read buffer, in bytes (default: 16384)
-    .with_function_recursion_depth(10)   // max depth for user-defined function calls (default: 5)
-    .with_caching(esi::cache::CacheConfig {
+    .with_function_recursion_depth(10)       // max depth for user-defined function calls (default: 10)
+    .with_caching(esi::CacheConfig {
         is_rendered_cacheable: true,
         rendered_cache_control: true,
         rendered_ttl: Some(600),

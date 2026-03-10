@@ -69,7 +69,7 @@ Tests ESI expression parsing performance:
 - Variables with keys (e.g., `$(HTTP_COOKIE{name})`)
 - Variables with defaults
 - Comparison operators (==, !=, >, <, >=, <=)
-- Logical operators (&&, ||)
+- Logical operators (&, |)
 - Negation (!)
 - Grouped expressions with parentheses
 - Complex nested expressions

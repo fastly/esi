@@ -146,14 +146,14 @@ fn benchmark_nom_parser_features(c: &mut Criterion) {
             "expression_comparison",
             r#"<esi:choose>
                 <esi:when test="$(count) > 10">High</esi:when>
-                <esi:when test="$(count) <= 10 && $(count) >= 5">Medium</esi:when>
+                <esi:when test="$(count) <= 10 & $(count) >= 5">Medium</esi:when>
                 <esi:otherwise>Low</esi:otherwise>
             </esi:choose>"#,
         ),
         (
             "expression_logical",
             r#"<esi:choose>
-                <esi:when test="($(role) == 'admin') || ($(role) == 'moderator')">Access granted</esi:when>
+                <esi:when test="($(role) == 'admin') | ($(role) == 'moderator')">Access granted</esi:when>
                 <esi:otherwise>Access denied</esi:otherwise>
             </esi:choose>"#,
         ),
@@ -239,13 +239,13 @@ fn benchmark_expression_parsing(c: &mut Criterion) {
         ("comparison_ne", "$(status) != 'error'"),
         ("comparison_gt", "$(value) > 100"),
         ("comparison_lte", "$(score) <= 50"),
-        ("logical_and", "$(a) == 1 && $(b) == 2"),
-        ("logical_or", "$(x) == 'yes' || $(y) == 'no'"),
+        ("logical_and", "$(a) == 1 & $(b) == 2"),
+        ("logical_or", "$(x) == 'yes' | $(y) == 'no'"),
         ("negation", "!($(flag))"),
-        ("grouped", "($(a) == 1) && ($(b) == 2)"),
+        ("grouped", "($(a) == 1) & ($(b) == 2)"),
         (
             "complex",
-            "(($(role) == 'admin') || ($(role) == 'mod')) && $(active) != false",
+            "(($(role) == 'admin') | ($(role) == 'mod')) & $(active) != false",
         ),
         ("function_call", "$url_encode($(path))"),
         ("nested_function", "$base64_encode($url_encode($(text)))"),

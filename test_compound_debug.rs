@@ -5,7 +5,7 @@ fn main() {
     // Test case: Cookie exists but doesn't match pattern
     let input = r#"
         <esi:choose>
-            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) || !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
+            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) | !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
                 when branch
             </esi:when>
             <esi:otherwise>

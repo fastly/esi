@@ -314,6 +314,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     // Phase 1: Process fragment in ISOLATED context
                     // Reborrow before the exclusive borrow of self.processor below
                     let dispatcher = self.dispatch_fragment_request;
+                    let resp_handler = self.fragment_response_handler;
                     let mut isolated_processor = Processor::new(
                         Some(self.processor.ctx.get_request().clone_without_body()),
                         self.processor.configuration.clone(),
@@ -325,7 +326,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                             processor: &mut isolated_processor,
                             output: &mut isolated_output,
                             dispatch_fragment_request: dispatcher,
-                            fragment_response_handler: None,
+                            fragment_response_handler: resp_handler,
                         };
                         for element in elements {
                             isolated_handler.process(&element)?;
@@ -335,7 +336,11 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
 
                     // Drain any includes dispatched during Phase 1 (e.g. <esi:include> inside the eval'd fragment).
                     // Must happen before we read isolated_output, while isolated_handler has already dropped.
-                    isolated_processor.drain_queue(&mut isolated_output, dispatcher, None)?;
+                    isolated_processor.drain_queue(
+                        &mut isolated_output,
+                        dispatcher,
+                        resp_handler,
+                    )?;
 
                     // Phase 2: Parse the isolated output as ESI and process in PARENT's context
                     // This is why variables don't leak: they only exist in phase 1
@@ -429,6 +434,20 @@ impl Processor {
     /// response headers, status code, and body overrides set by ESI functions.
     pub const fn context(&self) -> &EvalContext {
         &self.ctx
+    }
+
+    /// Return the error for failed fragment requests.
+    ///
+    /// For HTML content (`is_escaped_content = true`) an HTML comment is inserted
+    /// so that the failure is visible in the rendered document.  For non-HTML
+    /// content (JSON, XML, …) nothing is emitted to avoid polluting the output
+    /// with HTML comment syntax.
+    fn fragment_req_failed(&self) -> &'static [u8] {
+        if self.configuration.is_escaped_content {
+            FRAGMENT_REQUEST_FAILED
+        } else {
+            b""
+        }
     }
 
     /// Process a response body as an ESI document. Consumes the response body.
@@ -846,7 +865,7 @@ impl Processor {
                     dispatcher(alt_req_without_body, metadata.maxwait).map_or_else(
                         |_| {
                             Ok(QueuedElement::Content(Bytes::from_static(
-                                FRAGMENT_REQUEST_FAILED,
+                                self.fragment_req_failed(),
                             )))
                         },
                         //
@@ -862,7 +881,7 @@ impl Processor {
                     )
                 } else {
                     Ok(QueuedElement::Content(Bytes::from_static(
-                        FRAGMENT_REQUEST_FAILED,
+                        self.fragment_req_failed(),
                     )))
                 }
             }
@@ -1519,6 +1538,7 @@ impl Processor {
                 fragment.metadata.dca,
                 output_writer,
                 dispatch_fragment_request,
+                process_fragment_response,
             )?;
             Ok(())
         } else if let Some(alt_src) = fragment.alt_bytes {
@@ -1548,11 +1568,12 @@ impl Processor {
                         fragment.metadata.dca,
                         output_writer,
                         dispatch_fragment_request,
+                        process_fragment_response,
                     )?;
                     Ok(())
                 }
                 Err(_) if continue_on_error => {
-                    output_writer.write_all(FRAGMENT_REQUEST_FAILED)?;
+                    output_writer.write_all(self.fragment_req_failed())?;
                     Ok(())
                 }
                 Err(_) => Err(ESIError::ExpressionError(
@@ -1560,7 +1581,7 @@ impl Processor {
                 )),
             }
         } else if continue_on_error {
-            output_writer.write_all(FRAGMENT_REQUEST_FAILED)?;
+            output_writer.write_all(self.fragment_req_failed())?;
             Ok(())
         } else {
             Err(ESIError::ExpressionError(format!(
@@ -1579,6 +1600,7 @@ impl Processor {
         dca_mode: DcaMode,
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
         if dca_mode == DcaMode::Esi {
             // Parse and process the content as ESI
@@ -1600,7 +1622,7 @@ impl Processor {
                 processor: self,
                 output: output_writer,
                 dispatch_fragment_request: dispatcher,
-                fragment_response_handler: None,
+                fragment_response_handler: process_fragment_response,
             };
             for element in elements {
                 if matches!(handler.process(&element)?, Flow::Break) {
@@ -1616,6 +1638,7 @@ impl Processor {
 }
 
 /// Placeholder HTML comment written when a fragment could not be fetched and `onerror="continue"`.
+/// Only emitted for HTML content (when `is_escaped_content` is true).
 const FRAGMENT_REQUEST_FAILED: &[u8] = b"<!-- fragment request failed -->";
 
 /// Evaluate an [`Expr`] to a [`Bytes`] value.

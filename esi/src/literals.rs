@@ -20,6 +20,7 @@ pub const UNDERSCORE: u8 = b'_';
 pub const HYPHEN: u8 = b'-';
 pub const DOLLAR: u8 = b'$';
 pub const EXCLAMATION: u8 = b'!';
+pub const BACKSLASH: u8 = b'\\';
 
 // ============================================================================
 // Tag & Bracket Delimiters
@@ -143,8 +144,8 @@ pub const OP_EQUALS_COMP: &[u8] = b"==";
 pub const OP_NOT_EQUALS: &[u8] = b"!=";
 pub const OP_LESS_EQUAL: &[u8] = b"<=";
 pub const OP_GREATER_EQUAL: &[u8] = b">=";
-pub const OP_AND: &[u8] = b"&&";
-pub const OP_OR: &[u8] = b"||";
+pub const OP_AND: &[u8] = b"&";
+pub const OP_OR: &[u8] = b"|";
 
 // String Operators
 pub const OP_MATCHES_I: &[u8] = b"matches_i";

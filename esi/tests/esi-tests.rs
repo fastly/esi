@@ -1590,7 +1590,7 @@ fn test_compound_expression_from_spec() {
     // Test case 1: Cookie doesn't exist - should go to when branch
     let input1 = r#"
         <esi:choose>
-            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) || !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
+            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) | !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
                 some file
             </esi:when>
             <esi:otherwise>
@@ -1615,7 +1615,7 @@ fn test_compound_expression_from_spec() {
     // Test case 2: Cookie exists with matching pattern - should go to otherwise
     let input2 = r#"
         <esi:choose>
-            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) || !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
+            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) | !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
                 some file
             </esi:when>
             <esi:otherwise>
@@ -1640,7 +1640,7 @@ fn test_compound_expression_from_spec() {
     // Test case 3: Cookie exists but doesn't match pattern - should go to when branch
     let input3 = r#"
         <esi:choose>
-            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) || !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
+            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) | !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
                 some file
             </esi:when>
             <esi:otherwise>
@@ -1665,7 +1665,7 @@ fn test_compound_expression_from_spec() {
     // Test case 4: Cookie exists with empty value - should go to when branch (doesn't exist)
     let input4 = r#"
         <esi:choose>
-            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) || !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
+            <esi:when test="!$exists($(HTTP_COOKIE{'UserInfo'})) | !($(HTTP_COOKIE{'UserInfo'}) matches '''UserId=[0-9]''')">
                 some file
             </esi:when>
             <esi:otherwise>

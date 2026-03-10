@@ -78,6 +78,22 @@ pub fn eval_expr(expr: &Expr, ctx: &mut EvalContext) -> Result<Value> {
             operator,
             right,
         } => {
+            // Short-circuit evaluation for logical operators per ESI spec
+            if *operator == Operator::And {
+                let left_val = eval_expr(left, ctx)?;
+                if !left_val.to_bool() {
+                    return Ok(Value::Boolean(false));
+                }
+                return Ok(Value::Boolean(eval_expr(right, ctx)?.to_bool()));
+            }
+            if *operator == Operator::Or {
+                let left_val = eval_expr(left, ctx)?;
+                if left_val.to_bool() {
+                    return Ok(Value::Boolean(true));
+                }
+                return Ok(Value::Boolean(eval_expr(right, ctx)?.to_bool()));
+            }
+
             let left_val = eval_expr(left, ctx)?;
             let right_val = eval_expr(right, ctx)?;
             eval_comparison(&left_val, &right_val, operator, ctx)
@@ -255,13 +271,22 @@ fn eval_comparison(
                 left_val.as_cow_str() >= right_val.as_cow_str(),
             )),
         },
-        Operator::And => Ok(Value::Boolean(left_val.to_bool() && right_val.to_bool())),
-        Operator::Or => Ok(Value::Boolean(left_val.to_bool() || right_val.to_bool())),
+        Operator::And | Operator::Or => {
+            // Short-circuit handled in eval_expr; this branch is unreachable
+            unreachable!("And/Or are short-circuit evaluated in eval_expr")
+        }
         // Arithmetic operators
         Operator::Add => {
             // Try numeric addition first, then string concatenation
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                Ok(Value::Integer(l + r))
+                l.checked_add(*r).map_or_else(
+                    || {
+                        Err(ExecutionError::ExpressionError(
+                            "Integer overflow in addition".to_string(),
+                        ))
+                    },
+                    |result| Ok(Value::Integer(result)),
+                )
             } else {
                 // String/list concatenation
                 let result = format!("{left_val}{right_val}");
@@ -270,7 +295,14 @@ fn eval_comparison(
         }
         Operator::Subtract => {
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                Ok(Value::Integer(l - r))
+                l.checked_sub(*r).map_or_else(
+                    || {
+                        Err(ExecutionError::ExpressionError(
+                            "Integer overflow in subtraction".to_string(),
+                        ))
+                    },
+                    |result| Ok(Value::Integer(result)),
+                )
             } else {
                 Err(ExecutionError::ExpressionError(
                     "Subtraction requires numeric operands".to_string(),
@@ -279,7 +311,14 @@ fn eval_comparison(
         }
         Operator::Multiply => {
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                Ok(Value::Integer(l * r))
+                l.checked_mul(*r).map_or_else(
+                    || {
+                        Err(ExecutionError::ExpressionError(
+                            "Integer overflow in multiplication".to_string(),
+                        ))
+                    },
+                    |result| Ok(Value::Integer(result)),
+                )
             } else {
                 // Could implement string repetition here (e.g., 3 * "abc" = "abcabcabc")
                 Err(ExecutionError::ExpressionError(
@@ -1583,12 +1622,12 @@ mod tests {
     fn test_logical_operators_with_parentheses() {
         let mut ctx = EvalContext::new();
 
-        // Test (1==1)||('abc'=='def')
-        let result = evaluate_expression("(1==1)||('abc'=='def')", &mut ctx).unwrap();
+        // Test (1==1)|('abc'=='def')
+        let result = evaluate_expression("(1==1)|('abc'=='def')", &mut ctx).unwrap();
         assert_eq!(result.to_string(), "true");
 
-        // Test (4!=5)&&(4==5)
-        let result = evaluate_expression("(4!=5)&&(4==5)", &mut ctx).unwrap();
+        // Test (4!=5)&(4==5)
+        let result = evaluate_expression("(4!=5)&(4==5)", &mut ctx).unwrap();
         assert_eq!(result.to_string(), "false");
     }
     #[test]
@@ -1617,11 +1656,11 @@ mod tests {
         );
         // Test complex logical expressions with parentheses
         assert_eq!(
-            evaluate_expression("!((1==1)&&(2==2))", &mut ctx)?,
+            evaluate_expression("!((1==1)&(2==2))", &mut ctx)?,
             Value::Boolean(false)
         );
         assert_eq!(
-            evaluate_expression("(!(1==1))||(!(2!=2))", &mut ctx)?,
+            evaluate_expression("(!(1==1))|(!(2!=2))", &mut ctx)?,
             Value::Boolean(true)
         );
 
@@ -1717,10 +1756,10 @@ mod tests {
         assert_eq!(result.to_bool(), false);
 
         // Empty in logical expressions
-        let result = evaluate_expression("'' && 'something'", &mut EvalContext::new())?;
+        let result = evaluate_expression("'' & 'something'", &mut EvalContext::new())?;
         assert_eq!(result, Value::Boolean(false));
 
-        let result = evaluate_expression("'' || 'something'", &mut EvalContext::new())?;
+        let result = evaluate_expression("'' | 'something'", &mut EvalContext::new())?;
         assert_eq!(result, Value::Boolean(true));
 
         // Zero evaluates to false (per to_bool implementation)
@@ -2039,6 +2078,77 @@ mod tests {
         let result = ctx.get_variable("ARGS", Some("1"));
         assert_eq!(result, Value::Integer(20));
 
+        Ok(())
+    }
+
+    // --- Tests for checked arithmetic (integer overflow protection) ---
+
+    #[test]
+    fn test_integer_overflow_add() {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression(&format!("{} + 1", i64::MAX), ctx);
+        assert!(result.is_err(), "i64::MAX + 1 should overflow");
+    }
+
+    #[test]
+    fn test_integer_overflow_sub() {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression(&format!("{} - 1", i64::MIN), ctx);
+        assert!(result.is_err(), "i64::MIN - 1 should overflow");
+    }
+
+    #[test]
+    fn test_integer_overflow_mul() {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression(&format!("{} * 2", i64::MAX), ctx);
+        assert!(result.is_err(), "i64::MAX * 2 should overflow");
+    }
+
+    #[test]
+    fn test_integer_no_overflow() -> Result<()> {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression("100 + 200", ctx)?;
+        assert_eq!(result, Value::Integer(300));
+        let result = evaluate_expression("100 - 200", ctx)?;
+        assert_eq!(result, Value::Integer(-100));
+        let result = evaluate_expression("100 * 200", ctx)?;
+        assert_eq!(result, Value::Integer(20000));
+        Ok(())
+    }
+
+    // --- Tests for short-circuit And/Or ---
+
+    #[test]
+    fn test_short_circuit_and_false() -> Result<()> {
+        // 0 (false) & anything — should short-circuit
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression("0 & 1", ctx)?;
+        assert_eq!(result, Value::Boolean(false));
+        Ok(())
+    }
+
+    #[test]
+    fn test_short_circuit_or_true() -> Result<()> {
+        // 1 (true) | anything — should short-circuit
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression("1 | 0", ctx)?;
+        assert_eq!(result, Value::Boolean(true));
+        Ok(())
+    }
+
+    #[test]
+    fn test_and_both_true() -> Result<()> {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression("1 & 1", ctx)?;
+        assert_eq!(result, Value::Boolean(true));
+        Ok(())
+    }
+
+    #[test]
+    fn test_or_both_false() -> Result<()> {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression("0 | 0", ctx)?;
+        assert_eq!(result, Value::Boolean(false));
         Ok(())
     }
 }

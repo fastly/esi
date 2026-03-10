@@ -171,9 +171,10 @@ pub trait ElementHandler {
         subscript: Option<&Expr>,
         value: &Expr,
     ) -> Result<Flow> {
-        // Evaluate right-hand side; on error use empty string (ESI leniency)
-        let val = eval_expr(value, self.ctx()).unwrap_or(Value::Text("".into()));
+        // Propage the error if evaluation fails
+        let val = eval_expr(value, self.ctx())?;
 
+        // If there's a subscript, this is an assignment to an existing collection item
         if let Some(subscript_expr) = subscript {
             // Subscript assignment: modify existing collection
             if let Ok(subscript_val) = eval_expr(subscript_expr, self.ctx()) {

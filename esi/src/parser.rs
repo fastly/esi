@@ -201,7 +201,7 @@ fn interpolated_text<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    streaming_bytes::take_while1(|c| !is_open_bracket(c) && !is_dollar(c))
+    streaming_bytes::take_while1(|c| !is_open_bracket(c) && !is_dollar(c) && c != BACKSLASH)
         .map(|s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))))
         .parse(input)
 }
@@ -211,7 +211,7 @@ fn interpolated_text_complete<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
-    take_while1(|c| !is_open_bracket(c) && !is_dollar(c))
+    take_while1(|c| !is_open_bracket(c) && !is_dollar(c) && c != BACKSLASH)
         .map(|s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))))
         .parse(input)
 }
@@ -227,6 +227,9 @@ pub fn interpolated_content(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error
     let mut rest = input.as_ref();
     loop {
         if let Ok((r, item)) = interpolated_expression(rest) {
+            item.append_to(&mut acc);
+            rest = r;
+        } else if let Ok((r, item)) = esi_escape_complete(input, rest) {
             item.append_to(&mut acc);
             rest = r;
         } else if let Ok((r, item)) = interpolated_text_complete(input, rest) {
@@ -270,10 +273,11 @@ fn interpolated_element<'a>(
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     // Fast path: check the first byte to decide which parser to call.
-    // interpolated_text stops at '<' or '$', so the first byte here is one of those
-    // (or we're at the start of content). If it's '<', skip interpolated_expression entirely.
+    // interpolated_text stops at '<', '$', or '\', so the first byte here
+    // is one of those (or we're at the start of content).
     match input.first() {
         Some(&OPEN_BRACKET) => tag_handler(original, input),
+        Some(&BACKSLASH) => esi_escape(original, input),
         Some(&DOLLAR) => alt((interpolated_expression, |i| tag_handler(original, i))).parse(input),
         _ => alt((
             |i| interpolated_text(original, i),
@@ -908,6 +912,13 @@ fn parse_content_complete(original: &Bytes, content: &[u8]) -> Vec<Element> {
     let mut remaining = content;
 
     while !remaining.is_empty() {
+        // Try backslash escape first
+        if let Ok((rest, result)) = esi_escape_complete(original, remaining) {
+            result.append_to(&mut elements);
+            remaining = rest;
+            continue;
+        }
+
         // Try expression first (starts with $)
         if let Ok((rest, result)) = interpolated_expression(remaining) {
             result.append_to(&mut elements);
@@ -915,7 +926,7 @@ fn parse_content_complete(original: &Bytes, content: &[u8]) -> Vec<Element> {
             continue;
         }
 
-        // Try text (stops at $) — reuses interpolated_text_complete
+        // Try text (stops at $, \) — reuses interpolated_text_complete
         if let Ok((rest, result)) = interpolated_text_complete(original, remaining) {
             result.append_to(&mut elements);
             remaining = rest;
@@ -1551,15 +1562,77 @@ fn not_dollar_or_curlies(input: &[u8]) -> IResult<&[u8], Bytes, Error<&[u8]>> {
     .parse(input)
 }
 
-// TODO: handle escaping
+/// Parse the body of a single-quoted string, handling backslash escapes.
+/// `\X` → literal X for any character (including `\\` → `\` and `\'` → `'`).
+/// Returns the unescaped bytes as a Vec.
+fn escaped_string_content(input: &[u8]) -> IResult<&[u8], Vec<u8>, Error<&[u8]>> {
+    let mut result = Vec::new();
+    let mut remaining = input;
+    loop {
+        // Consume bytes until we hit a single-quote or backslash
+        let (rest, chunk) =
+            take_while(|c: u8| c != SINGLE_QUOTE && c != BACKSLASH).parse(remaining)?;
+        result.extend_from_slice(chunk);
+        if rest.is_empty() || rest[0] == SINGLE_QUOTE {
+            return Ok((rest, result));
+        }
+        // rest[0] == BACKSLASH
+        if rest.len() < 2 {
+            // Trailing backslash with no following char — treat as literal
+            result.push(BACKSLASH);
+            return Ok((&rest[1..], result));
+        }
+        // Push the escaped character (whatever follows the backslash)
+        result.push(rest[1]);
+        remaining = &rest[2..];
+    }
+}
+
+/// Streaming backslash-escape parser for interpolated content.
+/// Consumes `\X` and emits the byte after `\` as Content.
+fn esi_escape<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    use nom::error::ErrorKind;
+    if input.is_empty() {
+        return Err(nom::Err::Incomplete(nom::Needed::new(2)));
+    }
+    if input[0] != BACKSLASH {
+        return Err(nom::Err::Error(Error::new(input, ErrorKind::Tag)));
+    }
+    if input.len() < 2 {
+        return Err(nom::Err::Incomplete(nom::Needed::new(1)));
+    }
+    // Emit the byte after `\` as Content (zero-copy from original)
+    let escaped_byte = &input[1..2];
+    Ok((
+        &input[2..],
+        ParseResult::Single(Element::Content(slice_as_bytes(original, escaped_byte))),
+    ))
+}
+
+/// Complete-mode backslash-escape parser for attribute values and esi:assign bodies.
+fn esi_escape_complete<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    use nom::error::ErrorKind;
+    if input.len() < 2 || input[0] != BACKSLASH {
+        return Err(nom::Err::Error(Error::new(input, ErrorKind::Tag)));
+    }
+    let escaped_byte = &input[1..2];
+    Ok((
+        &input[2..],
+        ParseResult::Single(Element::Content(slice_as_bytes(original, escaped_byte))),
+    ))
+}
+
 fn single_quoted_string(input: &[u8]) -> IResult<&[u8], Bytes, Error<&[u8]>> {
-    delimited(
-        tag(&[SINGLE_QUOTE] as &[u8]),
-        take_while(|c| !is_single_quote(c)),
-        tag(&[SINGLE_QUOTE] as &[u8]),
-    )
-    .map(Bytes::copy_from_slice)
-    .parse(input)
+    let (input, _) = tag(&[SINGLE_QUOTE] as &[u8]).parse(input)?;
+    let (input, content) = escaped_string_content(input)?;
+    let (input, _) = tag(&[SINGLE_QUOTE] as &[u8]).parse(input)?;
+    Ok((input, Bytes::from(content)))
 }
 fn triple_quoted_string(input: &[u8]) -> IResult<&[u8], Bytes, Error<&[u8]>> {
     delimited(
@@ -2286,7 +2359,7 @@ exception!
     #[test]
     fn test_parse_logical_operators() {
         // With parentheses to enforce correct precedence
-        let input = b"($(foo) == 'bar') && ($(baz) == 'qux')";
+        let input = b"($(foo) == 'bar') & ($(baz) == 'qux')";
         let (rest, result) = expr(input).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(
@@ -2297,7 +2370,7 @@ exception!
             }
         ));
 
-        let input2 = b"($(foo) == 'bar') || ($(baz) == 'qux')";
+        let input2 = b"($(foo) == 'bar') | ($(baz) == 'qux')";
         let (rest, result) = expr(input2).unwrap();
         assert_eq!(rest.len(), 0);
         assert!(matches!(
@@ -2788,12 +2861,12 @@ exception!
     #[test]
     fn test_left_to_right_evaluation() {
         // Test 1: Left-to-right evaluation per ESI spec
-        // $(a) && $(b) || $(c) should parse as ($(a) && $(b)) || $(c)
-        let input = b"$(a) && $(b) || $(c)";
+        // $(a) & $(b) | $(c) should parse as ($(a) & $(b)) | $(c)
+        let input = b"$(a) & $(b) | $(c)";
         let result = expr(input);
         assert!(
             result.is_ok(),
-            "Failed to parse '$(a) && $(b) || $(c)': {:?}",
+            "Failed to parse '$(a) & $(b) | $(c)': {:?}",
             result
         );
         let (rest, parsed) = result.unwrap();
@@ -2806,7 +2879,7 @@ exception!
                 left,
                 right,
             } => {
-                // Left should be: $(a) && $(b) (evaluated first, left-to-right)
+                // Left should be: $(a) & $(b) (evaluated first, left-to-right)
                 match *left {
                     Expr::Comparison {
                         operator: Operator::And,
@@ -2823,10 +2896,10 @@ exception!
             _ => panic!("Expected OR at top level, got {:?}", parsed),
         }
 
-        // Test 2: $(a) || $(b) && $(c) should parse as ($(a) || $(b)) && $(c) [left-to-right]
-        let input = b"$(a) || $(b) && $(c)";
+        // Test 2: $(a) | $(b) & $(c) should parse as ($(a) | $(b)) & $(c) [left-to-right]
+        let input = b"$(a) | $(b) & $(c)";
         let result = expr(input);
-        assert!(result.is_ok(), "Failed to parse '$(a) || $(b) && $(c)'");
+        assert!(result.is_ok(), "Failed to parse '$(a) | $(b) & $(c)'");
         let (rest, parsed) = result.unwrap();
         assert_eq!(rest, b"");
 
@@ -2837,7 +2910,7 @@ exception!
                 left,
                 right,
             } => {
-                // Left should be: $(a) || $(b) (evaluated first)
+                // Left should be: $(a) | $(b) (evaluated first)
                 match *left {
                     Expr::Comparison {
                         operator: Operator::Or,
@@ -2855,10 +2928,10 @@ exception!
         }
 
         // Test 3: Unary NOT binds tighter than binary operators
-        // !$(a) && $(b) should parse as (!$(a)) && $(b)
-        let input = b"!$(a) && $(b)";
+        // !$(a) & $(b) should parse as (!$(a)) & $(b)
+        let input = b"!$(a) & $(b)";
         let result = expr(input);
-        assert!(result.is_ok(), "Failed to parse '!$(a) && $(b)'");
+        assert!(result.is_ok(), "Failed to parse '!$(a) & $(b)'");
         let (rest, parsed) = result.unwrap();
         assert_eq!(rest, b"");
 
@@ -2884,10 +2957,10 @@ exception!
         }
 
         // Test 4: Left-to-right with multiple operators
-        // $(a) == $(b) || $(c) should parse as ($(a) == $(b)) || $(c)
-        let input = b"$(a) == $(b) || $(c)";
+        // $(a) == $(b) | $(c) should parse as ($(a) == $(b)) | $(c)
+        let input = b"$(a) == $(b) | $(c)";
         let result = expr(input);
-        assert!(result.is_ok(), "Failed to parse '$(a) == $(b) || $(c)'");
+        assert!(result.is_ok(), "Failed to parse '$(a) == $(b) | $(c)'");
         let (rest, parsed) = result.unwrap();
         assert_eq!(rest, b"");
 
@@ -2916,10 +2989,10 @@ exception!
         }
 
         // Test 5: Parentheses override left-to-right evaluation
-        // $(a) && ($(b) || $(c)) should respect the parentheses
-        let input = b"$(a) && ($(b) || $(c))";
+        // $(a) & ($(b) | $(c)) should respect the parentheses
+        let input = b"$(a) & ($(b) | $(c))";
         let result = expr(input);
-        assert!(result.is_ok(), "Failed to parse '$(a) && ($(b) || $(c))'");
+        assert!(result.is_ok(), "Failed to parse '$(a) & ($(b) | $(c))'");
         let (rest, parsed) = result.unwrap();
         assert_eq!(rest, b"");
 
@@ -2935,7 +3008,7 @@ exception!
                     Expr::Variable(name, None, None) if name == "a" => {}
                     _ => panic!("Expected variable 'a' on left side, got {:?}", left),
                 }
-                // Right should be: $(b) || $(c) (grouped by parentheses)
+                // Right should be: $(b) | $(c) (grouped by parentheses)
                 match *right {
                     Expr::Comparison {
                         operator: Operator::Or,
@@ -3126,5 +3199,118 @@ exception!
             }
             _ => panic!("Expected GREATER_THAN at top level, got {:?}", parsed),
         }
+    }
+
+    // --- Backslash escape tests ---
+
+    #[test]
+    fn test_single_quoted_string_escape_quote() {
+        // 'it\'s' should parse as: it's
+        let input = br"'it\'s'";
+        let (rest, result) = single_quoted_string(input).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(result.as_ref(), b"it's");
+    }
+
+    #[test]
+    fn test_single_quoted_string_escape_backslash() {
+        // 'a\\b' should parse as: a\b
+        let input = br"'a\\b'";
+        let (rest, result) = single_quoted_string(input).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(result.as_ref(), b"a\\b");
+    }
+
+    #[test]
+    fn test_single_quoted_string_escape_arbitrary() {
+        // 'a\nb' — \n is not a special sequence, just literal n
+        let input = br"'a\nb'";
+        let (rest, result) = single_quoted_string(input).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(result.as_ref(), b"anb");
+    }
+
+    #[test]
+    fn test_single_quoted_string_no_escapes() {
+        let input = b"'hello'";
+        let (rest, result) = single_quoted_string(input).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(result.as_ref(), b"hello");
+    }
+
+    #[test]
+    fn test_interpolated_content_escape() {
+        // Backslash escape in attribute value: hello\<world → hello<world
+        let input_bytes = Bytes::from_static(br"hello\<world");
+        let (rest, elements) = interpolated_content(&input_bytes).unwrap();
+        assert!(
+            rest.is_empty(),
+            "remaining: {:?}",
+            String::from_utf8_lossy(rest)
+        );
+        // Should have: Content("hello"), Content("<"), Content("world")
+        let text: Vec<u8> = elements
+            .iter()
+            .filter_map(|e| match e {
+                Element::Content(b) => Some(b.as_ref().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(text, b"hello<world");
+    }
+
+    #[test]
+    fn test_interpolated_content_escape_backslash() {
+        // \\\\ in source → two backslashes: \\
+        let input_bytes = Bytes::from_static(br"a\\b");
+        let (rest, elements) = interpolated_content(&input_bytes).unwrap();
+        assert!(rest.is_empty());
+        let text: Vec<u8> = elements
+            .iter()
+            .filter_map(|e| match e {
+                Element::Content(b) => Some(b.as_ref().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(text, b"a\\b");
+    }
+
+    #[test]
+    fn test_interpolated_content_escape_dollar() {
+        // \$ should produce literal $, not start a variable
+        let input_bytes = Bytes::from_static(br"\$notavar");
+        let (rest, elements) = interpolated_content(&input_bytes).unwrap();
+        assert!(
+            rest.is_empty(),
+            "remaining: {:?}",
+            String::from_utf8_lossy(rest)
+        );
+        let text: Vec<u8> = elements
+            .iter()
+            .filter_map(|e| match e {
+                Element::Content(b) => Some(b.as_ref().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(text, b"$notavar");
+    }
+
+    #[test]
+    fn test_parse_content_complete_backslash_escape() {
+        // Test backslash escaping in esi:assign body context
+        let input_bytes = Bytes::from_static(br"hello\$world");
+        let elements = parse_content_complete(&input_bytes, input_bytes.as_ref());
+        let text: Vec<u8> = elements
+            .iter()
+            .filter_map(|e| match e {
+                Element::Content(b) => Some(b.as_ref().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(text, b"hello$world");
     }
 }
