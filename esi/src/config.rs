@@ -5,7 +5,7 @@ use crate::cache::CacheConfig;
 /// ## Usage Example
 /// ```rust,no_run
 /// let config = esi::Configuration::default()
-///     .with_caching(esi::cache::CacheConfig {
+///     .with_caching(esi::CacheConfig {
 ///         is_rendered_cacheable: true,
 ///         rendered_cache_control: true,
 ///         rendered_ttl: Some(600),

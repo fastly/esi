@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-pub mod cache;
+pub(crate) mod cache;
 mod config;
 mod element_handler;
 mod error;
@@ -8,11 +8,11 @@ mod expression;
 mod functions;
 mod literals;
 mod parser;
-pub mod parser_types;
+pub(crate) mod parser_types;
 
 use crate::element_handler::{ElementHandler, Flow};
 use crate::expression::EvalContext;
-use crate::parser_types::{DcaMode, Element, Expr, IncludeAttributes};
+use crate::parser_types::{DcaMode, IncludeAttributes};
 use bytes::{Bytes, BytesMut};
 use fastly::http::request::{select, PendingRequest};
 use fastly::http::{header, Method, StatusCode, Url};
@@ -26,8 +26,10 @@ use std::time::Duration;
 pub use crate::error::{ExecutionError as ESIError, Result};
 pub use crate::parser::{interpolated_content, parse, parse_expression, parse_remainder};
 
+pub use crate::cache::CacheConfig;
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;
+pub use crate::parser_types::{Element, Expr, Tag};
 
 type FragmentRequestDispatcher = dyn Fn(Request, Option<u32>) -> Result<PendingFragmentContent>;
 

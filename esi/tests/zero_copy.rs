@@ -2,10 +2,7 @@
 // These tests verify that parse_complete() works correctly with esi:try, esi:choose, esi:remove
 
 use bytes::Bytes;
-use esi::{
-    parse_remainder,
-    parser_types::{Element, Tag},
-};
+use esi::{parse_remainder, Element, Tag};
 
 #[test]
 fn test_zero_copy_esi_try() {
