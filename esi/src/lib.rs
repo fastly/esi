@@ -13,6 +13,8 @@ pub(crate) mod parser_types;
 use crate::element_handler::{ElementHandler, Flow};
 use crate::expression::EvalContext;
 use crate::parser_types::{DcaMode, IncludeAttributes};
+#[cfg(not(feature = "expose-internals"))]
+use crate::parser_types::{Element, Expr};
 use bytes::{Bytes, BytesMut};
 use fastly::http::request::{select, PendingRequest};
 use fastly::http::{header, Method, StatusCode, Url};
@@ -24,11 +26,15 @@ use std::io::{BufRead, Write};
 use std::time::Duration;
 
 pub use crate::error::{ExecutionError as ESIError, Result};
-pub use crate::parser::{interpolated_content, parse, parse_expression, parse_remainder};
+#[cfg(feature = "expose-internals")]
+pub use crate::parser::parse;
+#[cfg(feature = "expose-internals")]
+pub use crate::parser::{interpolated_content, parse_expression, parse_remainder};
 
 pub use crate::cache::CacheConfig;
 pub use crate::config::Configuration;
 pub use crate::error::ExecutionError;
+#[cfg(feature = "expose-internals")]
 pub use crate::parser_types::{Element, Expr, Tag};
 
 type FragmentRequestDispatcher = dyn Fn(Request, Option<u32>) -> Result<PendingFragmentContent>;
@@ -442,7 +448,7 @@ impl Processor {
     /// so that the failure is visible in the rendered document.  For non-HTML
     /// content (JSON, XML, …) nothing is emitted to avoid polluting the output
     /// with HTML comment syntax.
-    fn fragment_req_failed(&self) -> &'static [u8] {
+    const fn fragment_req_failed(&self) -> &'static [u8] {
         if self.configuration.is_escaped_content {
             FRAGMENT_REQUEST_FAILED
         } else {

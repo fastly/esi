@@ -49,50 +49,125 @@ pub struct WhenBranch {
     pub content: Vec<Element>,
 }
 
+/// A parsed ESI tag.
+///
+/// Each variant corresponds to an ESI processing instruction that was
+/// recognised by the parser.  After parsing, the executor walks a tree of
+/// [`Element`]s and dispatches on these variants to perform fetches,
+/// evaluate conditions, iterate collections, and so on.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Tag {
+    /// `<esi:include src="…" />` – fetch a fragment and insert it into the
+    /// response.  Supports fallback URLs, caching directives, custom
+    /// headers, and POST bodies via [`IncludeAttributes`].
     Include {
-        /// All include tag attributes (including params)
+        /// All include tag attributes (including child `<esi:param>` elements).
         attrs: IncludeAttributes,
     },
+
+    /// `<esi:eval src="…" />` – fetch a fragment **and** recursively
+    /// process it for ESI instructions before inserting it.
+    /// Uses the same attribute set as `Include`.
     Eval {
-        /// All eval tag attributes (same as include but no alt)
+        /// All eval tag attributes (same shape as include).
         attrs: IncludeAttributes,
     },
+
+    /// `<esi:try>` – wrap an attempt/except pair so that fetch errors
+    /// in the attempt block can be caught and replaced by the except
+    /// block.
+    ///
+    /// `attempt_events` is a `Vec<Vec<Element>>` because the attempt
+    /// may contain multiple independent include pipelines that are
+    /// evaluated concurrently.
     Try {
+        /// Content trees for each pipeline inside the `<esi:attempt>` block.
         attempt_events: Vec<Vec<Element>>,
+        /// Fallback content rendered when the attempt fails.
         except_events: Vec<Element>,
     },
+
+    /// `<esi:assign name="…">…</esi:assign>` – bind a variable in the
+    /// current scope.  The value is an expression (possibly interpolated
+    /// from the tag body).  An optional `subscript` sets a single key
+    /// inside a dictionary variable.
     Assign {
+        /// Variable name to assign to.
         name: String,
+        /// Optional dictionary key (e.g. `name{key}`).
         subscript: Option<Expr>,
+        /// Expression that produces the value to store.
         value: Expr,
     },
+
+    /// `<esi:vars>…</esi:vars>` – evaluate ESI expressions in the
+    /// enclosed text and emit the result.  An optional `name` attribute
+    /// stores the result into a variable instead of emitting it.
     Vars {
+        /// If present, the evaluated output is stored in this variable
+        /// rather than written to the response.
         name: Option<String>,
     },
+
+    /// A single `<esi:when test="…">` branch inside a `<esi:choose>`.
+    /// Only used as an intermediate parse artifact before being folded
+    /// into [`Tag::Choose`].
     When {
+        /// The raw test expression string.
         test: String,
+        /// Optional regex match capture name.
         match_name: Option<String>,
     },
+
+    /// `<esi:choose>` – conditional logic.  The executor evaluates each
+    /// `when` branch in order and renders the first whose test is truthy,
+    /// falling back to the `otherwise` block if none match.
     Choose {
+        /// Ordered list of `when` branches with their tests and content.
         when_branches: Vec<WhenBranch>,
+        /// Content rendered when no `when` branch matches.
         otherwise_events: Vec<Element>,
     },
+
+    /// Intermediate representation of an `<esi:attempt>` block.
+    /// Folded into [`Tag::Try`] during tree construction.
     Attempt(Vec<Element>),
+
+    /// Intermediate representation of an `<esi:except>` block.
+    /// Folded into [`Tag::Try`] during tree construction.
     Except(Vec<Element>),
+
+    /// Intermediate representation of an `<esi:otherwise>` block.
+    /// Folded into [`Tag::Choose`] during tree construction.
     Otherwise,
+
+    /// `<esi:foreach collection="…" item="…">…</esi:foreach>` – iterate
+    /// over a list or dictionary, rendering the body once per element.
     Foreach {
+        /// Expression that evaluates to the collection to iterate.
         collection: Expr,
+        /// Loop variable name (defaults to `"item"` when absent).
         item: Option<String>,
+        /// Body content rendered for each iteration.
         content: Vec<Element>,
     },
+
+    /// `<esi:break />` – exit the innermost `foreach` loop early.
     Break,
+
+    /// `<esi:function name="…">…</esi:function>` – define a named
+    /// callable function whose body is a list of ESI elements.
     Function {
+        /// Function name, callable via `$name(…)` expressions.
         name: String,
+        /// The function body executed on each call.
         body: Vec<Element>,
     },
+
+    /// `<esi:return value="…" />` – return a value from the current
+    /// function.
     Return {
+        /// Expression whose result becomes the function's return value.
         value: Expr,
     },
 }

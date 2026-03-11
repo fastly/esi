@@ -8,6 +8,9 @@ description = "A streaming parser and executor for Edge Side Includes"
 repository = "https://github.com/fastly/esi"
 readme = "./README.md"
 
+[features]
+expose-internals = []
+
 [dependencies]
 thiserror = "2.0.6"
 fastly = "^0.11"
@@ -27,9 +30,16 @@ chrono = { version = "0.4", default-features = false, features = [
 rand = "0.10.0"
 
 [dev-dependencies]
+esi = { path = ".", features = ["expose-internals"] }
 env_logger = "^0.11"
 criterion = { version = "0.5", default-features = false }
 
 [[bench]]
 name = "parser_benchmarks"
 harness = false
+required-features = ["expose-internals"]
+
+[[bench]]
+name = "interpolated_text_bench"
+harness = false
+required-features = ["expose-internals"]

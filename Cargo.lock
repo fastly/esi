@@ -393,6 +393,7 @@ dependencies = [
  "chrono",
  "criterion",
  "env_logger",
+ "esi",
  "fastly",
  "html-escape",
  "log",
