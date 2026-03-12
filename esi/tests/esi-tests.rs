@@ -631,9 +631,7 @@ fn test_process_fragment_response_on_alt() {
         |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
             if req.get_url_str().contains("/main") {
                 // Main request fails
-                Err(esi::ExecutionError::ExpressionError(
-                    "main failed".to_string(),
-                ))
+                Err(esi::ESIError::FragmentRequestError("main failed".into()))
             } else {
                 // Alt request succeeds
                 Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
@@ -704,8 +702,8 @@ fn test_process_fragment_response_error_handling() {
     // Response processor that returns an error
     let processor_callback =
         |_req: &mut Request, _resp: fastly::Response| -> esi::Result<fastly::Response> {
-            Err(esi::ExecutionError::ExpressionError(
-                "processing failed".to_string(),
+            Err(esi::ESIError::FragmentRequestError(
+                "processing failed".into(),
             ))
         };
 
@@ -757,9 +755,7 @@ fn test_alt_url_with_interpolation() {
         move |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
             if req.get_url_str().contains("/main") {
                 // Main request fails
-                Err(esi::ExecutionError::ExpressionError(
-                    "main failed".to_string(),
-                ))
+                Err(esi::ESIError::FragmentRequestError("main failed".into()))
             } else {
                 // Alt request succeeds - capture the URL
                 *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();
@@ -818,9 +814,7 @@ fn test_alt_url_with_function_interpolation() {
         move |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
             if req.get_url_str().contains("/main") {
                 // Main request fails
-                Err(esi::ExecutionError::ExpressionError(
-                    "main failed".to_string(),
-                ))
+                Err(esi::ESIError::FragmentRequestError("main failed".into()))
             } else {
                 // Alt request succeeds - capture the URL
                 *captured_alt_url_clone.borrow_mut() = req.get_url_str().to_string();

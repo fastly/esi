@@ -25,7 +25,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
-pub use crate::error::{ExecutionError as ESIError, Result};
+pub use crate::error::{ESIError, Result};
 #[cfg(feature = "expose-internals")]
 pub use crate::parser::parse;
 #[cfg(feature = "expose-internals")]
@@ -33,7 +33,6 @@ pub use crate::parser::{interpolated_content, parse_expression, parse_remainder}
 
 pub use crate::cache::CacheConfig;
 pub use crate::config::Configuration;
-pub use crate::error::ExecutionError;
 #[cfg(feature = "expose-internals")]
 pub use crate::parser_types::{Element, Expr, Tag};
 
@@ -176,7 +175,7 @@ impl PendingFragmentContent {
     pub fn wait(self) -> Result<Response> {
         match self {
             Self::PendingRequest(pending_request) => pending_request.wait().map_err(|e| {
-                ESIError::ExpressionError(format!("Fragment request wait failed: {e}"))
+                ESIError::FragmentRequestError(format!("fragment request wait failed: {e}"))
             }),
             Self::CompletedRequest(response) => Ok(*response),
             Self::NoContent => Ok(Response::from_status(StatusCode::NO_CONTENT)),
@@ -294,10 +293,10 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                         // Per ESI spec: onerror="continue" deletes the tag with no output
                         return Ok(Flow::Continue);
                     }
-                    return Err(ExecutionError::ExpressionError(format!(
-                        "Eval request failed with status: {}",
-                        response.get_status()
-                    )));
+                    return Err(ESIError::UnexpectedStatus {
+                        url: "eval".to_string(),
+                        status: response.get_status().as_u16(),
+                    });
                 }
 
                 // Get the response body
@@ -306,12 +305,12 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
 
                 // ALWAYS parse as ESI (this is the key difference from include)
                 let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
-                    ExecutionError::ExpressionError(format!("Failed to parse eval fragment: {e}"))
+                    ESIError::ParseError(format!("failed to parse eval fragment: {e}"))
                 })?;
 
                 if !rest.is_empty() {
-                    return Err(ExecutionError::ExpressionError(
-                        "Incomplete parse of eval fragment".to_string(),
+                    return Err(ESIError::ParseError(
+                        "incomplete parse of eval fragment".into(),
                     ));
                 }
 
@@ -353,14 +352,14 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     let isolated_bytes = Bytes::from(isolated_output);
                     let (rest, output_elements) = parser::parse_remainder(&isolated_bytes)
                         .map_err(|e| {
-                            ExecutionError::ExpressionError(format!(
-                                "Failed to parse eval isolated output: {e}",
+                            ESIError::ParseError(format!(
+                                "failed to parse eval isolated output: {e}",
                             ))
                         })?;
 
                     if !rest.is_empty() {
-                        return Err(ExecutionError::ExpressionError(
-                            "Incomplete parse of eval isolated output".to_string(),
+                        return Err(ESIError::ParseError(
+                            "incomplete parse of eval isolated output".into(),
                         ));
                     }
 
@@ -523,7 +522,7 @@ impl Processor {
     ///     Some(&default_fragment_dispatcher),
     ///     None
     /// )?;
-    /// # Ok::<(), esi::ExecutionError>(())
+    /// # Ok::<(), esi::ESIError>(())
     /// ```
     ///
     /// # Errors
@@ -568,7 +567,7 @@ impl Processor {
 
         if let Some(status) = self.ctx.response_status() {
             let status_code = StatusCode::from_u16(status as u16).map_err(|_| {
-                ExecutionError::FunctionError("set_response_code: invalid status code".to_string())
+                ESIError::FunctionError("set_response_code: invalid status code".to_string())
             })?;
             resp.set_status(status_code);
         }
@@ -633,12 +632,11 @@ impl Processor {
         loop {
             iterations += 1;
             if iterations > MAX_ITERATIONS {
-                return Err(ESIError::ExpressionError(format!(
-                    "Infinite loop detected after {} iterations, buffer len: {}, eof: {}",
+                return Err(ESIError::InfiniteLoop {
                     iterations,
-                    buffer.len(),
-                    eof
-                )));
+                    buffer_len: buffer.len(),
+                    eof,
+                });
             }
             // Read more data if we haven't hit EOF yet
             if !eof {
@@ -729,7 +727,7 @@ impl Processor {
                     // Parse error
                     if eof {
                         // At EOF with parse error - this is a real error
-                        return Err(ESIError::ExpressionError(format!("Parser error: {e:?}")));
+                        return Err(ESIError::ParseError(format!("parser error: {e:?}")));
                     }
                     // Not at EOF - maybe more data will help, output what we have and continue
                     output_writer.write_all(&buffer)?;
@@ -891,8 +889,8 @@ impl Processor {
                     )))
                 }
             }
-            Err(e) => Err(ESIError::ExpressionError(format!(
-                "Fragment dispatch failed: {e}"
+            Err(e) => Err(ESIError::FragmentRequestError(format!(
+                "fragment dispatch failed: {e}"
             ))),
         }
     }
@@ -1236,9 +1234,9 @@ impl Processor {
                         .get_backend_request()
                         .map(Self::make_request_key)
                         .ok_or_else(|| {
-                            ESIError::ExpressionError(
+                            ESIError::InternalError(
                                 "drain_queue: response missing backend request for correlation"
-                                    .to_string(),
+                                    .into(),
                             )
                         })?;
                     (
@@ -1266,7 +1264,7 @@ impl Processor {
                 .get_mut(&key)
                 .and_then(VecDeque::pop_front)
                 .ok_or_else(|| {
-                    ESIError::ExpressionError(format!(
+                    ESIError::InternalError(format!(
                         "drain_queue: no in-flight fragment for {}/{}",
                         key.method, key.url
                     ))
@@ -1342,8 +1340,8 @@ impl Processor {
                     next_out += 1;
                 }
                 None => {
-                    return Err(ESIError::ExpressionError(
-                        "drain_queue: slot still pending after all requests resolved".to_string(),
+                    return Err(ESIError::InternalError(
+                        "drain_queue: slot still pending after all requests resolved".into(),
                     ));
                 }
             }
@@ -1582,16 +1580,16 @@ impl Processor {
                     output_writer.write_all(self.fragment_req_failed())?;
                     Ok(())
                 }
-                Err(_) => Err(ESIError::ExpressionError(
-                    "Both main and alt failed".to_string(),
+                Err(_) => Err(ESIError::FragmentRequestError(
+                    "both main and alt failed".into(),
                 )),
             }
         } else if continue_on_error {
             output_writer.write_all(self.fragment_req_failed())?;
             Ok(())
         } else {
-            Err(ESIError::ExpressionError(format!(
-                "Fragment request failed with status: {}",
+            Err(ESIError::FragmentRequestError(format!(
+                "fragment request failed with status: {}",
                 final_response.get_status()
             )))
         }
@@ -1612,14 +1610,12 @@ impl Processor {
             // Parse and process the content as ESI
             let body_as_bytes = Bytes::from(body_bytes);
             let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
-                ExecutionError::ExpressionError(format!(
-                    "Failed to parse fragment with dca=esi: {e}",
-                ))
+                ESIError::ParseError(format!("failed to parse fragment with dca=esi: {e}",))
             })?;
 
             if !rest.is_empty() {
-                return Err(ExecutionError::ExpressionError(
-                    "Incomplete parse of fragment with dca=esi".to_string(),
+                return Err(ESIError::ParseError(
+                    "incomplete parse of fragment with dca=esi".into(),
                 ));
             }
 
@@ -1682,7 +1678,7 @@ fn default_fragment_dispatcher(
 
     let backend = builder
         .finish()
-        .map_err(|e| ExecutionError::ExpressionError(format!("Failed to create backend: {e}")))?;
+        .map_err(|e| ESIError::FragmentRequestError(format!("failed to create backend: {e}")))?;
 
     let pending_req = req.send_async(backend)?;
     Ok(PendingFragmentContent::PendingRequest(Box::new(
@@ -1701,7 +1697,7 @@ fn build_fragment_request(
 ) -> Result<Request> {
     // Convert Bytes to str for URL parsing
     let url_str = std::str::from_utf8(url)
-        .map_err(|_| ExecutionError::ExpressionError("Invalid UTF-8 in URL".to_string()))?;
+        .map_err(|_| ESIError::InvalidFragmentConfig("invalid UTF-8 in URL".to_string()))?;
 
     let escaped_url = if config.is_escaped_content {
         Cow::Owned(html_escape::decode_html_entities(url_str).into_owned())
@@ -1718,14 +1714,14 @@ fn build_fragment_request(
                 request.get_url_mut().set_query(u.query());
             }
             Err(_err) => {
-                return Err(ExecutionError::InvalidRequestUrl(escaped_url.into_owned()));
+                return Err(ESIError::InvalidRequestUrl(escaped_url.into_owned()));
             }
         }
     } else {
         request.set_url(match Url::parse(&escaped_url) {
             Ok(url) => url,
             Err(_err) => {
-                return Err(ExecutionError::InvalidRequestUrl(escaped_url.into_owned()));
+                return Err(ESIError::InvalidRequestUrl(escaped_url.into_owned()));
             }
         });
     }
@@ -1737,15 +1733,15 @@ fn build_fragment_request(
     // Set HTTP method (default is GET) - use pre-evaluated value
     if let Some(method_bytes) = &metadata.method {
         let method_str = std::str::from_utf8(method_bytes)
-            .map_err(|_| ExecutionError::ExpressionError("Invalid UTF-8 in method".to_string()))?
+            .map_err(|_| ESIError::InvalidFragmentConfig("invalid UTF-8 in method".to_string()))?
             .to_uppercase();
 
         match method_str.as_str() {
             "GET" => request.set_method(Method::GET),
             "POST" => request.set_method(Method::POST),
             _ => {
-                return Err(ExecutionError::ExpressionError(format!(
-                    "Unsupported HTTP method: {method_str}"
+                return Err(ESIError::InvalidFragmentConfig(format!(
+                    "unsupported HTTP method: {method_str}"
                 )))
             }
         }

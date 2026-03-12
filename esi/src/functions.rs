@@ -1,4 +1,4 @@
-use crate::{expression::EvalContext, expression::Value, ExecutionError, Result};
+use crate::{expression::EvalContext, expression::Value, ESIError, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 macro_rules! validate_args {
     ($args:expr, $expected:expr, $func_name:expr) => {
         if $args.len() != $expected {
-            return Err(ExecutionError::FunctionError(format!(
+            return Err(ESIError::FunctionError(format!(
                 "{}: expected {} argument{}, got {}",
                 $func_name,
                 $expected,
@@ -26,7 +26,7 @@ macro_rules! validate_args {
 macro_rules! validate_no_args {
     ($args:expr, $func_name:expr) => {
         if !$args.is_empty() {
-            return Err(ExecutionError::FunctionError(format!(
+            return Err(ESIError::FunctionError(format!(
                 "{}: expected 0 arguments, got {}",
                 $func_name,
                 $args.len()
@@ -39,7 +39,7 @@ macro_rules! validate_no_args {
 macro_rules! validate_args_range {
     ($args:expr, $min:expr, $max:expr, $func_name:expr) => {
         if $args.len() < $min || $args.len() > $max {
-            return Err(ExecutionError::FunctionError(format!(
+            return Err(ESIError::FunctionError(format!(
                 "{}: expected {}-{} arguments, got {}",
                 $func_name,
                 $min,
@@ -121,7 +121,7 @@ pub fn set_response_code(args: &[Value], ctx: &mut EvalContext) -> Result<Value>
 
     let status = args[0].as_i32("set_response_code")?;
     if !(100..=599).contains(&status) {
-        return Err(ExecutionError::FunctionError(
+        return Err(ESIError::FunctionError(
             "set_response_code: invalid status code".to_string(),
         ));
     }
@@ -288,7 +288,7 @@ pub fn base64_decode(args: &[Value]) -> Result<Value> {
     let input = args[0].as_cow_str();
     let decoded = STANDARD
         .decode(input.as_bytes())
-        .map_err(|_| ExecutionError::FunctionError("base64_decode: invalid base64".to_string()))?;
+        .map_err(|_| ESIError::FunctionError("base64_decode: invalid base64".to_string()))?;
 
     // Try to convert to UTF-8 string, but return raw bytes if it fails
     match String::from_utf8(decoded) {
@@ -311,7 +311,7 @@ pub fn url_decode(args: &[Value]) -> Result<Value> {
     let input = args[0].as_cow_str();
     let decoded = percent_decode_str(&input)
         .decode_utf8()
-        .map_err(|_| ExecutionError::FunctionError("invalid UTF-8 in 'url_decode'".to_string()))?;
+        .map_err(|_| ESIError::FunctionError("invalid UTF-8 in 'url_decode'".to_string()))?;
 
     Ok(Value::Text(Bytes::from(decoded.into_owned())))
 }
@@ -353,7 +353,7 @@ pub fn len(args: &[Value]) -> Result<Value> {
 fn parse_positive_bound(name: &str, v: &Value) -> Result<i32> {
     let n = v.as_i32(name)?;
     if n <= 0 {
-        return Err(ExecutionError::FunctionError(format!(
+        return Err(ESIError::FunctionError(format!(
             "{name}: invalid bound"
         )));
     }
@@ -479,7 +479,7 @@ pub fn time(args: &[Value]) -> Result<Value> {
 
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| ExecutionError::FunctionError("system time before UNIX_EPOCH".to_string()))?
+        .map_err(|_| ESIError::FunctionError("system time before UNIX_EPOCH".to_string()))?
         .as_secs();
 
     let clamped = i32::try_from(secs).unwrap_or(i32::MAX);
@@ -496,7 +496,7 @@ pub fn http_time(args: &[Value]) -> Result<Value> {
     };
 
     let dt = DateTime::<Utc>::from_timestamp(secs, 0)
-        .ok_or_else(|| ExecutionError::FunctionError("http_time: invalid timestamp".to_string()))?;
+        .ok_or_else(|| ESIError::FunctionError("http_time: invalid timestamp".to_string()))?;
 
     let formatted = dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
     Ok(Value::Text(Bytes::from(formatted)))
@@ -513,7 +513,7 @@ pub fn strftime(args: &[Value]) -> Result<Value> {
     let fmt = args[1].as_str("strftime")?;
 
     let dt = DateTime::<Utc>::from_timestamp(secs, 0)
-        .ok_or_else(|| ExecutionError::FunctionError("strftime: invalid timestamp".to_string()))?;
+        .ok_or_else(|| ESIError::FunctionError("strftime: invalid timestamp".to_string()))?;
 
     Ok(Value::Text(Bytes::from(dt.format(fmt).to_string())))
 }
@@ -523,7 +523,7 @@ pub fn rand(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
         0 => 100_000_000i32,
         1 => parse_positive_bound("rand", &args[0])?,
         _ => {
-            return Err(ExecutionError::FunctionError(
+            return Err(ESIError::FunctionError(
                 "rand expects 0 or 1 argument".to_string(),
             ))
         }
@@ -536,7 +536,7 @@ pub fn rand(args: &[Value], ctx: &mut EvalContext) -> Result<Value> {
 
 pub fn last_rand(args: &[Value], ctx: &EvalContext) -> Result<Value> {
     if !args.is_empty() {
-        return Err(ExecutionError::FunctionError(
+        return Err(ESIError::FunctionError(
             "last_rand expects no arguments".to_string(),
         ));
     }
@@ -690,7 +690,7 @@ pub fn join(args: &[Value]) -> Result<Value> {
     };
 
     let Value::List(list_rc) = &args[0] else {
-        return Err(ExecutionError::FunctionError(
+        return Err(ESIError::FunctionError(
             "join expects a list as first argument".to_string(),
         ));
     };
@@ -714,7 +714,7 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
         Value::List(items) => items,
         Value::Null => return Ok(Value::new_list(Vec::new())),
         _ => {
-            return Err(ExecutionError::FunctionError(
+            return Err(ESIError::FunctionError(
                 "list_delitem expects a list as first argument".to_string(),
             ))
         }
@@ -741,17 +741,17 @@ pub fn list_delitem(args: &[Value]) -> Result<Value> {
 pub fn replace(args: &[Value]) -> Result<Value> {
     validate_args_range!(args, 3, 4, "replace");
     let Value::Text(haystack) = &args[0] else {
-        return Err(ExecutionError::FunctionError(
+        return Err(ESIError::FunctionError(
             "incorrect haystack passed to 'replace'".to_string(),
         ));
     };
     let Value::Text(needle) = &args[1] else {
-        return Err(ExecutionError::FunctionError(
+        return Err(ESIError::FunctionError(
             "incorrect needle passed to 'replace'".to_string(),
         ));
     };
     let Value::Text(replacement) = &args[2] else {
-        return Err(ExecutionError::FunctionError(
+        return Err(ESIError::FunctionError(
             "incorrect replacement passed to 'replace'".to_string(),
         ));
     };
@@ -818,7 +818,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("lower: expected 1 argument, got 2".to_string())
+                ESIError::FunctionError("lower: expected 1 argument, got 2".to_string())
                     .to_string()
             ),
         }
@@ -866,7 +866,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "html_encode: expected 1 argument, got 2".to_string()
                 )
                 .to_string()
@@ -890,7 +890,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "html_decode: expected 1 argument, got 2".to_string()
                 )
                 .to_string()
@@ -924,7 +924,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "convert_to_unicode: expected 1 argument, got 0".to_string()
                 )
                 .to_string()
@@ -935,7 +935,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "convert_from_unicode: expected 1 argument, got 2".to_string()
                 )
                 .to_string()
@@ -959,7 +959,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("upper: expected 1 argument, got 0".to_string())
+                ESIError::FunctionError("upper: expected 1 argument, got 0".to_string())
                     .to_string()
             ),
         }
@@ -976,7 +976,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("str: expected 1 argument, got 0".to_string())
+                ESIError::FunctionError("str: expected 1 argument, got 0".to_string())
                     .to_string()
             ),
         }
@@ -993,7 +993,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("dollar: expected 0 arguments, got 1".to_string())
+                ESIError::FunctionError("dollar: expected 0 arguments, got 1".to_string())
                     .to_string()
             ),
         }
@@ -1035,7 +1035,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("strip: expected 1 argument, got 0".to_string())
+                ESIError::FunctionError("strip: expected 1 argument, got 0".to_string())
                     .to_string()
             ),
         }
@@ -1052,7 +1052,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "base64_encode: expected 1 argument, got 0".to_string()
                 )
                 .to_string()
@@ -1091,7 +1091,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "base64_decode: expected 1 argument, got 0".to_string()
                 )
                 .to_string()
@@ -1158,7 +1158,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("exists: expected 1 argument, got 0".to_string())
+                ESIError::FunctionError("exists: expected 1 argument, got 0".to_string())
                     .to_string()
             ),
         }
@@ -1167,7 +1167,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("is_empty: expected 1 argument, got 2".to_string())
+                ESIError::FunctionError("is_empty: expected 1 argument, got 2".to_string())
                     .to_string()
             ),
         }
@@ -1204,7 +1204,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("int: expected 1 argument, got 2".to_string())
+                ESIError::FunctionError("int: expected 1 argument, got 2".to_string())
                     .to_string()
             ),
         }
@@ -1239,7 +1239,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("len: expected 1 argument, got 0".to_string())
+                ESIError::FunctionError("len: expected 1 argument, got 0".to_string())
                     .to_string()
             ),
         }
@@ -1380,7 +1380,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("bin_int: invalid integer".to_string()).to_string()
+                ESIError::FunctionError("bin_int: invalid integer".to_string()).to_string()
             ),
         }
 
@@ -1388,7 +1388,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("bin_int: expected 1 argument, got 0".to_string())
+                ESIError::FunctionError("bin_int: expected 1 argument, got 0".to_string())
                     .to_string()
             ),
         }
@@ -1424,7 +1424,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("digest_md5: expected 1 argument, got 0".to_string())
+                ESIError::FunctionError("digest_md5: expected 1 argument, got 0".to_string())
                     .to_string()
             ),
         }
@@ -1450,7 +1450,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "digest_md5_hex: expected 1 argument, got 0".to_string()
                 )
                 .to_string()
@@ -1469,7 +1469,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("time: expected 0 arguments, got 1".to_string())
+                ESIError::FunctionError("time: expected 0 arguments, got 1".to_string())
                     .to_string()
             ),
         }
@@ -1497,7 +1497,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("http_time: invalid integer".to_string()).to_string()
+                ESIError::FunctionError("http_time: invalid integer".to_string()).to_string()
             ),
         }
     }
@@ -1528,7 +1528,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("strftime: expected 2 arguments, got 1".to_string())
+                ESIError::FunctionError("strftime: expected 2 arguments, got 1".to_string())
                     .to_string()
             ),
         }
@@ -1537,7 +1537,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("strftime: invalid integer".to_string()).to_string()
+                ESIError::FunctionError("strftime: invalid integer".to_string()).to_string()
             ),
         }
 
@@ -1545,7 +1545,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("strftime: invalid string".to_string()).to_string()
+                ESIError::FunctionError("strftime: invalid string".to_string()).to_string()
             ),
         }
     }
@@ -1585,7 +1585,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("rand: invalid bound".to_string()).to_string()
+                ESIError::FunctionError("rand: invalid bound".to_string()).to_string()
             ),
         }
 
@@ -1593,7 +1593,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("last_rand expects no arguments".to_string())
+                ESIError::FunctionError("last_rand expects no arguments".to_string())
                     .to_string()
             ),
         }
@@ -1660,7 +1660,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "add_header: expected 2 arguments, got 1".to_string()
                 )
                 .to_string()
@@ -1749,7 +1749,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("replace: invalid integer".to_string()).to_string()
+                ESIError::FunctionError("replace: invalid integer".to_string()).to_string()
             ),
         };
 
@@ -1760,7 +1760,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("replace: expected 3-4 arguments, got 2".to_string())
+                ESIError::FunctionError("replace: expected 3-4 arguments, got 2".to_string())
                     .to_string()
             ),
         };
@@ -1795,7 +1795,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError("set_response_code: invalid status code".to_string())
+                ESIError::FunctionError("set_response_code: invalid status code".to_string())
                     .to_string()
             ),
         }
@@ -1804,7 +1804,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "set_response_code: expected 1-2 arguments, got 0".to_string()
                 )
                 .to_string()
@@ -1829,7 +1829,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ExecutionError::FunctionError(
+                ESIError::FunctionError(
                     "set_redirect: expected 1 argument, got 2".to_string()
                 )
                 .to_string()

@@ -9,7 +9,7 @@ use crate::{
     functions,
     literals::*,
     parser_types::{Element, Expr, IncludeAttributes, Operator},
-    ExecutionError, Result,
+    ESIError, Result,
 };
 
 /// Registry for user-defined ESI functions
@@ -36,14 +36,14 @@ impl FunctionRegistry {
     }
 }
 
-/// Evaluates a nom-parsed expression directly without re-lexing/parsing
+/// Evaluates a parsed expression directly without re-lexing/parsing
 ///
-/// This function takes an expression that was already parsed by the nom parser
+/// This function takes an expression that was already parsed by the parser
 /// and evaluates it using the full expression evaluator, supporting all operators,
 /// comparisons, and functions.
 ///
 /// # Arguments
-/// * `expr` - The parsed expression from nom parser
+/// * `expr` - The parsed expression from the parser
 /// * `ctx` - Evaluation context containing variables and state
 ///
 /// # Returns
@@ -187,7 +187,7 @@ fn eval_comparison(
                     };
                     Ok(Value::new_list(values))
                 }
-                _ => Err(ExecutionError::ExpressionError(
+                _ => Err(ESIError::ExpressionError(
                     "Range operator (..) requires integer operands".to_string(),
                 )),
             }
@@ -281,7 +281,7 @@ fn eval_comparison(
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
                 l.checked_add(*r).map_or_else(
                     || {
-                        Err(ExecutionError::ExpressionError(
+                        Err(ESIError::ExpressionError(
                             "Integer overflow in addition".to_string(),
                         ))
                     },
@@ -297,14 +297,14 @@ fn eval_comparison(
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
                 l.checked_sub(*r).map_or_else(
                     || {
-                        Err(ExecutionError::ExpressionError(
+                        Err(ESIError::ExpressionError(
                             "Integer overflow in subtraction".to_string(),
                         ))
                     },
                     |result| Ok(Value::Integer(result)),
                 )
             } else {
-                Err(ExecutionError::ExpressionError(
+                Err(ESIError::ExpressionError(
                     "Subtraction requires numeric operands".to_string(),
                 ))
             }
@@ -313,7 +313,7 @@ fn eval_comparison(
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
                 l.checked_mul(*r).map_or_else(
                     || {
-                        Err(ExecutionError::ExpressionError(
+                        Err(ESIError::ExpressionError(
                             "Integer overflow in multiplication".to_string(),
                         ))
                     },
@@ -321,7 +321,7 @@ fn eval_comparison(
                 )
             } else {
                 // Could implement string repetition here (e.g., 3 * "abc" = "abcabcabc")
-                Err(ExecutionError::ExpressionError(
+                Err(ESIError::ExpressionError(
                     "Multiplication requires numeric operands".to_string(),
                 ))
             }
@@ -329,14 +329,12 @@ fn eval_comparison(
         Operator::Divide => {
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
                 if *r == 0 {
-                    Err(ExecutionError::ExpressionError(
-                        "Division by zero".to_string(),
-                    ))
+                    Err(ESIError::ExpressionError("Division by zero".to_string()))
                 } else {
                     Ok(Value::Integer(l / r))
                 }
             } else {
-                Err(ExecutionError::ExpressionError(
+                Err(ESIError::ExpressionError(
                     "Division requires numeric operands".to_string(),
                 ))
             }
@@ -344,14 +342,12 @@ fn eval_comparison(
         Operator::Modulo => {
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
                 if *r == 0 {
-                    Err(ExecutionError::ExpressionError(
-                        "Modulo by zero".to_string(),
-                    ))
+                    Err(ESIError::ExpressionError("Modulo by zero".to_string()))
                 } else {
                     Ok(Value::Integer(l % r))
                 }
             } else {
-                Err(ExecutionError::ExpressionError(
+                Err(ESIError::ExpressionError(
                     "Modulo requires numeric operands".to_string(),
                 ))
             }
@@ -772,7 +768,7 @@ fn set_subvalue(parent: &mut Value, subkey: &str, value: Value) -> Result<()> {
                 let mut items = items.borrow_mut();
                 // For existing lists, index must exist - no auto-expansion
                 if idx >= items.len() {
-                    return Err(ExecutionError::VariableError(format!(
+                    return Err(ESIError::VariableError(format!(
                         "list index {} out of range (list has {} elements)",
                         idx,
                         items.len()
@@ -788,7 +784,7 @@ fn set_subvalue(parent: &mut Value, subkey: &str, value: Value) -> Result<()> {
             }
             _ => {
                 // Per ESI spec: cannot create list on the fly
-                return Err(ExecutionError::VariableError(
+                return Err(ESIError::VariableError(
                     "cannot create list on the fly - list must already exist".to_string(),
                 ));
             }
@@ -803,7 +799,7 @@ fn set_subvalue(parent: &mut Value, subkey: &str, value: Value) -> Result<()> {
         }
         Value::List(_) => {
             // Per ESI spec: cannot assign string key to a list
-            Err(ExecutionError::VariableError(
+            Err(ESIError::VariableError(
                 "cannot assign string key to a list".to_string(),
             ))
         }
@@ -869,11 +865,9 @@ impl Value {
         match self {
             Self::Integer(i) => Ok(*i),
             Self::Text(b) => atoi::atoi::<i32>(b.as_ref().trim_ascii())
-                .ok_or_else(|| ExecutionError::FunctionError(format!("{ctx}: invalid integer"))),
+                .ok_or_else(|| ESIError::FunctionError(format!("{ctx}: invalid integer"))),
             Self::Null => Ok(0),
-            _ => Err(ExecutionError::FunctionError(format!(
-                "{ctx}: invalid integer"
-            ))),
+            _ => Err(ESIError::FunctionError(format!("{ctx}: invalid integer"))),
         }
     }
 
@@ -882,11 +876,9 @@ impl Value {
     pub fn as_str(&self, ctx: &str) -> Result<&str> {
         if let Self::Text(b) = self {
             std::str::from_utf8(b)
-                .map_err(|_| ExecutionError::FunctionError(format!("{ctx}: invalid string")))
+                .map_err(|_| ESIError::FunctionError(format!("{ctx}: invalid string")))
         } else {
-            Err(ExecutionError::FunctionError(format!(
-                "{ctx}: invalid string"
-            )))
+            Err(ESIError::FunctionError(format!("{ctx}: invalid string")))
         }
     }
 
@@ -1010,14 +1002,14 @@ impl ElementHandler for FunctionHandler<'_> {
 
     /// Per ESI spec: `esi:include` is not allowed inside function bodies.
     fn on_include(&mut self, _attrs: &IncludeAttributes) -> Result<Flow> {
-        Err(ExecutionError::FunctionError(
+        Err(ESIError::FunctionError(
             "esi:include is not allowed in function bodies".to_string(),
         ))
     }
 
     /// Per ESI spec: `esi:eval` is not allowed inside function bodies.
     fn on_eval(&mut self, _attrs: &IncludeAttributes) -> Result<Flow> {
-        Err(ExecutionError::FunctionError(
+        Err(ESIError::FunctionError(
             "esi:eval is not allowed in function bodies".to_string(),
         ))
     }
@@ -1035,7 +1027,7 @@ impl ElementHandler for FunctionHandler<'_> {
 
     /// Per ESI spec: nested function definitions are not supported.
     fn on_function(&mut self, _name: String, _body: Vec<Element>) -> Result<Flow> {
-        Err(ExecutionError::FunctionError(
+        Err(ESIError::FunctionError(
             "esi:function is not allowed in function bodies (nested function definitions are not supported)".to_string(),
         ))
     }
@@ -1063,7 +1055,7 @@ fn call_user_function(
 ) -> Result<Value> {
     // Check recursion depth before proceeding
     if ctx.args_stack.len() >= ctx.function_recursion_depth {
-        return Err(ExecutionError::FunctionError(format!(
+        return Err(ESIError::FunctionError(format!(
             "Maximum recursion depth ({}) exceeded for function '{}'",
             ctx.function_recursion_depth, name
         )));
@@ -1148,7 +1140,7 @@ fn call_dispatch(identifier: &str, args: &[Value], ctx: &mut EvalContext) -> Res
         FN_ADD_HEADER => functions::add_header(args, ctx),
         FN_SET_RESPONSE_CODE => functions::set_response_code(args, ctx),
         FN_SET_REDIRECT => functions::set_redirect(args, ctx),
-        _ => Err(ExecutionError::FunctionError(format!(
+        _ => Err(ESIError::FunctionError(format!(
             "unknown function: {identifier}"
         ))),
     }
@@ -1168,13 +1160,10 @@ mod tests {
     // # Returns
     // * `Result<Value>` - The evaluated expression result or an error
     fn evaluate_expression(raw_expr: &str, ctx: &mut EvalContext) -> Result<Value> {
-        let (_, expr) = crate::parser::parse_expression(raw_expr).map_err(|e| {
-            ExecutionError::ExpressionError(format!("Failed to parse expression: {e}"))
-        })?;
+        let (_, expr) = crate::parser::parse_expression(raw_expr)
+            .map_err(|e| ESIError::ParseError(format!("failed to parse expression: {e}")))?;
         eval_expr(&expr, ctx).map_err(|e| {
-            ExecutionError::ExpressionError(format!(
-                "Error occurred during expression evaluation: {e}"
-            ))
+            ESIError::ExpressionError(format!("error occurred during expression evaluation: {e}"))
         })
     }
 

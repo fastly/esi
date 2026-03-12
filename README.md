@@ -334,7 +334,7 @@ use esi::{Processor, Configuration};
 fn process_custom_stream(
     input: impl std::io::Read,
     output: &mut impl Write,
-) -> Result<(), esi::ExecutionError> {
+) -> Result<(), esi::ESIError> {
     let mut processor = Processor::new(None, Configuration::default());
 
     // Process from any readable source

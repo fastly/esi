@@ -1,4 +1,4 @@
-// Parser tests for nom-based ESI parser
+// Parser tests for ESI parser
 // These tests verify that the parser correctly handles ESI tags and produces the expected AST
 
 use bytes::Bytes;
@@ -51,26 +51,25 @@ fn test_parse_include_with_alt_and_onerror() {
     );
 }
 
-// NOTE: The nom parser currently treats all esi:include tags as self-closing
-// Open-close syntax like <esi:include></esi:include> is parsed as two separate tags
-// This test is disabled as it doesn't match current parser behavior
-/*
 #[test]
-fn test_parse_open_include() {
+fn test_parse_open_close_include() {
     let input = br#"<esi:include src="abc" alt="def" onerror="continue"></esi:include>"#;
-    let (remaining, elements) = parse_complete(input).expect("should parse");
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_remainder(&bytes).expect("should parse");
 
     assert_eq!(remaining, b"");
 
     let include_found = elements.iter().any(|element| {
-        matches!(element, esi::Chunk::Esi(
-            esi::Tag::Include { src, alt, continue_on_error, params, .. }
-        ) if src == "abc" && alt == &Some("def".to_string()) && *continue_on_error && params.is_empty())
+        matches!(element, esi::Element::Esi(
+            esi::Tag::Include { attrs, .. }
+        ) if matches!(&attrs.src, esi::Expr::String(Some(s)) if s == "abc")
+            && matches!(&attrs.alt, Some(esi::Expr::String(Some(a))) if a == "def")
+            && attrs.continue_on_error
+            && attrs.params.is_empty())
     });
 
     assert!(include_found, "Should parse open-close include tag");
 }
-*/
 
 #[test]
 fn test_parse_include_with_onerror() {
