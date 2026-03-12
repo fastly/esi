@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use esi::parse_remainder;
+use esi::parse_complete;
 
 fn bench_interpolated_text(c: &mut Criterion) {
     // Test case 1: Plain text without any special characters
@@ -20,25 +20,25 @@ fn bench_interpolated_text(c: &mut Criterion) {
 
     c.bench_function("interpolated_text_plain", |b| {
         b.iter(|| {
-            let _ = parse_remainder(black_box(&plain_text));
+            let _ = parse_complete(black_box(&plain_text));
         })
     });
 
     c.bench_function("interpolated_text_with_dollars", |b| {
         b.iter(|| {
-            let _ = parse_remainder(black_box(&text_with_dollars));
+            let _ = parse_complete(black_box(&text_with_dollars));
         })
     });
 
     c.bench_function("interpolated_text_with_esi", |b| {
         b.iter(|| {
-            let _ = parse_remainder(black_box(&text_with_esi));
+            let _ = parse_complete(black_box(&text_with_esi));
         })
     });
 
     c.bench_function("interpolated_text_mixed", |b| {
         b.iter(|| {
-            let _ = parse_remainder(black_box(&mixed));
+            let _ = parse_complete(black_box(&mixed));
         })
     });
 }

@@ -29,7 +29,7 @@ pub use crate::error::{ESIError, Result};
 #[cfg(feature = "expose-internals")]
 pub use crate::parser::parse;
 #[cfg(feature = "expose-internals")]
-pub use crate::parser::{interpolated_content, parse_expression, parse_remainder};
+pub use crate::parser::{interpolated_content, parse_complete, parse_expression};
 
 pub use crate::cache::CacheConfig;
 pub use crate::config::Configuration;
@@ -304,7 +304,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                 let body_as_bytes = Bytes::from(body_bytes);
 
                 // ALWAYS parse as ESI (this is the key difference from include)
-                let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
+                let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
                     ESIError::ParseError(format!("failed to parse eval fragment: {e}"))
                 })?;
 
@@ -350,8 +350,8 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     // Phase 2: Parse the isolated output as ESI and process in PARENT's context
                     // This is why variables don't leak: they only exist in phase 1
                     let isolated_bytes = Bytes::from(isolated_output);
-                    let (rest, output_elements) = parser::parse_remainder(&isolated_bytes)
-                        .map_err(|e| {
+                    let (rest, output_elements) =
+                        parser::parse_complete(&isolated_bytes).map_err(|e| {
                             ESIError::ParseError(format!(
                                 "failed to parse eval isolated output: {e}",
                             ))
@@ -641,38 +641,24 @@ impl Processor {
             // Read more data if we haven't hit EOF yet
             if !eof {
                 match src_stream.read(&mut read_buf) {
-                    Ok(0) => {
-                        // EOF reached - parser can now make final decisions
-                        eof = true;
-                    }
-                    Ok(n) => {
-                        // Append new data to buffer (zero-copy extend)
-                        buffer.extend_from_slice(&read_buf[..n]);
-                    }
-                    Err(e) => {
-                        return Err(ESIError::WriterError(e));
-                    }
+                    Ok(0) => eof = true,
+                    Ok(n) => buffer.extend_from_slice(&read_buf[..n]),
+                    Err(e) => return Err(ESIError::WriterError(e)),
                 }
             }
 
-            // Create a zero-copy window of the current buffer contents without cloning.
-            // split_off(0) moves the data into a new view while keeping the same backing store.
-            let mut window = buffer.split_off(0);
-            let frozen = window.freeze();
+            // Freeze the current buffer for parsing (shared, ref-counted view)
+            let frozen = buffer.split().freeze();
 
-            // Try to parse what we have in the buffer
-            // Use streaming parser unless we're at EOF, then use complete parser
+            // Use streaming parser unless we're at EOF
             let parse_result = if eof {
-                // At EOF - use complete parser which handles Incomplete by treating remainder as text
-                parser::parse_remainder(&frozen)
+                parser::parse_eof(&frozen)
             } else {
-                // Still streaming - use streaming parser
                 parser::parse(&frozen)
             };
 
             match parse_result {
                 Ok((remaining, elements)) => {
-                    // Successfully parsed some elements
                     let mut handler = DocumentHandler {
                         processor: self,
                         output: output_writer,
@@ -680,53 +666,32 @@ impl Processor {
                         fragment_response_handler: process_fragment_response,
                     };
                     for element in elements {
-                        // Note: breaks at top-level are ignored
                         handler.process(&element)?;
-                        // After each element, check if any queued includes are ready
                         handler.process_queue()?;
                     }
 
-                    // Calculate how many bytes were consumed
-                    let consumed = frozen.len() - remaining.len();
-
-                    // Keep the unparsed remainder for next iteration
-                    if remaining.is_empty() {
-                        if eof {
-                            // All done - parsed everything and reached EOF
-                            break;
-                        }
-                        // Parsed everything in buffer, clear it and continue reading
-                        buffer.clear();
-                    } else {
-                        // Have unparsed remainder
-                        if eof {
-                            // At EOF with unparsed data - already handled by parse_complete_bytes
-                            // which treats remainder as Text elements
-                            break;
-                        }
-                        // Reuse the existing backing store without cloning: split_off leaves
-                        // `window` empty; reuse it for the remainder so we avoid copying.
-                        let remainder_bytes = frozen.slice(consumed..);
-                        window = BytesMut::from(remainder_bytes.as_ref());
-                        buffer = window.split_off(0);
+                    if eof {
+                        // Nothing left to read — we're done
+                        break;
+                    }
+                    if !remaining.is_empty() {
+                        // Carry unconsumed remainder back into the buffer for next iteration
+                        let consumed = frozen.len() - remaining.len();
+                        buffer.extend_from_slice(&frozen[consumed..]);
                     }
                 }
                 Err(nom::Err::Incomplete(_)) => {
-                    // Streaming parser needs more data
-                    if eof {
-                        // At EOF but parser wants more data - this shouldn't happen
-                        // with parse_complete_bytes, but handle it just in case
-                        if !buffer.is_empty() {
-                            output_writer.write_all(&buffer)?;
-                        }
-                        break;
-                    }
+                    // Streaming parser needs more data (parse_eof never returns
+                    // Incomplete — it converts it to Failure(Eof) instead)
+                    debug_assert!(!eof, "parse_eof should not return Incomplete");
                     // Not at EOF - loop will read more data
                 }
                 Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
-                    // Parse error
                     if eof {
-                        // At EOF with parse error - this is a real error
+                        // At EOF: check if this is a truncated-document failure from parse_eof
+                        if e.code == nom::error::ErrorKind::Eof {
+                            return Err(ESIError::UnexpectedEndOfDocument);
+                        }
                         return Err(ESIError::ParseError(format!("parser error: {e:?}")));
                     }
                     // Not at EOF - maybe more data will help, output what we have and continue
@@ -1609,7 +1574,7 @@ impl Processor {
         if dca_mode == DcaMode::Esi {
             // Parse and process the content as ESI
             let body_as_bytes = Bytes::from(body_bytes);
-            let (rest, elements) = parser::parse_remainder(&body_as_bytes).map_err(|e| {
+            let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
                 ESIError::ParseError(format!("failed to parse fragment with dca=esi: {e}",))
             })?;
 

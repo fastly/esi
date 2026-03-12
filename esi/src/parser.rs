@@ -54,6 +54,8 @@ enum ParsingMode {
     Streaming,
     /// Treat Incomplete as EOF, convert remaining bytes to Text
     Complete,
+    /// Like Complete, but return error on Incomplete (document is truncated)
+    Eof,
 }
 
 /// Parser output that avoids Vec allocation for single elements
@@ -102,6 +104,13 @@ where
                     return Ok((rest, result));
                 }
                 remaining = rest;
+
+                // If all input consumed, return immediately — don't call the
+                // parser on empty input (streaming parsers return Incomplete
+                // on empty, which the Eof strategy would treat as truncation).
+                if remaining.is_empty() {
+                    return Ok((remaining, result));
+                }
             }
             Err(nom::Err::Incomplete(needed)) => {
                 return match incomplete_strategy {
@@ -119,6 +128,15 @@ where
                             result.push(Element::Content(slice_as_bytes(original, remaining)));
                         }
                         Ok((&remaining[remaining.len()..], result))
+                    }
+                    ParsingMode::Eof => {
+                        // element_eof uses a complete text parser, so Incomplete
+                        // here can only come from tag_handler hitting a partial
+                        // ESI tag — the document is truncated.
+                        Err(nom::Err::Failure(Error::new(
+                            remaining,
+                            nom::error::ErrorKind::Eof,
+                        )))
                     }
                 };
             }
@@ -159,8 +177,21 @@ pub fn parse(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
 /// # Errors
 /// Returns `Err` if a parse error occurs (but not `Incomplete`, which is handled internally
 /// by converting unparseable remainder to `Text` elements).
-pub fn parse_remainder(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+pub fn parse_complete(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
     parse_loop(input, element, &ParsingMode::Complete)
+}
+
+/// Parse input at EOF, treating incomplete ESI tags as truncation errors.
+///
+/// Uses a **complete** text parser so trailing non-ESI content is consumed
+/// normally, while any `Incomplete` from `tag_handler` (= partial ESI tag)
+/// becomes `Err(Failure(Eof))` for the caller to surface as
+/// `ESIError::UnexpectedEndOfDocument`.
+pub fn parse_eof(input: &Bytes) -> IResult<&[u8], Vec<Element>, Error<&[u8]>> {
+    if input.is_empty() {
+        return Ok((input.as_ref(), vec![]));
+    }
+    parse_loop(input, element_eof, &ParsingMode::Eof)
 }
 
 /// Convert ASCII bytes to String.
@@ -250,22 +281,45 @@ fn element<'a>(
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     // For top-level HTML content, we only parse tags, not variable expressions
     // Variable expressions are only evaluated inside ESI tags
-    alt((
-        |i| top_level_text(original, i),
-        |i| tag_handler(original, i),
-    ))
-    .parse(input)
+    alt((|i| parse_text(original, i), |i| tag_handler(original, i))).parse(input)
 }
 
-/// Text parser for top-level content - stops only at '<', not at '$()'
+/// Text parser for plain content - stops only at '<', not at '$()'
 /// This ensures $(VAR) in plain HTML is treated as literal text
-fn top_level_text<'a>(
+fn parse_text<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     streaming_bytes::take_while1(|c| !is_open_bracket(c))
         .map(|s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))))
         .parse(input)
+}
+
+/// Complete version of [`parse_text`] for EOF parsing.
+/// Returns `Ok` for trailing text instead of `Incomplete`.
+fn parse_text_complete<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    take_while1(|c: u8| !is_open_bracket(c))
+        .map(|s: &[u8]| ParseResult::Single(Element::Content(slice_as_bytes(original, s))))
+        .parse(input)
+}
+
+/// EOF element parser — complete text + streaming tags.
+///
+/// Text is parsed with complete semantics (never returns `Incomplete`),
+/// so any `Incomplete` from this parser is guaranteed to come from
+/// `tag_handler` encountering a genuinely truncated ESI tag.
+fn element_eof<'a>(
+    original: &Bytes,
+    input: &'a [u8],
+) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
+    alt((
+        |i| parse_text_complete(original, i),
+        |i| tag_handler(original, i),
+    ))
+    .parse(input)
 }
 
 fn interpolated_element<'a>(
@@ -1909,7 +1963,7 @@ mod tests {
     fn test_empty_choose() {
         let input = b"<esi:choose></esi:choose>";
         let bytes = Bytes::from_static(input);
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
         match result {
             Ok((rest, _)) => {
                 assert_eq!(rest.len(), 0, "Should parse completely");
@@ -1924,7 +1978,7 @@ mod tests {
     fn test_choose_with_when() {
         let input = b"<esi:choose><esi:when test=\"1\">hi</esi:when></esi:choose>";
         let bytes = Bytes::from_static(input);
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
         match result {
             Ok((rest, result)) => {
                 if rest.is_empty() {
@@ -1947,7 +2001,7 @@ mod tests {
         // `>` inside a quoted test expression must not confuse the tag gate
         let input = b"<esi:choose><esi:when test=\"$(x) > 5\">big</esi:when></esi:choose>";
         let bytes = Bytes::from_static(input);
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
         match result {
             Ok((rest, _)) => {
                 assert!(
@@ -1962,7 +2016,7 @@ mod tests {
         // Single-quoted variant
         let input = b"<esi:choose><esi:when test='$(x) > 5'>big</esi:when></esi:choose>";
         let bytes = Bytes::from_static(input);
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
         match result {
             Ok((rest, _)) => {
                 assert!(
@@ -2016,7 +2070,7 @@ exception!
 </esi:except>
 </esi:try>"#;
         let bytes = Bytes::from_static(input);
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
         match result {
             Ok((rest, _)) => {
                 // Just test to make sure it parsed the whole thing
@@ -2081,7 +2135,7 @@ exception!
         // <esi:vars> can contain text, expressions, HTML, and nested ESI tags (like <esi:assign>)
         let input = br#"<esi:vars>hello<br></esi:vars>"#;
         let bytes = Bytes::from_static(input);
-        let (rest, x) = parse_remainder(&bytes).unwrap();
+        let (rest, x) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -2097,7 +2151,7 @@ exception!
         // Nested <esi:vars> tags ARE supported - the inner vars tag is parsed recursively
         let input = br#"<esi:vars>outer<esi:vars>inner</esi:vars></esi:vars>"#;
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
 
         assert_eq!(rest.len(), 0, "Should parse completely");
         assert_eq!(
@@ -2114,7 +2168,7 @@ exception!
         // This is the proper use of esi:vars - text with expressions
         let input = br#"<esi:vars>Hello $(name), welcome!</esi:vars>"#;
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
 
         assert_eq!(rest.len(), 0, "Should parse completely");
         assert_eq!(elements.len(), 3);
@@ -2132,7 +2186,7 @@ exception!
     Result: $(xyz)
 </esi:vars>"#;
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
 
         assert_eq!(rest.len(), 0, "Should parse completely");
 
@@ -2159,7 +2213,7 @@ exception!
     fn test_parse_complex_expr() {
         let input = br#"<esi:vars name="$call('hello') matches $(var{'key'})"/>"#;
         let bytes = Bytes::from_static(input);
-        let (rest, x) = parse_remainder(&bytes).unwrap();
+        let (rest, x) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -2210,7 +2264,7 @@ exception!
         </esi:vars>
     "#;
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         eprintln!("Chunks: {:?}", elements);
         eprintln!("Remaining: {:?}", String::from_utf8_lossy(rest));
         assert_eq!(
@@ -2250,7 +2304,7 @@ exception!
         let input =
             br#"<esi:assign name="key" value="'val'" /><esi:vars>$(QUERY_STRING{param})</esi:vars>"#;
         let bytes = Bytes::from_static(input);
-        let (rest, _elements) = parse_remainder(&bytes).unwrap();
+        let (rest, _elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
     }
 
@@ -2258,7 +2312,7 @@ exception!
     fn test_parse_plain_text() {
         let input = b"hello\nthere";
         let bytes = Bytes::from_static(input);
-        let (rest, x) = parse_remainder(&bytes).unwrap();
+        let (rest, x) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(x, [Element::Content(Bytes::from_static(b"hello\nthere"))]);
     }
@@ -2266,7 +2320,7 @@ exception!
     fn test_parse_interpolated() {
         let input = b"hello $(foo)<esi:vars>goodbye $(foo)</esi:vars>";
         let bytes = Bytes::from_static(input);
-        let (rest, x) = parse_remainder(&bytes).unwrap();
+        let (rest, x) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(
             x,
@@ -2281,7 +2335,7 @@ exception!
     fn test_parse_examples() {
         let input = include_bytes!("../../examples/esi_vars_example/src/index.html");
         let bytes = Bytes::from_static(input);
-        let (rest, _) = parse_remainder(&bytes).unwrap();
+        let (rest, _) = parse_complete(&bytes).unwrap();
         // just make sure it parsed the whole thing
         assert_eq!(rest.len(), 0);
     }
@@ -2318,7 +2372,7 @@ exception!
 
         let input1 = b"<esi:choose><esi:when test=\"$(count) < 10\">yes</esi:when></esi:choose>";
         let bytes1 = Bytes::from_static(input1);
-        let result1 = parse_remainder(&bytes1);
+        let result1 = parse_complete(&bytes1);
         assert!(
             result1.is_ok(),
             "Should parse < operator: {:?}",
@@ -2327,7 +2381,7 @@ exception!
 
         let input2 = b"<esi:choose><esi:when test=\"$(count) >= 5\">yes</esi:when></esi:choose>";
         let bytes2 = Bytes::from_static(input2);
-        let result2 = parse_remainder(&bytes2);
+        let result2 = parse_complete(&bytes2);
         assert!(
             result2.is_ok(),
             "Should parse >= operator: {:?}",
@@ -2337,7 +2391,7 @@ exception!
         // Test has operator
         let input3 = b"<esi:choose><esi:when test=\"$(USER_AGENT) has 'Mobile'\">yes</esi:when></esi:choose>";
         let bytes3 = Bytes::from_static(input3);
-        let result3 = parse_remainder(&bytes3);
+        let result3 = parse_complete(&bytes3);
         assert!(
             result3.is_ok(),
             "Should parse 'has' operator: {:?}",
@@ -2348,7 +2402,7 @@ exception!
         let input4 =
             b"<esi:choose><esi:when test=\"$(COOKIE) has_i 'sam'\">yes</esi:when></esi:choose>";
         let bytes4 = Bytes::from_static(input4);
-        let result4 = parse_remainder(&bytes4);
+        let result4 = parse_complete(&bytes4);
         assert!(
             result4.is_ok(),
             "Should parse 'has_i' operator: {:?}",
@@ -2415,7 +2469,7 @@ exception!
         // Test single-quoted attributes
         let input = b"<esi:include src='http://example.com/fragment' />";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0, "Should parse completely");
         assert_eq!(elements.len(), 1);
         if let Element::Esi(Tag::Include { attrs, .. }) = &elements[0] {
@@ -2429,7 +2483,7 @@ exception!
         // Test mixed quotes
         let input2 = b"<esi:assign name='foo' value=\"bar\" />";
         let bytes2 = Bytes::from_static(input2);
-        let (rest, elements) = parse_remainder(&bytes2).unwrap();
+        let (rest, elements) = parse_complete(&bytes2).unwrap();
         assert_eq!(rest.len(), 0, "Should parse completely");
         assert_eq!(elements.len(), 1);
         if let Element::Esi(Tag::Assign {
@@ -2459,7 +2513,7 @@ exception!
 
         for input in valid_cases {
             let bytes = Bytes::copy_from_slice(input);
-            let result = parse_remainder(&bytes);
+            let result = parse_complete(&bytes);
             assert!(
                 result.is_ok(),
                 "Should parse valid name: {:?}",
@@ -2492,7 +2546,7 @@ exception!
 
         for input in invalid_cases {
             let bytes = Bytes::copy_from_slice(input);
-            let result = parse_remainder(&bytes);
+            let result = parse_complete(&bytes);
             assert!(
                 result.is_ok(),
                 "Should parse (but skip invalid): {:?}",
@@ -2515,7 +2569,7 @@ exception!
         // Test 256 character limit
         let valid_256 = format!(r#"<esi:assign name="a{}" value="test"/>"#, "b".repeat(255));
         let bytes = Bytes::from(valid_256.clone());
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
         assert!(result.is_ok(), "Should parse 256 char name");
         let (_, elements) = result.unwrap();
         let has_assign = elements
@@ -2526,7 +2580,7 @@ exception!
         // Test 257 characters (should be invalid)
         let invalid_257 = format!(r#"<esi:assign name="a{}" value="test"/>"#, "b".repeat(256));
         let bytes = Bytes::from(invalid_257);
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
         assert!(result.is_ok(), "Should parse (but skip)");
         let (_, elements) = result.unwrap();
         let has_assign = elements
@@ -2540,7 +2594,7 @@ exception!
         // Long form with invalid name should also be rejected
         let input = b"<esi:assign name=\"$invalid\">test value</esi:assign>";
         let bytes = Bytes::copy_from_slice(input);
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
         assert!(result.is_ok(), "Should parse");
         let (_, elements) = result.unwrap();
         let has_assign = elements
@@ -2557,7 +2611,7 @@ exception!
         // Test subscript assignment parsing with bare identifier
         let input = b"<esi:assign name=\"ages{joan}\" value=\"28\"/>";
         let bytes = Bytes::copy_from_slice(input);
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
         assert!(result.is_ok(), "Should parse");
         let (_, elements) = result.unwrap();
         assert_eq!(elements.len(), 1);
@@ -2582,7 +2636,7 @@ exception!
         // Test with another bare identifier
         let input2 = b"<esi:assign name=\"ages{bob}\" value=\"34\"/>";
         let bytes2 = Bytes::copy_from_slice(input2);
-        let result2 = parse_remainder(&bytes2);
+        let result2 = parse_complete(&bytes2);
         assert!(result2.is_ok(), "Should parse");
         let (_, elements2) = result2.unwrap();
         assert_eq!(elements2.len(), 1);
@@ -2614,7 +2668,7 @@ exception!
         // Test ESI spec-compliant subscript with quoted strings in assignment
         let input = b"<esi:assign name=\"ages{'joan'}\" value=\"28\"/>";
         let bytes = Bytes::copy_from_slice(input);
-        let result = parse_remainder(&bytes);
+        let result = parse_complete(&bytes);
 
         assert!(
             result.is_ok(),
@@ -2647,7 +2701,7 @@ exception!
         // Test with multiple quoted subscripts
         let input2 = b"<esi:assign name=\"data{'key1'}\" value=\"${'value1'}\"/>";
         let bytes2 = Bytes::copy_from_slice(input2);
-        let result2 = parse_remainder(&bytes2);
+        let result2 = parse_complete(&bytes2);
         assert!(
             result2.is_ok(),
             "Should parse assignment with quoted subscript and quoted value"
@@ -2659,7 +2713,7 @@ exception!
         // Unclosed script tag - should handle gracefully
         let input = b"<script>content without closing";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
 
         // In complete mode, unclosed script becomes text
         assert_eq!(rest.len(), 0, "Should consume all input");
@@ -2704,7 +2758,7 @@ exception!
     fn test_html_comment() {
         let input = b"<!-- this is a comment -->";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(elements.len(), 1);
         // Should return full comment including delimiters
@@ -2718,7 +2772,7 @@ exception!
     fn test_parse_foreach() {
         let input = b"<esi:foreach collection=\"items\" item=\"x\">Item: $(x)</esi:foreach>";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(elements.len(), 1);
 
@@ -2740,7 +2794,7 @@ exception!
     fn test_parse_foreach_no_item() {
         let input = b"<esi:foreach collection=\"mylist\">Value: $(item)</esi:foreach>";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(elements.len(), 1);
 
@@ -2762,7 +2816,7 @@ exception!
     fn test_parse_break() {
         let input = b"<esi:break />";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(elements.len(), 1);
         assert!(matches!(&elements[0], Element::Esi(Tag::Break)));
@@ -2772,7 +2826,7 @@ exception!
     fn test_parse_foreach_with_break() {
         let input = b"<esi:foreach collection=\"items\"><esi:break /></esi:foreach>";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(elements.len(), 1);
 
@@ -2794,7 +2848,7 @@ exception!
     fn test_parse_function() {
         let input = b"<esi:function name=\"greet\">Hello $(name)</esi:function>";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(elements.len(), 1);
 
@@ -2812,7 +2866,7 @@ exception!
         let input =
             b"<esi:function name=\"add\"><esi:return value=\"$(a) + $(b)\" /></esi:function>";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(elements.len(), 1);
 
@@ -2836,7 +2890,7 @@ exception!
     fn test_parse_return() {
         let input = b"<esi:return value=\"42\" />";
         let bytes = Bytes::from_static(input);
-        let (rest, elements) = parse_remainder(&bytes).unwrap();
+        let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(elements.len(), 1);
 

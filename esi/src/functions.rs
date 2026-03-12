@@ -330,7 +330,7 @@ pub fn len(args: &[Value]) -> Result<Value> {
                 1
             } else {
                 let mut n = i.abs();
-                let mut len = if *i < 0 { 1 } else { 0 };
+                let mut len = i32::from(*i < 0);
                 while n > 0 {
                     len += 1;
                     n /= 10;
@@ -353,9 +353,7 @@ pub fn len(args: &[Value]) -> Result<Value> {
 fn parse_positive_bound(name: &str, v: &Value) -> Result<i32> {
     let n = v.as_i32(name)?;
     if n <= 0 {
-        return Err(ESIError::FunctionError(format!(
-            "{name}: invalid bound"
-        )));
+        return Err(ESIError::FunctionError(format!("{name}: invalid bound")));
     }
     Ok(n)
 }
@@ -866,10 +864,8 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError(
-                    "html_encode: expected 1 argument, got 2".to_string()
-                )
-                .to_string()
+                ESIError::FunctionError("html_encode: expected 1 argument, got 2".to_string())
+                    .to_string()
             ),
         }
     }
@@ -890,10 +886,8 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError(
-                    "html_decode: expected 1 argument, got 2".to_string()
-                )
-                .to_string()
+                ESIError::FunctionError("html_decode: expected 1 argument, got 2".to_string())
+                    .to_string()
             ),
         }
     }
@@ -976,8 +970,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError("str: expected 1 argument, got 0".to_string())
-                    .to_string()
+                ESIError::FunctionError("str: expected 1 argument, got 0".to_string()).to_string()
             ),
         }
     }
@@ -1052,10 +1045,8 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError(
-                    "base64_encode: expected 1 argument, got 0".to_string()
-                )
-                .to_string()
+                ESIError::FunctionError("base64_encode: expected 1 argument, got 0".to_string())
+                    .to_string()
             ),
         }
     }
@@ -1091,10 +1082,8 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError(
-                    "base64_decode: expected 1 argument, got 0".to_string()
-                )
-                .to_string()
+                ESIError::FunctionError("base64_decode: expected 1 argument, got 0".to_string())
+                    .to_string()
             ),
         }
     }
@@ -1204,8 +1193,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError("int: expected 1 argument, got 2".to_string())
-                    .to_string()
+                ESIError::FunctionError("int: expected 1 argument, got 2".to_string()).to_string()
             ),
         }
     }
@@ -1239,8 +1227,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError("len: expected 1 argument, got 0".to_string())
-                    .to_string()
+                ESIError::FunctionError("len: expected 1 argument, got 0".to_string()).to_string()
             ),
         }
     }
@@ -1450,10 +1437,8 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError(
-                    "digest_md5_hex: expected 1 argument, got 0".to_string()
-                )
-                .to_string()
+                ESIError::FunctionError("digest_md5_hex: expected 1 argument, got 0".to_string())
+                    .to_string()
             ),
         }
     }
@@ -1593,8 +1578,7 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError("last_rand expects no arguments".to_string())
-                    .to_string()
+                ESIError::FunctionError("last_rand expects no arguments".to_string()).to_string()
             ),
         }
     }
@@ -1660,10 +1644,8 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError(
-                    "add_header: expected 2 arguments, got 1".to_string()
-                )
-                .to_string()
+                ESIError::FunctionError("add_header: expected 2 arguments, got 1".to_string())
+                    .to_string()
             ),
         }
     }
@@ -1829,10 +1811,8 @@ mod tests {
             Ok(_) => panic!("Expected error, but got Ok"),
             Err(err) => assert_eq!(
                 err.to_string(),
-                ESIError::FunctionError(
-                    "set_redirect: expected 1 argument, got 2".to_string()
-                )
-                .to_string()
+                ESIError::FunctionError("set_redirect: expected 1 argument, got 2".to_string())
+                    .to_string()
             ),
         }
     }

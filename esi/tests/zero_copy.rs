@@ -2,7 +2,7 @@
 // These tests verify that parse_complete() works correctly with esi:try, esi:choose, esi:remove
 
 use bytes::Bytes;
-use esi::{parse_remainder, Element, Tag};
+use esi::{parse_complete, Element, Tag};
 
 #[test]
 fn test_zero_copy_esi_try() {
@@ -17,7 +17,7 @@ except content
 </esi:try>"#,
     );
 
-    let (remaining, elements) = parse_remainder(&input).expect("should parse");
+    let (remaining, elements) = parse_complete(&input).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Find the Try tag
@@ -39,7 +39,7 @@ fn test_zero_copy_esi_try_multiple_attempts() {
 </esi:try>"#,
     );
 
-    let (remaining, elements) = parse_remainder(&input).expect("should parse");
+    let (remaining, elements) = parse_complete(&input).expect("should parse");
     assert_eq!(remaining, b"");
 
     let try_found = elements.iter().any(|element| {
@@ -63,7 +63,7 @@ default content
 </esi:choose>"#,
     );
 
-    let (remaining, elements) = parse_remainder(&input).expect("should parse");
+    let (remaining, elements) = parse_complete(&input).expect("should parse");
     assert_eq!(remaining, b"");
 
     let choose_found = elements.iter().any(|element| {
@@ -88,7 +88,7 @@ fn test_zero_copy_esi_choose_multiple_when() {
 </esi:choose>"#,
     );
 
-    let (remaining, elements) = parse_remainder(&input).expect("should parse");
+    let (remaining, elements) = parse_complete(&input).expect("should parse");
     assert_eq!(remaining, b"");
 
     let choose_found = elements.iter().any(|element| {
@@ -103,7 +103,7 @@ fn test_zero_copy_esi_choose_multiple_when() {
 fn test_zero_copy_esi_remove() {
     let input = Bytes::from_static(b"<esi:remove>this should not appear</esi:remove>after");
 
-    let (remaining, elements) = parse_remainder(&input).expect("should parse");
+    let (remaining, elements) = parse_complete(&input).expect("should parse");
     assert_eq!(remaining, b"");
 
     // esi:remove should return empty vec for the tag itself, then "after" as text
@@ -125,7 +125,7 @@ fn test_zero_copy_esi_remove_with_tags_inside() {
         b"<esi:remove><div>content</div><esi:include src=\"x\"/></esi:remove>visible",
     );
 
-    let (remaining, elements) = parse_remainder(&input).expect("should parse");
+    let (remaining, elements) = parse_complete(&input).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Everything inside esi:remove should be discarded
@@ -154,7 +154,7 @@ fn test_zero_copy_nested_choose_in_try() {
 </esi:try>"#,
     );
 
-    let (remaining, elements) = parse_remainder(&input).expect("should parse");
+    let (remaining, elements) = parse_complete(&input).expect("should parse");
     assert_eq!(remaining, b"");
 
     // Should successfully parse nested structure
@@ -169,7 +169,7 @@ fn test_zero_copy_nested_choose_in_try() {
 fn test_zero_copy_text_before_and_after() {
     let input = Bytes::from_static(b"before<esi:remove>hidden</esi:remove>after");
 
-    let (remaining, elements) = parse_remainder(&input).expect("should parse");
+    let (remaining, elements) = parse_complete(&input).expect("should parse");
     assert_eq!(remaining, b"");
 
     let has_before = elements
