@@ -277,20 +277,26 @@ fn eval_comparison(
         }
         // Arithmetic operators
         Operator::Add => {
-            // Try numeric addition first, then string concatenation
-            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                l.checked_add(*r).map_or_else(
+            // Integer addition, list concatenation, or string concatenation
+            match (left_val, right_val) {
+                (Value::Integer(l), Value::Integer(r)) => l.checked_add(*r).map_or_else(
                     || {
                         Err(ESIError::ExpressionError(
                             "Integer overflow in addition".to_string(),
                         ))
                     },
                     |result| Ok(Value::Integer(result)),
-                )
-            } else {
-                // String/list concatenation
-                let result = format!("{left_val}{right_val}");
-                Ok(Value::Text(Bytes::from(result)))
+                ),
+                (Value::List(a), Value::List(b)) => {
+                    let mut items = a.borrow().clone();
+                    items.extend(b.borrow().iter().cloned());
+                    Ok(Value::new_list(items))
+                }
+                _ => {
+                    // String concatenation for all other type combinations
+                    let result = format!("{left_val}{right_val}");
+                    Ok(Value::Text(Bytes::from(result)))
+                }
             }
         }
         Operator::Subtract => {
@@ -310,20 +316,47 @@ fn eval_comparison(
             }
         }
         Operator::Multiply => {
-            if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
-                l.checked_mul(*r).map_or_else(
+            match (left_val, right_val) {
+                (Value::Integer(l), Value::Integer(r)) => l.checked_mul(*r).map_or_else(
                     || {
                         Err(ESIError::ExpressionError(
                             "Integer overflow in multiplication".to_string(),
                         ))
                     },
                     |result| Ok(Value::Integer(result)),
-                )
-            } else {
-                // Could implement string repetition here (e.g., 3 * "abc" = "abcabcabc")
-                Err(ESIError::ExpressionError(
-                    "Multiplication requires numeric operands".to_string(),
-                ))
+                ),
+                // String repetition: n * 'string' or 'string' * n
+                (Value::Integer(n), Value::Text(s)) | (Value::Text(s), Value::Integer(n)) => {
+                    if *n < 0 {
+                        Err(ESIError::ExpressionError(
+                            "String repetition count must be non-negative".to_string(),
+                        ))
+                    } else {
+                        let text = String::from_utf8_lossy(s.as_ref());
+                        let result = text.repeat(*n as usize);
+                        Ok(Value::Text(Bytes::from(result)))
+                    }
+                }
+                // List repetition: n * [list] or [list] * n
+                (Value::Integer(n), Value::List(items))
+                | (Value::List(items), Value::Integer(n)) => {
+                    if *n < 0 {
+                        Err(ESIError::ExpressionError(
+                            "List repetition count must be non-negative".to_string(),
+                        ))
+                    } else {
+                        let borrowed = items.borrow();
+                        let mut result = Vec::with_capacity(borrowed.len() * (*n as usize));
+                        for _ in 0..*n {
+                            result.extend(borrowed.iter().cloned());
+                        }
+                        Ok(Value::new_list(result))
+                    }
+                }
+                _ => Err(ESIError::ExpressionError(
+                    "Multiplication requires numeric operands, or integer with string/list"
+                        .to_string(),
+                )),
             }
         }
         Operator::Divide => {
@@ -2138,6 +2171,125 @@ mod tests {
         let ctx = &mut EvalContext::default();
         let result = evaluate_expression("0 | 0", ctx)?;
         assert_eq!(result, Value::Boolean(false));
+        Ok(())
+    }
+
+    // --- Tests for + (list concatenation) ---
+
+    #[test]
+    fn test_list_concatenation() -> Result<()> {
+        let ctx = &mut EvalContext::from([
+            (
+                "a".to_string(),
+                Value::new_list(vec![Value::Integer(1), Value::Integer(2)]),
+            ),
+            (
+                "b".to_string(),
+                Value::new_list(vec![Value::Integer(3), Value::Integer(4)]),
+            ),
+        ]);
+        let result = evaluate_expression("$(a) + $(b)", ctx)?;
+        if let Value::List(items) = result {
+            let items = items.borrow();
+            assert_eq!(items.len(), 4);
+            assert_eq!(items[0], Value::Integer(1));
+            assert_eq!(items[1], Value::Integer(2));
+            assert_eq!(items[2], Value::Integer(3));
+            assert_eq!(items[3], Value::Integer(4));
+        } else {
+            panic!("Expected list, got {result:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_concat_does_not_alias() -> Result<()> {
+        // Concatenating two lists should produce a new list, not alias either input
+        let ctx = &mut EvalContext::from([
+            ("a".to_string(), Value::new_list(vec![Value::Integer(1)])),
+            ("b".to_string(), Value::new_list(vec![Value::Integer(2)])),
+        ]);
+        let result = evaluate_expression("$(a) + $(b)", ctx)?;
+        if let Value::List(items) = &result {
+            assert_eq!(items.borrow().len(), 2);
+        } else {
+            panic!("Expected list");
+        }
+        // Original lists should be unchanged
+        let a = ctx.get_variable("a", None);
+        if let Value::List(items) = a {
+            assert_eq!(items.borrow().len(), 1);
+        } else {
+            panic!("Expected list for a");
+        }
+        Ok(())
+    }
+
+    // --- Tests for * (string/list repetition) ---
+
+    #[test]
+    fn test_string_repetition() -> Result<()> {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression("3 * 'ab'", ctx)?;
+        assert_eq!(result, Value::Text(Bytes::from("ababab")));
+        Ok(())
+    }
+
+    #[test]
+    fn test_string_repetition_reversed() -> Result<()> {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression("'ab' * 3", ctx)?;
+        assert_eq!(result, Value::Text(Bytes::from("ababab")));
+        Ok(())
+    }
+
+    #[test]
+    fn test_string_repetition_zero() -> Result<()> {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression("0 * 'hello'", ctx)?;
+        assert_eq!(result, Value::Text(Bytes::from("")));
+        Ok(())
+    }
+
+    #[test]
+    fn test_string_repetition_negative() {
+        let ctx = &mut EvalContext::default();
+        let result = evaluate_expression("-1 * 'hello'", ctx);
+        assert!(result.is_err(), "Negative repetition should error");
+    }
+
+    #[test]
+    fn test_list_repetition() -> Result<()> {
+        let ctx = &mut EvalContext::from([(
+            "a".to_string(),
+            Value::new_list(vec![Value::Integer(1), Value::Integer(2)]),
+        )]);
+        let result = evaluate_expression("3 * $(a)", ctx)?;
+        if let Value::List(items) = result {
+            let items = items.borrow();
+            assert_eq!(items.len(), 6);
+            assert_eq!(items[0], Value::Integer(1));
+            assert_eq!(items[1], Value::Integer(2));
+            assert_eq!(items[2], Value::Integer(1));
+            assert_eq!(items[3], Value::Integer(2));
+            assert_eq!(items[4], Value::Integer(1));
+            assert_eq!(items[5], Value::Integer(2));
+        } else {
+            panic!("Expected list, got {result:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_repetition_zero() -> Result<()> {
+        let ctx =
+            &mut EvalContext::from([("a".to_string(), Value::new_list(vec![Value::Integer(1)]))]);
+        let result = evaluate_expression("0 * $(a)", ctx)?;
+        if let Value::List(items) = result {
+            assert_eq!(items.borrow().len(), 0);
+        } else {
+            panic!("Expected empty list");
+        }
         Ok(())
     }
 }
