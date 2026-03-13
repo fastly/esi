@@ -31,12 +31,13 @@ pub struct IncludeAttributes {
     pub method: Option<Expr>,
     /// POST request body
     pub entity: Option<Expr>,
-    /// Headers to append to the request
-    pub appendheaders: Vec<(String, Expr)>,
-    /// Headers to remove from the request
-    pub removeheaders: Vec<String>,
-    /// Headers to set on the request (replaces existing)
-    pub setheaders: Vec<(String, Expr)>,
+    /// Headers to append to the request (each value is "name: value" expression,
+    /// split at runtime to support dynamic header names per ESI spec)
+    pub appendheaders: Vec<Expr>,
+    /// Headers to remove from the request (expression evaluated at runtime)
+    pub removeheaders: Vec<Expr>,
+    /// Headers to set on the request (replaces existing; same "name: value" format)
+    pub setheaders: Vec<Expr>,
     /// Child <esi:param> elements for query parameters
     pub params: Vec<(String, Expr)>,
 }

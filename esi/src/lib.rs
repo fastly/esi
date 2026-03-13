@@ -66,9 +66,9 @@ struct FragmentMetadata {
     method: Option<Bytes>,
     /// Optional body for POST requests
     entity: Option<Bytes>,
-    /// Headers to set on the request
+    /// Headers to set on the request ("name: value" pairs)
     setheaders: Vec<(String, Bytes)>,
-    /// Headers to append to the request
+    /// Headers to append to the request ("name: value" pairs)
     appendheaders: Vec<(String, Bytes)>,
     /// Headers to remove from the request
     removeheaders: Vec<String>,
@@ -731,17 +731,30 @@ impl Processor {
             .map(|e| eval_expr_to_bytes(e, &mut self.ctx))
             .transpose()?;
 
-        // Evaluate header values
+        // Evaluate header values — each expr evaluates to "name: value",
+        // which is split at runtime to support dynamic header names per ESI spec.
         let mut setheaders = Vec::with_capacity(attrs.setheaders.len());
-        for (name, value_expr) in &attrs.setheaders {
-            let value_bytes = eval_expr_to_bytes(value_expr, &mut self.ctx)?;
-            setheaders.push((name.clone(), value_bytes));
+        for expr in &attrs.setheaders {
+            let full = eval_expr_to_bytes(expr, &mut self.ctx)?;
+            if let Some((name, val)) = split_header_value(&full) {
+                setheaders.push((name, val));
+            }
         }
 
         let mut appendheaders = Vec::with_capacity(attrs.appendheaders.len());
-        for (name, value_expr) in &attrs.appendheaders {
-            let value_bytes = eval_expr_to_bytes(value_expr, &mut self.ctx)?;
-            appendheaders.push((name.clone(), value_bytes));
+        for expr in &attrs.appendheaders {
+            let full = eval_expr_to_bytes(expr, &mut self.ctx)?;
+            if let Some((name, val)) = split_header_value(&full) {
+                appendheaders.push((name, val));
+            }
+        }
+
+        let mut removeheaders = Vec::with_capacity(attrs.removeheaders.len());
+        for expr in &attrs.removeheaders {
+            let name_bytes = eval_expr_to_bytes(expr, &mut self.ctx)?;
+            if let Ok(s) = std::str::from_utf8(name_bytes.as_ref()) {
+                removeheaders.push(s.trim().to_string());
+            }
         }
 
         // Determine if the fragment should be cached
@@ -752,7 +765,7 @@ impl Processor {
             entity,
             setheaders,
             appendheaders,
-            removeheaders: attrs.removeheaders.clone(),
+            removeheaders,
             cacheable,
             ttl_override,
             continue_on_error: attrs.continue_on_error,
@@ -1741,6 +1754,17 @@ fn build_fragment_request(
     }
 
     Ok(request)
+}
+
+/// Split an evaluated header expression ("Name: value") into (name, value).
+/// Returns `None` if there is no ':' separator.
+fn split_header_value(full: &Bytes) -> Option<(String, Bytes)> {
+    let s = std::str::from_utf8(full.as_ref()).ok()?;
+    let (name, val) = s.split_once(':')?;
+    Some((
+        name.trim().to_string(),
+        Bytes::copy_from_slice(val.trim().as_bytes()),
+    ))
 }
 
 // Helper Functions

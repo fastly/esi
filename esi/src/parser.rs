@@ -16,10 +16,24 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::IResult;
 use nom::Parser;
 
-use std::collections::HashMap;
-
 use crate::literals::*;
 use crate::parser_types::{DcaMode, Element, Expr, IncludeAttributes, Operator, Tag, WhenBranch};
+
+/// Attribute list preserving duplicates (needed for `appendheader`, `setheader`, etc.).
+type Attrs<'a> = Vec<(&'a str, &'a str)>;
+
+/// Remove the *first* attribute whose key equals `name` and return its value.
+fn attrs_remove<'a>(attrs: &mut Attrs<'a>, name: &str) -> Option<&'a str> {
+    attrs
+        .iter()
+        .position(|(k, _)| *k == name)
+        .map(|i| attrs.remove(i).1)
+}
+
+/// Return the value of the *first* attribute whose key equals `name`.
+fn attrs_get<'a>(attrs: &'a Attrs<'_>, name: &str) -> Option<&'a str> {
+    attrs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
+}
 
 // ============================================================================
 // Zero-Copy Helpers
@@ -464,8 +478,8 @@ fn esi_assign<'a>(
     alt((esi_assign_short, |i| esi_assign_long(original, i))).parse(input)
 }
 
-fn assign_attributes_short(mut attrs: HashMap<&str, &str>) -> ParseResult {
-    let name = attrs.remove("name").unwrap_or_default();
+fn assign_attributes_short(mut attrs: Attrs<'_>) -> ParseResult {
+    let name = attrs_remove(&mut attrs, "name").unwrap_or_default();
 
     // Validate variable name according to ESI spec
     if !is_valid_variable_name(name) {
@@ -477,7 +491,7 @@ fn assign_attributes_short(mut attrs: HashMap<&str, &str>) -> ParseResult {
     // Parse name and optional subscript (e.g., "colors{0}" or "ages{joan}")
     let (var_name, subscript) = parse_variable_name_with_subscript(name);
 
-    let value_str = attrs.remove("value").unwrap_or_default();
+    let value_str = attrs_remove(&mut attrs, "value").unwrap_or_default();
 
     // Per ESI spec, short form value attribute contains an expression
     // Try to parse as ESI expression. If it fails, treat as string literal.
@@ -556,8 +570,8 @@ fn parse_attr_as_expr_with_context(value_str: &str, bare_id_as_variable: bool) -
     }
 }
 
-fn assign_long(attrs: &HashMap<&str, &str>, mut content: Vec<Element>) -> ParseResult {
-    let name = attrs.get("name").copied().unwrap_or_default();
+fn assign_long(attrs: &Attrs<'_>, mut content: Vec<Element>) -> ParseResult {
+    let name = attrs_get(attrs, "name").unwrap_or_default();
 
     // Validate variable name according to ESI spec
     if !is_valid_variable_name(name) {
@@ -757,8 +771,10 @@ fn esi_when<'a>(
         streaming_bytes::tag(TAG_ESI_WHEN_CLOSE),
     )
         .map(|(mut attrs, content, _)| {
-            let test = attrs.remove("test").unwrap_or_default().to_owned();
-            let match_name = attrs.remove("matchname").map(ToOwned::to_owned);
+            let test = attrs_remove(&mut attrs, "test")
+                .unwrap_or_default()
+                .to_owned();
+            let match_name = attrs_remove(&mut attrs, "matchname").map(ToOwned::to_owned);
 
             // Reuse content Vec — insert marker at front instead of creating a new Vec
             let mut result = content;
@@ -783,9 +799,9 @@ fn esi_foreach<'a>(
         streaming_bytes::tag(TAG_ESI_FOREACH_CLOSE),
     )
         .map(|(mut attrs, content, _)| {
-            let collection_str = attrs.remove("collection").unwrap_or_default();
+            let collection_str = attrs_remove(&mut attrs, "collection").unwrap_or_default();
             let collection = parse_attr_as_expr_with_context(collection_str, true);
-            let item = attrs.remove("item").map(ToOwned::to_owned);
+            let item = attrs_remove(&mut attrs, "item").map(ToOwned::to_owned);
 
             ParseResult::Single(Element::Esi(Tag::Foreach {
                 collection,
@@ -823,7 +839,9 @@ fn esi_function_tag<'a>(
         streaming_bytes::tag(TAG_ESI_FUNCTION_CLOSE),
     )
         .map(|(mut attrs, body, _)| {
-            let name = attrs.remove("name").unwrap_or_default().to_owned();
+            let name = attrs_remove(&mut attrs, "name")
+                .unwrap_or_default()
+                .to_owned();
 
             ParseResult::Single(Element::Esi(Tag::Function { name, body }))
         })
@@ -838,7 +856,7 @@ fn esi_return(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
         preceded(multispace0, self_closing),
     )
     .map(|mut attrs| {
-        let value_str = attrs.remove("value").unwrap_or_default();
+        let value_str = attrs_remove(&mut attrs, "value").unwrap_or_default();
         let value = parse_attr_as_expr_with_context(value_str, false);
 
         ParseResult::Single(Element::Esi(Tag::Return { value }))
@@ -933,8 +951,8 @@ fn esi_vars<'a>(
     alt((esi_vars_short, |i| esi_vars_long(original, i))).parse(input)
 }
 
-fn parse_vars_attributes(mut attrs: HashMap<&str, &str>) -> Result<ParseResult, &'static str> {
-    attrs.remove("name").map_or_else(
+fn parse_vars_attributes(mut attrs: Attrs<'_>) -> Result<ParseResult, &'static str> {
+    attrs_remove(&mut attrs, "name").map_or_else(
         || Err("no name field in short form vars"),
         |name_val| {
             if let Ok((_, expr)) = parse_expression(name_val) {
@@ -1043,53 +1061,39 @@ fn esi_include(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     alt((esi_include_self_closing, esi_include_with_params)).parse(input)
 }
 
-/// Helper to extract include attributes from the HashMap
-fn extract_include_attrs(
-    mut attrs: HashMap<&str, &str>,
-    params: Vec<(String, Expr)>,
-) -> IncludeAttributes {
-    let src = parse_attr_as_expr(attrs.remove("src").unwrap_or_default());
-    let alt = attrs.remove("alt").map(parse_attr_as_expr);
-    let continue_on_error = attrs.get("onerror").is_some_and(|v| *v == "continue");
+/// Helper to extract include attributes from the attribute list
+fn extract_include_attrs(mut attrs: Attrs<'_>, params: Vec<(String, Expr)>) -> IncludeAttributes {
+    let src = parse_attr_as_expr(attrs_remove(&mut attrs, "src").unwrap_or_default());
+    let alt = attrs_remove(&mut attrs, "alt").map(parse_attr_as_expr);
+    let continue_on_error = attrs_get(&attrs, "onerror").is_some_and(|v| v == "continue");
 
     // Parse dca attribute - default to None
-    let dca = if attrs
-        .get("dca")
-        .is_some_and(|v| v.eq_ignore_ascii_case("esi"))
-    {
+    let dca = if attrs_get(&attrs, "dca").is_some_and(|v| v.eq_ignore_ascii_case("esi")) {
         DcaMode::Esi
     } else {
         DcaMode::None
     };
 
-    let ttl = attrs.remove("ttl").map(ToOwned::to_owned);
-    let maxwait = attrs.remove("maxwait").and_then(|s| s.parse::<u32>().ok());
-    let no_store = attrs
-        .get("no-store")
-        .is_some_and(|v| v.eq_ignore_ascii_case("on"));
-    let method = attrs.remove("method").map(parse_attr_as_expr);
-    let entity = attrs.remove("entity").map(parse_attr_as_expr);
+    let ttl = attrs_remove(&mut attrs, "ttl").map(ToOwned::to_owned);
+    let maxwait = attrs_remove(&mut attrs, "maxwait").and_then(|s| s.parse::<u32>().ok());
+    let no_store = attrs_get(&attrs, "no-store").is_some_and(|v| v.eq_ignore_ascii_case("on"));
+    let method = attrs_remove(&mut attrs, "method").map(parse_attr_as_expr);
+    let entity = attrs_remove(&mut attrs, "entity").map(parse_attr_as_expr);
 
-    // Parse header manipulation attributes
+    // Parse header manipulation attributes — duplicates are now preserved.
+    // The full attribute value is stored as a single Expr and split into
+    // "name: value" at runtime, supporting dynamic header names per ESI spec.
     let mut appendheaders = Vec::new();
     let mut setheaders = Vec::new();
     let mut removeheaders = Vec::new();
 
-    // Collect header attributes from remaining attrs
-    let keys: Vec<&str> = attrs.keys().copied().collect();
-    for key in keys {
-        let value = attrs.remove(key).unwrap();
+    for (key, value) in &attrs {
         if key.starts_with("appendheader") {
-            // Parse header format: "Header-Name: value"
-            if let Some((name, val)) = value.split_once(':') {
-                appendheaders.push((name.trim().to_string(), parse_attr_as_expr(val.trim())));
-            }
+            appendheaders.push(parse_attr_as_expr(value));
         } else if key.starts_with("setheader") {
-            if let Some((name, val)) = value.split_once(':') {
-                setheaders.push((name.trim().to_string(), parse_attr_as_expr(val.trim())));
-            }
+            setheaders.push(parse_attr_as_expr(value));
         } else if key.starts_with("removeheader") {
-            removeheaders.push(value.to_owned());
+            removeheaders.push(parse_attr_as_expr(value));
         }
     }
 
@@ -1230,14 +1234,18 @@ fn esi_param(input: &[u8]) -> IResult<&[u8], (String, Expr), Error<&[u8]>> {
     )
     .parse(tag_slice)?;
 
-    let name = attrs.remove("name").unwrap_or_default().to_owned();
-    let value = parse_attr_as_expr(attrs.remove("value").unwrap_or_default());
+    let name = attrs_remove(&mut attrs, "name")
+        .unwrap_or_default()
+        .to_owned();
+    let value = parse_attr_as_expr(attrs_remove(&mut attrs, "value").unwrap_or_default());
     Ok((after, (name, value)))
 }
 
 /// Parse tag attributes (complete mode — caller must ensure full tag is available).
-fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<&str, &str>, Error<&[u8]>> {
-    let mut acc = HashMap::new();
+/// Returns a `Vec` so that duplicate attribute names (e.g. multiple `setheader`)
+/// are preserved, matching the ESI spec.
+fn attributes(input: &[u8]) -> IResult<&[u8], Attrs<'_>, Error<&[u8]>> {
+    let mut acc = Vec::new();
     let mut rest = input;
     loop {
         let Ok((r, _)) = multispace1::<_, Error<&[u8]>>(rest) else {
@@ -1256,7 +1264,7 @@ fn attributes(input: &[u8]) -> IResult<&[u8], HashMap<&str, &str>, Error<&[u8]>>
         let key = unsafe { std::str::from_utf8_unchecked(k) };
         // Values come from htmlstring (arbitrary quoted content) — must validate
         if let Ok(val) = std::str::from_utf8(v) {
-            acc.insert(key, val);
+            acc.push((key, val));
         }
         rest = r;
     }

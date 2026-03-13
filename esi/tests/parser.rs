@@ -233,14 +233,102 @@ fn test_parse_include_numbered_header_attributes() {
     let include_found = elements.iter().any(|element| {
         matches!(element, esi::Element::Esi(
             esi::Tag::Include { attrs, .. }
-        ) if attrs.setheaders.iter().any(|(k, _)| k == "X-A")
-            && attrs.appendheaders.iter().any(|(k, _)| k == "X-B")
-            && attrs.removeheaders.iter().any(|h| h == "X-C"))
+        ) if attrs.setheaders.len() == 1
+            && attrs.appendheaders.len() == 1
+            && attrs.removeheaders.len() == 1)
     });
 
     assert!(
         include_found,
         "Should parse include with numbered set/append/remove header attributes"
+    );
+}
+
+#[test]
+fn test_parse_include_duplicate_setheader_attrs() {
+    // ESI spec allows multiple setheader attributes on the same tag:
+    //   setheader="a_header: a_value", setheader="b_header: b_value"
+    let input = br#"<esi:include src="/frag" setheader="X-A: val_a" setheader="X-B: val_b"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let found = elements.iter().any(|element| {
+        matches!(element, esi::Element::Esi(
+            esi::Tag::Include { attrs, .. }
+        ) if attrs.setheaders.len() == 2)
+    });
+
+    assert!(
+        found,
+        "Both duplicate setheader attributes should be preserved"
+    );
+}
+
+#[test]
+fn test_parse_include_duplicate_appendheader_same_name() {
+    // ESI spec allows multiple appendheader attributes with the same header name:
+    //   appendheader="a_header: value1", appendheader="a_header: value2"
+    let input =
+        br#"<esi:include src="/frag" appendheader="X-Multi: value1" appendheader="X-Multi: value2"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let found = elements.iter().any(|element| {
+        matches!(element, esi::Element::Esi(
+            esi::Tag::Include { attrs, .. }
+        ) if attrs.appendheaders.len() == 2)
+    });
+
+    assert!(
+        found,
+        "Both duplicate appendheader attributes with the same header name should be preserved"
+    );
+}
+
+#[test]
+fn test_parse_include_duplicate_removeheader_attrs() {
+    // Multiple removeheader attributes on the same tag
+    let input = br#"<esi:include src="/frag" removeheader="X-A" removeheader="X-B"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let found = elements.iter().any(|element| {
+        matches!(element, esi::Element::Esi(
+            esi::Tag::Include { attrs, .. }
+        ) if attrs.removeheaders.len() == 2)
+    });
+
+    assert!(
+        found,
+        "Both duplicate removeheader attributes should be preserved"
+    );
+}
+
+#[test]
+fn test_parse_include_appendheader_dynamic_expression() {
+    // ESI spec example: header name and value are both dynamic expressions
+    //   appendheader="$(a_name) + ':' + $(a_value)"
+    let input = br#"<esi:include src="obj.htm" appendheader="$(a_name) + ':' + $(a_value)"/>"#;
+    let bytes = Bytes::from_static(input);
+    let (remaining, elements) = parse_complete(&bytes).expect("should parse");
+
+    assert_eq!(remaining, b"");
+
+    let found = elements.iter().any(|element| {
+        matches!(element, esi::Element::Esi(
+            esi::Tag::Include { attrs, .. }
+        ) if attrs.appendheaders.len() == 1)
+    });
+
+    assert!(
+        found,
+        "appendheader with dynamic expression for name and value should be parsed as a single Expr"
     );
 }
 
