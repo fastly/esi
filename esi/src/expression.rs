@@ -1133,7 +1133,6 @@ fn call_dispatch(identifier: &str, args: &[Value], ctx: &mut EvalContext) -> Res
 
     // Fall back to built-in functions
     match identifier {
-        FN_PING => Ok(Value::Text(FN_PONG.into())),
         FN_LOWER => functions::lower(args),
         FN_UPPER => functions::upper(args),
         FN_HTML_ENCODE => functions::html_encode(args),
@@ -1248,12 +1247,6 @@ mod tests {
             &mut EvalContext::from([("hello".to_string(), Value::Text("nope".into()))]),
         )?;
         assert_eq!(result, Value::Boolean(false));
-        Ok(())
-    }
-    #[test]
-    fn test_eval_function_call() -> Result<()> {
-        let result = evaluate_expression("$ping()", &mut EvalContext::new())?;
-        assert_eq!(result, Value::Text("pong".into()));
         Ok(())
     }
     #[test]

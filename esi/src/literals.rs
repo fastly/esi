@@ -228,9 +228,5 @@ pub const FN_ADD_HEADER: &str = "add_header";
 pub const FN_SET_RESPONSE_CODE: &str = "set_response_code";
 pub const FN_SET_REDIRECT: &str = "set_redirect";
 
-// Function Names - Test/Utility
-pub const FN_PING: &str = "ping";
-pub const FN_PONG: &str = "pong";
-
 // Test URLs
 pub const URL_LOCALHOST: &str = "http://localhost";
