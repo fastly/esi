@@ -1200,9 +1200,7 @@ fn test_dict_subscript_assignment() {
 }
 
 // Test dictionary subscript assignment with expression - from ESI spec
-// TODO: This requires implementing subscript notation in variable expressions $(ages{joan})
 #[test]
-#[ignore]
 fn test_dict_subscript_assignment_with_expression() {
     init_logs();
     let input = r#"<esi:assign name="ages" value="{ 'bob' : 34, 'joan' : 27, 'ed' : 23 }"/>

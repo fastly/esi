@@ -601,7 +601,9 @@ impl EvalContext {
             ),
             VAR_QUERY_STRING => {
                 let params_ref = self.get_query_params();
-                let params = params_ref.as_ref().unwrap();
+                let Some(params) = params_ref.as_ref() else {
+                    return Value::Null;
+                };
 
                 subkey.map_or_else(
                     || {
