@@ -912,7 +912,7 @@ fn test_foreach_with_list() {
     init_logs();
     let input = r#"
         <esi:assign name="nums" value="$string_split('1,2,3', ',')" />
-        <esi:foreach collection="nums" item="n">[$(n)]</esi:foreach>
+        <esi:foreach collection="$(nums)" item="n">[$(n)]</esi:foreach>
     "#;
     let req = Request::get("http://example.com/test");
     let result = process_esi_document(input, req).expect("Processing should succeed");
@@ -928,7 +928,7 @@ fn test_foreach_default_item_name() {
     init_logs();
     let input = r#"
         <esi:assign name="items" value="$string_split('a,b', ',')" />
-        <esi:foreach collection="items">$(item)</esi:foreach>
+        <esi:foreach collection="$(items)">$(item)</esi:foreach>
     "#;
     let req = Request::get("http://example.com/test");
     let result = process_esi_document(input, req).expect("Processing should succeed");
@@ -941,7 +941,7 @@ fn test_foreach_with_break() {
     init_logs();
     let input = r#"
         <esi:assign name="nums" value="$string_split('1,2,3,4,5', ',')" />
-        <esi:foreach collection="nums" item="n"><esi:choose>
+        <esi:foreach collection="$(nums)" item="n"><esi:choose>
             <esi:when test="$(n) == '3'"><esi:break /></esi:when>
             <esi:otherwise>[$(n)]</esi:otherwise>
         </esi:choose></esi:foreach>
@@ -961,7 +961,7 @@ fn test_foreach_with_dict() {
     init_logs();
     let input = r#"
         <esi:assign name="dict" value="$(QUERY_STRING)" />
-        <esi:foreach collection="dict" item="val">x</esi:foreach>
+        <esi:foreach collection="$(dict)" item="val">x</esi:foreach>
     "#;
     let req = Request::get("http://example.com/test?a=1&b=2");
     let result = process_esi_document(input, req).expect("Processing should succeed");
@@ -1050,9 +1050,9 @@ fn test_nested_foreach_with_break() {
     let input = r#"
         <esi:assign name="outer" value="['A','B','C']" />
         <esi:assign name="inner" value="['1','2','3']" />
-        <esi:foreach collection="outer" item="o">
+        <esi:foreach collection="$(outer)" item="o">
 Outer[$(o)]:
-<esi:foreach collection="inner" item="i"><esi:choose>
+<esi:foreach collection="$(inner)" item="i"><esi:choose>
 <esi:when test="$(i) == '2'"><esi:break /></esi:when>
 <esi:otherwise>$(o)-$(i) </esi:otherwise>
 </esi:choose></esi:foreach>
@@ -1221,8 +1221,8 @@ fn test_foreach_nested() {
     let input = r#"
         <esi:assign name="outer" value="$string_split('A,B,C', ',')" />
         <esi:assign name="inner" value="$string_split('1,2,3', ',')" />
-        <esi:foreach collection="outer" item="letter">
-            <esi:foreach collection="inner" item="number">$(letter)$(number) </esi:foreach>
+        <esi:foreach collection="$(outer)" item="letter">
+            <esi:foreach collection="$(inner)" item="number">$(letter)$(number) </esi:foreach>
         </esi:foreach>
     "#;
     let req = Request::get("http://example.com/test");
@@ -1247,8 +1247,8 @@ fn test_foreach_nested_break_inner_only() {
     let input = r#"
         <esi:assign name="outer" value="$string_split('X,Y', ',')" />
         <esi:assign name="inner" value="$string_split('1,2,3', ',')" />
-        <esi:foreach collection="outer" item="letter">
-            [<esi:foreach collection="inner" item="num"><esi:choose>
+        <esi:foreach collection="$(outer)" item="letter">
+            [<esi:foreach collection="$(inner)" item="num"><esi:choose>
                 <esi:when test="$(num) == '2'"><esi:break /></esi:when>
                 <esi:otherwise>$(letter)$(num)</esi:otherwise>
             </esi:choose></esi:foreach>]
@@ -2282,7 +2282,7 @@ $(copy2)</esi:vars>"#;
 ///
 /// ```esi
 /// <esi:assign name="dict" value="{1 : 'one', 2 : 'two', 3 : 'three'}"/>
-/// <esi:foreach collection="dict">
+/// <esi:foreach collection="$(dict)">
 ///   <esi:assign name="copy{$(item{0})}" value="$(item{1})"/>
 /// </esi:foreach>
 /// <esi:assign name="copy{2}" value="Second"/>

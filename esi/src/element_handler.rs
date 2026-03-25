@@ -96,6 +96,17 @@ pub trait ElementHandler {
     // Default: shared dispatch
     // -------------------------------------------------------------------------
 
+    /// Process a slice of elements, returning early on non-`Continue` flow.
+    fn process_elements(&mut self, elements: &[Element]) -> Result<Flow> {
+        for elem in elements {
+            let flow = self.process(elem)?;
+            if !matches!(flow, Flow::Continue) {
+                return Ok(flow);
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
     /// Dispatch a single element to the appropriate handler.
     ///
     /// All context-neutral tags call shared default helpers; context-specific
@@ -212,12 +223,9 @@ pub trait ElementHandler {
 
             match eval_expr(&when_branch.test, self.ctx()) {
                 Ok(test_result) if test_result.to_bool() => {
-                    // This branch matches - recursively process it
-                    for elem in &when_branch.content {
-                        match self.process(elem)? {
-                            Flow::Continue => continue,
-                            other => return Ok(other),
-                        }
+                    let flow = self.process_elements(&when_branch.content)?;
+                    if !matches!(flow, Flow::Continue) {
+                        return Ok(flow);
                     }
                     chose_branch = true;
                     break;
@@ -228,12 +236,7 @@ pub trait ElementHandler {
 
         // No when matched - process otherwise
         if !chose_branch {
-            for elem in otherwise_events {
-                match self.process(elem)? {
-                    Flow::Continue => continue,
-                    other => return Ok(other),
-                }
-            }
+            return self.process_elements(otherwise_events);
         }
 
         Ok(Flow::Continue)
@@ -268,17 +271,15 @@ pub trait ElementHandler {
         let item_var = item.unwrap_or("item").to_string();
 
         // Iterate through items
-        'foreach: for item_value in items {
+        for item_value in items {
             // Set the item variable
             self.ctx().set_variable(&item_var, None, item_value)?;
 
             // Process content for this iteration
-            for elem in content {
-                match self.process(elem)? {
-                    Flow::Continue => continue,
-                    Flow::Break => break 'foreach,
-                    ret @ Flow::Return(_) => return Ok(ret),
-                }
+            match self.process_elements(content)? {
+                Flow::Continue => {}
+                Flow::Break => break,
+                ret @ Flow::Return(_) => return Ok(ret),
             }
         }
 

@@ -384,7 +384,9 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                 // Error with continue_on_error - insert nothing per spec
                 Ok(Flow::Continue)
             }
-            _ => unreachable!("dispatch_include_to_element should only return Include or Content"),
+            QueuedElement::Try { .. } => {
+                unreachable!("dispatch_include_to_element should only return Include or Content")
+            }
         }
     }
 
@@ -414,7 +416,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
 ///
 /// This impl block contains the core logic for processing ESI documents, including
 /// the main streaming loop, fragment dispatching, and queue management. The
-/// DocumentHandler implementation above delegates to these methods for the actual processing work,
+/// `DocumentHandler` implementation above delegates to these methods for the actual processing work,
 /// allowing the handler to focus on interfacing with the streaming architecture and the evaluation context.
 impl Processor {
     pub fn new(original_request_metadata: Option<Request>, configuration: Configuration) -> Self {
@@ -615,10 +617,10 @@ impl Processor {
         dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
+        const MAX_ITERATIONS: usize = 10000;
         // STREAMING INPUT PARSING:
         // Read chunks, parse incrementally, process elements as we parse them
         let chunk_size = self.configuration.chunk_size;
-        const MAX_ITERATIONS: usize = 10000;
 
         // Set up fragment request dispatcher
         let dispatcher = dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
@@ -931,7 +933,7 @@ impl Processor {
         Ok(())
     }
 
-    /// Build a correlation key for matching select() results to dispatched requests.
+    /// Build a correlation key for matching `select()` results to dispatched requests.
     fn make_request_key(req: &Request) -> RequestKey {
         RequestKey {
             method: req.get_method().clone(),
@@ -947,7 +949,7 @@ impl Processor {
     ///   waits; a single pending pool feeds `select()`, removing the xN
     ///   sequential penalty for many consecutive try blocks.
     /// - Each queued element gets a slot in `buf`; try-block includes use the
-    ///   same `buf` slots as bare includes (no separate content_slots system).
+    ///   same `buf` slots as bare includes (no separate `content_slots` system).
     ///   A `TryBlockTracker` records which buf indices belong to each attempt
     ///   so they can be assembled into the outer slot when resolved.
     /// - Request correlation uses (method + URL) keys via `SlotEntry`; the
@@ -960,7 +962,7 @@ impl Processor {
     ) -> Result<()> {
         // `buf[i]` is `None` while the slot is waiting for a response,
         // `Some(bytes)` once it is ready.  Try-block includes use the SAME
-        // buf slots as bare includes — no separate content_slots system.
+        // buf slots as bare includes — no separate `content_slots` system.
         let mut buf: Vec<Option<Bytes>> = Vec::with_capacity(self.queue.len());
         let mut next_out: usize = 0;
 

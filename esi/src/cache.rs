@@ -12,7 +12,7 @@ use log::trace;
 pub struct CacheConfig {
     /// Enable caching of the rendered document (with a common minimum TTL tracked across includes)
     pub is_rendered_cacheable: bool,
-    /// Emit Cache-Control header on final response (independent of is_rendered_cacheable)
+    /// Emit Cache-Control header on final response (independent of `is_rendered_cacheable`)
     pub rendered_cache_control: bool,
     /// TTL in seconds for the rendered document (overrides tracked minimum TTL from includes)
     pub rendered_ttl: Option<u32>,

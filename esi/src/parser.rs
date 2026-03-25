@@ -513,14 +513,11 @@ fn assign_attributes_short(mut attrs: Attrs<'_>) -> ParseResult {
 /// Parse an attribute value as an ESI expression
 /// Used for parsing src/alt/param values which can contain variables, functions, etc.
 /// Examples:
-///   "simple_string" -> Expr::String(Some("simple_string"))
-///   "$(VARIABLE)" -> Expr::Variable("VARIABLE", ...)
-///   "http://example.com/?q=$(QUERY_STRING{'query'})" -> Expr::Interpolated([Text, Expr])
+///
+///   - "`simple_string`" -> `Expr::String(Some("simple_string"))`
+///   - "`$(VARIABLE)`" -> `Expr::Variable("VARIABLE", ...)`
+///   - "`http://example.com/?q=$(QUERY_STRING{'query'})`" -> `Expr::Interpolated([Text, Expr])`
 fn parse_attr_as_expr(value_str: &str) -> Expr {
-    parse_attr_as_expr_with_context(value_str, false)
-}
-
-fn parse_attr_as_expr_with_context(value_str: &str, bare_id_as_variable: bool) -> Expr {
     // Fast-path: empty string
     if value_str.is_empty() {
         return Expr::String(Some(Bytes::new()));
@@ -531,22 +528,6 @@ fn parse_attr_as_expr_with_context(value_str: &str, bare_id_as_variable: bool) -
         // Only accept if we consumed the entire string (pure expression)
         if remaining.is_empty() {
             return expr;
-        }
-    }
-
-    // Special case: bare identifier (e.g., "items" for collection="items")
-    // Whether to treat as variable depends on context
-    if bare_id_as_variable {
-        let is_bare_identifier = value_str
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-            && value_str
-                .as_bytes()
-                .first()
-                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_');
-
-        if is_bare_identifier {
-            return Expr::Variable(value_str.to_owned(), None, None);
         }
     }
 
@@ -800,7 +781,7 @@ fn esi_foreach<'a>(
     )
         .map(|(mut attrs, content, _)| {
             let collection_str = attrs_remove(&mut attrs, "collection").unwrap_or_default();
-            let collection = parse_attr_as_expr_with_context(collection_str, true);
+            let collection = parse_attr_as_expr(collection_str);
             let item = attrs_remove(&mut attrs, "item").map(ToOwned::to_owned);
 
             ParseResult::Single(Element::Esi(Tag::Foreach {
@@ -823,7 +804,7 @@ fn esi_break(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
 ///
 /// Per ESI spec, the content of <esi:function> is treated as a literal string and not parsed for nested tags or expressions.
 /// However, we still need to capture the content as a Bytes slice for runtime evaluation.
-/// We use tag_content to capture the raw content bytes without parsing nested tags,
+/// We use `tag_content` to capture the raw content bytes without parsing nested tags,
 /// and then construct the Function tag with the name and raw body.
 fn esi_function_tag<'a>(
     original: &Bytes,
@@ -857,7 +838,7 @@ fn esi_return(input: &[u8]) -> IResult<&[u8], ParseResult, Error<&[u8]>> {
     )
     .map(|mut attrs| {
         let value_str = attrs_remove(&mut attrs, "value").unwrap_or_default();
-        let value = parse_attr_as_expr_with_context(value_str, false);
+        let value = parse_attr_as_expr(value_str);
 
         ParseResult::Single(Element::Esi(Tag::Return { value }))
     })
@@ -1895,7 +1876,7 @@ fn list_literal(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
 
 /// Parse primary expressions (highest precedence atoms)
 /// Handles: variables, functions, literals, grouped expressions
-/// Extends interpolated_expression with grouped expressions and negative integers
+/// Extends `interpolated_expression` with grouped expressions and negative integers
 fn primary_expr(input: &[u8]) -> IResult<&[u8], Expr, Error<&[u8]>> {
     match input.first() {
         // Parse grouped expression: (expr) — only valid in expression context, not interpolated content
@@ -2778,7 +2759,7 @@ exception!
 
     #[test]
     fn test_parse_foreach() {
-        let input = b"<esi:foreach collection=\"items\" item=\"x\">Item: $(x)</esi:foreach>";
+        let input = b"<esi:foreach collection=\"$(items)\" item=\"x\">Item: $(x)</esi:foreach>";
         let bytes = Bytes::from_static(input);
         let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
@@ -2800,7 +2781,7 @@ exception!
 
     #[test]
     fn test_parse_foreach_no_item() {
-        let input = b"<esi:foreach collection=\"mylist\">Value: $(item)</esi:foreach>";
+        let input = b"<esi:foreach collection=\"$(mylist)\">Value: $(item)</esi:foreach>";
         let bytes = Bytes::from_static(input);
         let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
@@ -2832,7 +2813,7 @@ exception!
 
     #[test]
     fn test_parse_foreach_with_break() {
-        let input = b"<esi:foreach collection=\"items\"><esi:break /></esi:foreach>";
+        let input = b"<esi:foreach collection=\"$(items)\"><esi:break /></esi:foreach>";
         let bytes = Bytes::from_static(input);
         let (rest, elements) = parse_complete(&bytes).unwrap();
         assert_eq!(rest.len(), 0);
