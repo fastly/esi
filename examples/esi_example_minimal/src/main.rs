@@ -36,7 +36,7 @@ fn handle_request(req: Request) -> Result<(), Error> {
         processor.process_response(
             &mut beresp,
             None,
-            Some(&|req| {
+            Some(&|req, _maxwait: Option<u32>| {
                 info!("Sending request {} {}", req.get_method(), req.get_path());
                 Ok(req.with_ttl(120).send_async("mock-s3")?.into())
             }),

@@ -1,61 +1,185 @@
 #![doc = include_str!("../README.md")]
 
+pub(crate) mod cache;
 mod config;
-mod document;
+mod element_handler;
 mod error;
 mod expression;
 mod functions;
-mod parse;
+mod literals;
+mod parser;
+pub(crate) mod parser_types;
 
-use crate::document::{FetchState, Task};
-use crate::expression::{evaluate_expression, try_evaluate_interpolated, EvalContext};
-use fastly::http::request::PendingRequest;
+use crate::element_handler::{ElementHandler, Flow};
+use crate::expression::EvalContext;
+use crate::parser_types::{DcaMode, IncludeAttributes};
+#[cfg(not(feature = "expose-internals"))]
+use crate::parser_types::{Element, Expr};
+use bytes::{Bytes, BytesMut};
+use fastly::http::request::{select, PendingRequest};
 use fastly::http::{header, Method, StatusCode, Url};
-use fastly::{mime, Body, Request, Response};
-use log::{debug, error, trace};
-use std::collections::VecDeque;
+use fastly::{mime, Backend, Request, Response};
+use log::debug;
+use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
-pub use crate::document::{Element, Fragment};
-pub use crate::error::Result;
-pub use crate::parse::{parse_tags, Event, Include, Tag, Tag::Try};
+pub use crate::error::{ESIError, Result};
+#[cfg(feature = "expose-internals")]
+pub use crate::parser::parse;
+#[cfg(feature = "expose-internals")]
+pub use crate::parser::{interpolated_content, parse_complete, parse_expression};
 
+pub use crate::cache::CacheConfig;
 pub use crate::config::Configuration;
-pub use crate::error::ExecutionError;
+#[cfg(feature = "expose-internals")]
+pub use crate::parser_types::{Element, Expr, Tag};
 
-// re-export quick_xml Reader and Writer
-pub use quick_xml::{Reader, Writer};
-
-type FragmentRequestDispatcher = dyn Fn(Request) -> Result<PendingFragmentContent>;
+type FragmentRequestDispatcher = dyn Fn(Request, Option<u32>) -> Result<PendingFragmentContent>;
 
 type FragmentResponseProcessor = dyn Fn(&mut Request, Response) -> Result<Response>;
 
 /// Representation of a fragment that is either being fetched, has already been fetched (or generated synthetically), or skipped.
 pub enum PendingFragmentContent {
-    PendingRequest(PendingRequest),
-    CompletedRequest(Response),
+    PendingRequest(Box<PendingRequest>),
+    CompletedRequest(Box<Response>),
     NoContent,
 }
 
 impl From<PendingRequest> for PendingFragmentContent {
     fn from(value: PendingRequest) -> Self {
-        Self::PendingRequest(value)
+        Self::PendingRequest(Box::new(value))
     }
 }
 
 impl From<Response> for PendingFragmentContent {
     fn from(value: Response) -> Self {
-        Self::CompletedRequest(value)
+        Self::CompletedRequest(Box::new(value))
     }
 }
 
+/// Evaluated fragment request metadata
+/// Store evaluated values once to avoid re-evaluation on alt fallback
+struct FragmentMetadata {
+    /// HTTP method to use for the request (default GET)
+    method: Option<Bytes>,
+    /// Optional body for POST requests
+    entity: Option<Bytes>,
+    /// Headers to set on the request ("name: value" pairs)
+    setheaders: Vec<(String, Bytes)>,
+    /// Headers to append to the request ("name: value" pairs)
+    appendheaders: Vec<(String, Bytes)>,
+    /// Headers to remove from the request
+    removeheaders: Vec<String>,
+    /// Whether the request should be cached or not
+    cacheable: bool,
+    /// Optional TTL override from the include tag (in seconds)
+    ttl_override: Option<u32>,
+    // Flags needed for fragment processing
+    continue_on_error: bool,
+    /// Optional timeout in milliseconds for this specific request
+    maxwait: Option<u32>,
+    /// Dynamic Content Assembly mode for this request I(controls pre-processing)
+    dca: DcaMode,
+}
+
+/// Representation of an ESI fragment request with its metadata and pending response
+pub struct Fragment {
+    /// Metadata of the request
+    pub(crate) req: Request,
+    /// An optional alternate request to send if the original request fails
+    pub(crate) alt_bytes: Option<Bytes>,
+    /// The pending fragment response, which can be polled to retrieve the content
+    pub(crate) pending_fragment: PendingFragmentContent,
+    /// Evaluated parameters (reusable for alt fallback)
+    pub(crate) metadata: FragmentMetadata,
+}
+
+/// Queue element for streaming processing
+/// Elements that need to be executed in order
+enum QueuedElement {
+    /// Raw content ready to write (text/html/evaluated expressions)
+    Content(Bytes),
+    /// A dispatched include waiting to be executed
+    Include(Box<Fragment>),
+    /// A try block with unevaluated attempt/except elements.
+    /// Elements are executed lazily in document order when the block is drained.
+    Try {
+        attempt_elements: Vec<Vec<Element>>,
+        except_elements: Vec<Element>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Parallel try-block tracking types (flat-buf design)
+// ---------------------------------------------------------------------------
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct RequestKey {
+    method: Method,
+    url: String,
+}
+
+/// Tracks an in-flight `<esi:try>` block in `drain_queue`.
+///
+/// Try-block includes share the main `buf` slots (same as bare includes)
+/// instead of maintaining a separate `content_slots` system.  Each attempt
+/// records which `buf` indices hold its content so that assembly can
+/// concatenate them once every pending include has been resolved.
+struct TryBlockTracker {
+    /// `buf` slot reserved for the assembled try-block output.
+    outer_slot: usize,
+    /// Per-attempt tracking (document order).
+    attempts: Vec<AttemptTracker>,
+    /// Deferred until all attempts resolve; only evaluated if any attempt
+    /// failed.
+    except_elements: Vec<Element>,
+    /// Total in-flight includes across all attempts.  When this reaches
+    /// zero the block is ready to assemble.
+    pending_count: usize,
+}
+
+/// Per-attempt state inside a [`TryBlockTracker`].
+struct AttemptTracker {
+    /// Indices into the main `buf` vec that hold this attempt's content
+    /// (both static text and resolved includes), in document order.
+    buf_slots: Vec<usize>,
+    /// Set to `true` if any include in this attempt returned a non-success
+    /// status without `continue_on_error`.
+    failed: bool,
+}
+
+/// Entry in the `url_map` that correlates a completing `PendingRequest`
+/// back to the `buf` slot it should fill.
+///
+/// A single struct covers both bare `<esi:include>`s and includes inside
+/// `<esi:try>` blocks — the `try_info` field distinguishes the two cases.
+struct SlotEntry {
+    /// Index into the main `buf` vec to fill with the processed response.
+    buf_slot: usize,
+    /// Fragment metadata needed to process the response (alt, headers, dca…).
+    fragment: Box<Fragment>,
+    /// `Some((tracker_idx, attempt_idx))` when this include lives inside a
+    /// try block; `None` for a bare include.
+    try_info: Option<(usize, usize)>,
+}
+
 impl PendingFragmentContent {
-    fn wait_for_content(self) -> Result<Response> {
-        Ok(match self {
-            Self::PendingRequest(pending_request) => pending_request.wait()?,
-            Self::CompletedRequest(response) => response,
-            Self::NoContent => Response::from_status(StatusCode::NO_CONTENT),
-        })
+    /// Check if the content is ready (completed or no content)
+    pub const fn is_ready(&self) -> bool {
+        !matches!(self, Self::PendingRequest(_))
+    }
+
+    /// Wait for and retrieve the response from a pending fragment request
+    pub fn wait(self) -> Result<Response> {
+        match self {
+            Self::PendingRequest(pending_request) => pending_request.wait().map_err(|e| {
+                ESIError::FragmentRequestError(format!("fragment request wait failed: {e}"))
+            }),
+            Self::CompletedRequest(response) => Ok(*response),
+            Self::NoContent => Ok(Response::from_status(StatusCode::NO_CONTENT)),
+        }
     }
 }
 
@@ -66,7 +190,7 @@ impl PendingFragmentContent {
 /// and conditional processing according to the ESI specification.
 ///
 /// # Fields
-/// * `original_request_metadata` - Optional original client request data used for fragment requests
+/// * `ctx` - Evaluation context containing variables and request metadata
 /// * `configuration` - Configuration settings controlling ESI processing behavior
 ///
 /// # Example
@@ -84,20 +208,252 @@ impl PendingFragmentContent {
 /// let processor = Processor::new(Some(request), config);
 /// ```
 pub struct Processor {
-    // The original client request metadata, if any.
-    original_request_metadata: Option<Request>,
+    // The evaluation context containing variables and request metadata
+    ctx: EvalContext,
     // The configuration for the processor.
     configuration: Configuration,
+    // Queue for pending fragments and blocked content
+    queue: VecDeque<QueuedElement>,
 }
 
+/// [`ElementHandler`] implementation for top-level ESI document processing.
+///
+/// Pairs with [`FunctionHandler`](crate::expression::FunctionHandler) — together they are the two
+/// concrete implementors of the trait, distinguished by execution context: this one drives
+/// [`Processor`]'s streaming pipeline, giving the shared default methods access to the
+/// output writer, the fragment dispatcher, and the ready-queue.
+//
+// (contrast with `FunctionHandler` in expression.rs, which drives user-defined function bodies)
+struct DocumentHandler<'a, W: Write> {
+    processor: &'a mut Processor,
+    output: &'a mut W,
+    dispatch_fragment_request: &'a FragmentRequestDispatcher,
+    fragment_response_handler: Option<&'a FragmentResponseProcessor>,
+}
+
+impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
+    fn ctx(&mut self) -> &mut EvalContext {
+        &mut self.processor.ctx
+    }
+
+    fn process_queue(&mut self) -> crate::Result<()> {
+        self.processor.process_queue(
+            self.output,
+            self.dispatch_fragment_request,
+            self.fragment_response_handler,
+        )
+    }
+
+    fn write_bytes(&mut self, bytes: Bytes) -> crate::Result<()> {
+        if self.processor.queue.is_empty() {
+            // Not blocked - write immediately
+            self.output
+                .write_all(&bytes)
+                .map_err(ESIError::WriterError)?;
+        } else {
+            // Blocked by a pending fragment - enqueue for later
+            self.processor
+                .queue
+                .push_back(QueuedElement::Content(bytes));
+        }
+        Ok(())
+    }
+
+    fn on_return(&mut self, _value: &Expr) -> crate::Result<Flow> {
+        // Return tags should only appear inside function bodies, not at the streaming level
+        Ok(Flow::Continue)
+    }
+
+    fn on_include(&mut self, attrs: &IncludeAttributes) -> crate::Result<Flow> {
+        let queued_element = self
+            .processor
+            .dispatch_include(attrs, self.dispatch_fragment_request)?;
+        self.processor.queue.push_back(queued_element);
+        Ok(Flow::Continue)
+    }
+
+    /// Handle `<esi:eval …/>` — BLOCKING operation that fetches and re-processes content as ESI.
+    ///
+    /// The `dca` attribute controls processing mode:
+    /// - `dca="none"` (default): fragment executed in parent's context (shared variables).
+    /// - `dca="esi"`:  fragment executed in an isolated context (output only, no variable leakage).
+    fn on_eval(&mut self, attrs: &IncludeAttributes) -> crate::Result<Flow> {
+        // Build and dispatch the request (same machinery as include, but blocking)
+        let queued_element = self
+            .processor
+            .dispatch_include(attrs, self.dispatch_fragment_request)?;
+
+        match queued_element {
+            QueuedElement::Include(fragment) => {
+                // Eval is BLOCKING - wait for the response immediately
+                let response = fragment.pending_fragment.wait()?;
+
+                if !response.get_status().is_success() {
+                    if fragment.metadata.continue_on_error {
+                        // Per ESI spec: onerror="continue" deletes the tag with no output
+                        return Ok(Flow::Continue);
+                    }
+                    return Err(ESIError::UnexpectedStatus {
+                        url: "eval".to_string(),
+                        status: response.get_status().as_u16(),
+                    });
+                }
+
+                // Get the response body
+                let body_bytes = response.into_body_bytes();
+                let body_as_bytes = Bytes::from(body_bytes);
+
+                // ALWAYS parse as ESI (this is the key difference from include)
+                let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
+                    ESIError::ParseError(format!("failed to parse eval fragment: {e}"))
+                })?;
+
+                if !rest.is_empty() {
+                    return Err(ESIError::ParseError(
+                        "incomplete parse of eval fragment".into(),
+                    ));
+                }
+
+                if fragment.metadata.dca == DcaMode::Esi {
+                    // dca="esi": TWO-PHASE processing
+                    // Phase 1: Process fragment in ISOLATED context
+                    // Reborrow before the exclusive borrow of self.processor below
+                    let dispatcher = self.dispatch_fragment_request;
+                    let resp_handler = self.fragment_response_handler;
+                    let mut isolated_processor = Processor::new(
+                        Some(self.processor.ctx.get_request().clone_without_body()),
+                        self.processor.configuration.clone(),
+                    );
+                    let mut isolated_output = Vec::new();
+
+                    {
+                        let mut isolated_handler = DocumentHandler {
+                            processor: &mut isolated_processor,
+                            output: &mut isolated_output,
+                            dispatch_fragment_request: dispatcher,
+                            fragment_response_handler: resp_handler,
+                        };
+                        for element in elements {
+                            isolated_handler.process(&element)?;
+                        }
+                        // isolated_handler drops here, releasing the mutable borrow of isolated_output
+                    }
+
+                    // Drain any includes dispatched during Phase 1 (e.g. <esi:include> inside the eval'd fragment).
+                    // Must happen before we read isolated_output, while isolated_handler has already dropped.
+                    isolated_processor.drain_queue(
+                        &mut isolated_output,
+                        dispatcher,
+                        resp_handler,
+                    )?;
+
+                    // Phase 2: Parse the isolated output as ESI and process in PARENT's context
+                    // This is why variables don't leak: they only exist in phase 1
+                    let isolated_bytes = Bytes::from(isolated_output);
+                    let (rest, output_elements) =
+                        parser::parse_complete(&isolated_bytes).map_err(|e| {
+                            ESIError::ParseError(format!(
+                                "failed to parse eval isolated output: {e}",
+                            ))
+                        })?;
+
+                    if !rest.is_empty() {
+                        return Err(ESIError::ParseError(
+                            "incomplete parse of eval isolated output".into(),
+                        ));
+                    }
+
+                    for element in output_elements {
+                        if matches!(self.process(&element)?, Flow::Break) {
+                            return Ok(Flow::Break);
+                        }
+                    }
+                } else {
+                    // dca="none": SINGLE-PHASE processing in PARENT's context
+                    // Fragment included first, then executed in parent (variables affect parent)
+                    for element in elements {
+                        if matches!(self.process(&element)?, Flow::Break) {
+                            return Ok(Flow::Break); // Propagate break from eval'd content
+                        }
+                    }
+                }
+
+                Ok(Flow::Continue)
+            }
+            QueuedElement::Content(_) => {
+                // Error with continue_on_error - insert nothing per spec
+                Ok(Flow::Continue)
+            }
+            QueuedElement::Try { .. } => {
+                unreachable!("dispatch_include_to_element should only return Include or Content")
+            }
+        }
+    }
+
+    fn on_try(
+        &mut self,
+        attempt_events: Vec<Vec<Element>>,
+        except_events: Vec<Element>,
+    ) -> crate::Result<Flow> {
+        // Store raw elements; they will be evaluated lazily in document order
+        // when the try block is drained.  This ensures variable assignments
+        // made by earlier elements in the attempt are visible to later includes.
+        self.processor.queue.push_back(QueuedElement::Try {
+            attempt_elements: attempt_events,
+            except_elements: except_events,
+        });
+        Ok(Flow::Continue)
+    }
+
+    fn on_function(&mut self, name: String, body: Vec<Element>) -> crate::Result<Flow> {
+        // Register user-defined function in the evaluation context
+        self.processor.ctx.register_function(name, body);
+        Ok(Flow::Continue)
+    }
+}
+
+/// Implementation of the main Processor methods driving ESI processing
+///
+/// This impl block contains the core logic for processing ESI documents, including
+/// the main streaming loop, fragment dispatching, and queue management. The
+/// `DocumentHandler` implementation above delegates to these methods for the actual processing work,
+/// allowing the handler to focus on interfacing with the streaming architecture and the evaluation context.
 impl Processor {
-    pub const fn new(
-        original_request_metadata: Option<Request>,
-        configuration: Configuration,
-    ) -> Self {
+    pub fn new(original_request_metadata: Option<Request>, configuration: Configuration) -> Self {
+        let mut ctx = EvalContext::new();
+        if let Some(req) = original_request_metadata {
+            ctx.set_request(req);
+        } else {
+            ctx.set_request(Request::new(Method::GET, "http://localhost"));
+        }
+        // Apply configuration settings to context
+        ctx.set_max_function_recursion_depth(configuration.function_recursion_depth);
         Self {
-            original_request_metadata,
+            ctx,
             configuration,
+            queue: VecDeque::new(),
+        }
+    }
+
+    /// Get the evaluation context (for testing)
+    ///
+    /// Provides access to the processor's internal state including variables,
+    /// response headers, status code, and body overrides set by ESI functions.
+    pub const fn context(&self) -> &EvalContext {
+        &self.ctx
+    }
+
+    /// Return the error for failed fragment requests.
+    ///
+    /// For HTML content (`is_escaped_content = true`) an HTML comment is inserted
+    /// so that the failure is visible in the rendered document.  For non-HTML
+    /// content (JSON, XML, …) nothing is emitted to avoid polluting the output
+    /// with HTML comment syntax.
+    const fn fragment_req_failed(&self) -> &'static [u8] {
+        if self.configuration.is_escaped_content {
+            FRAGMENT_REQUEST_FAILED
+        } else {
+            b""
         }
     }
 
@@ -107,8 +463,35 @@ impl Processor {
     /// minimizing memory usage for large responses. It handles ESI includes, conditionals, and variable
     /// substitution according to the ESI specification.
     ///
+    /// ## Response Manipulation Functions
+    ///
+    /// ESI functions can modify the response that gets sent to the client:
+    ///
+    /// ### `$add_header(name, value)`
+    /// Adds a custom header to the response:
+    /// ```text
+    /// <esi:vars>$add_header('X-Custom-Header', 'my-value')</esi:vars>
+    /// ```
+    ///
+    /// ### `$set_response_code(code [, body])`
+    /// Sets the HTTP status code and optionally replaces the response body:
+    /// ```text
+    /// <esi:vars>$set_response_code(404, 'Page not found')</esi:vars>
+    /// ```
+    ///
+    /// ### `$set_redirect(url [, code])`
+    /// Sets up an HTTP redirect (default 302):
+    /// ```text
+    /// <esi:vars>$set_redirect('https://example.com/new-page')</esi:vars>
+    /// <esi:vars>$set_redirect('https://example.com/moved', 301)</esi:vars>
+    /// ```
+    ///
+    /// **Note:** These functions modify the response metadata that `process_response` will use
+    /// when sending the response to the client. The headers, status code, and body override are
+    /// buffered during processing and applied when the response is sent.
+    ///
     /// # Arguments
-    /// * `src_document` - Source HTTP response containing ESI markup to process
+    /// * `src_stream` - Source HTTP response containing ESI markup to process
     /// * `client_response_metadata` - Optional response metadata (headers, status) to send to client
     /// * `dispatch_fragment_request` - Optional callback for customizing fragment request handling
     /// * `process_fragment_response` - Optional callback for processing fragment responses
@@ -129,9 +512,9 @@ impl Processor {
     /// response.set_body("<esi:include src='http://example.com/header.html'/>");
     ///
     /// // Define a simple fragment dispatcher
-    /// fn default_fragment_dispatcher(req: fastly::Request) -> esi::Result<esi::PendingFragmentContent> {
+    /// fn default_fragment_dispatcher(req: fastly::Request, maxwait: Option<u32>) -> esi::Result<esi::PendingFragmentContent> {
     ///     Ok(esi::PendingFragmentContent::CompletedRequest(
-    ///         fastly::Response::from_body("Fragment content")
+    ///         Box::new(fastly::Response::from_body("Fragment content"))
     ///     ))
     /// }
     /// // Process the response, streaming the resulting document directly to the client
@@ -141,7 +524,7 @@ impl Processor {
     ///     Some(&default_fragment_dispatcher),
     ///     None
     /// )?;
-    /// # Ok::<(), esi::ExecutionError>(())
+    /// # Ok::<(), esi::ESIError>(())
     /// ```
     ///
     /// # Errors
@@ -150,654 +533,1156 @@ impl Processor {
     /// * Stream writing fails
     /// * Fragment requests fail
     pub fn process_response(
-        self,
-        src_document: &mut Response,
+        mut self,
+        src_stream: &mut Response,
         client_response_metadata: Option<Response>,
         dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
-        // Create a response to send the headers to the client
-        let resp = client_response_metadata.unwrap_or_else(|| {
+        let mut output = Vec::new();
+
+        self.process_stream(
+            src_stream.take_body(),
+            &mut output,
+            dispatch_fragment_request,
+            process_fragment_response,
+        )?;
+
+        let mut resp = client_response_metadata.unwrap_or_else(|| {
             Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML)
         });
 
-        // Send the response headers to the client and open an output stream
-        let output_writer = resp.stream_to_client();
-
-        // Set up an XML writer to write directly to the client output stream.
-        let mut xml_writer = Writer::new(output_writer);
-
-        match self.process_document(
-            reader_from_body(src_document.take_body()),
-            &mut xml_writer,
-            dispatch_fragment_request,
-            process_fragment_response,
-        ) {
-            Ok(()) => {
-                xml_writer.into_inner().finish()?;
-                Ok(())
-            }
-            Err(err) => {
-                error!("error processing ESI document: {err}");
-                Err(err)
+        // Add Cache-Control header if configured to emit it
+        if self.configuration.cache.rendered_cache_control {
+            if let Some(cache_control_value) = self
+                .ctx
+                .cache_control_header(self.configuration.cache.rendered_ttl)
+            {
+                resp.set_header(header::CACHE_CONTROL, cache_control_value);
             }
         }
+
+        // Apply any response headers set during processing
+        for (name, value) in self.ctx.response_headers() {
+            resp.set_header(name, value);
+        }
+
+        if let Some(status) = self.ctx.response_status() {
+            let status_code = StatusCode::from_u16(status as u16).map_err(|_| {
+                ESIError::FunctionError("set_response_code: invalid status code".to_string())
+            })?;
+            resp.set_status(status_code);
+        }
+
+        let body_bytes = self
+            .ctx
+            .response_body_override()
+            .cloned()
+            .unwrap_or_else(|| Bytes::from(output));
+
+        resp.set_body(body_bytes.as_ref());
+        resp.send_to_client();
+        Ok(())
     }
 
-    /// Process an ESI document that has already been parsed into a queue of events.
+    /// Process an ESI stream from any `BufRead` into a `Write`.
     ///
-    /// Takes a queue of already parsed ESI events and processes them, writing the output
-    /// to the provided writer. This method is used internally after parsing but can also
-    /// be called directly if you have pre-parsed events.
+    /// - Reads in configurable-size chunks (default 16 KB), buffering only what the parser needs
+    /// - Parses incrementally; writes content as soon as it’s parsed
+    /// - Dispatches includes immediately; waits for them later in document order
+    /// - Uses `select()` to harvest in-flight includes while preserving output order
+    ///
+    /// For Fastly `Response` bodies, prefer `process_response`, which wires up
+    /// cache headers and response metadata for you.
     ///
     /// # Arguments
-    /// * `src_events` - Queue of parsed ESI events to process
-    /// * `output_writer` - Writer to stream processed output to
+    /// * `src_stream` - `BufRead` source containing ESI markup (streams in chunks)
+    /// * `output_writer` - Writer to stream processed output to (writes immediately)
     /// * `dispatch_fragment_request` - Optional handler for fragment requests
     /// * `process_fragment_response` - Optional processor for fragment responses
     ///
     /// # Returns
     /// * `Result<()>` - Ok if processing completed successfully
     ///
-    /// # Example
-    /// ```
-    /// use std::io::Cursor;
-    /// use std::collections::VecDeque;
-    /// use esi::{Event, Reader, Writer, Processor, Configuration};
-    /// use quick_xml::events::Event as XmlEvent;
-    ///
-    /// let events = VecDeque::from([Event::Content(XmlEvent::Empty(
-    ///     quick_xml::events::BytesStart::new("div")
-    /// ))]);
-    ///
-    /// let mut writer = Writer::new(Cursor::new(Vec::new()));
-    ///
-    /// let processor = Processor::new(None, esi::Configuration::default());
-    ///
-    /// processor.process_parsed_document(
-    ///     events,
-    ///     &mut writer,
-    ///     None,
-    ///     None
-    /// )?;
-    /// # Ok::<(), esi::ExecutionError>(())
-    /// ```
-    ///
     /// # Errors
     /// Returns error if:
-    /// * Event processing fails
-    /// * Writing to output fails
-    /// * Fragment request/response processing fails
-    ///
-    pub fn process_parsed_document(
-        self,
-        src_events: VecDeque<Event>,
-        output_writer: &mut Writer<impl Write>,
+    /// * ESI markup parsing fails or document is malformed
+    /// * Fragment requests fail (unless `continue_on_error` is set)
+    /// * Input reading or output writing fails
+    /// * Invalid UTF-8 encoding encountered
+    pub fn process_stream(
+        &mut self,
+        mut src_stream: impl BufRead,
+        output_writer: &mut impl Write,
         dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
-        // Set up fragment request dispatcher. Use what's provided or use a default
-        let dispatch_fragment_request =
-            dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
+        const MAX_ITERATIONS: usize = 10000;
+        // STREAMING INPUT PARSING:
+        // Read chunks, parse incrementally, process elements as we parse them
+        let chunk_size = self.configuration.chunk_size;
 
-        // If there is a source request to mimic, copy its metadata, otherwise use a default request.
-        let original_request_metadata = self.original_request_metadata.as_ref().map_or_else(
-            || Request::new(Method::GET, "http://localhost"),
-            Request::clone_without_body,
-        );
+        // Set up fragment request dispatcher
+        let dispatcher = dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
 
-        // `root_task` is the root task that will be used to fetch tags in recursive manner
-        let root_task = &mut Task::new();
+        // Using BytesMut for zero-copy parsing
+        let mut buffer = BytesMut::with_capacity(chunk_size);
+        let mut read_buf = vec![0u8; chunk_size];
+        let mut eof = false;
+        let mut iterations = 0;
 
-        // context for the interpreter
-        let mut ctx = EvalContext::new();
-        ctx.set_request(original_request_metadata.clone_without_body());
+        loop {
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                return Err(ESIError::InfiniteLoop {
+                    iterations,
+                    buffer_len: buffer.len(),
+                    eof,
+                });
+            }
+            // Read more data if we haven't hit EOF yet
+            if !eof {
+                match src_stream.read(&mut read_buf) {
+                    Ok(0) => eof = true,
+                    Ok(n) => buffer.extend_from_slice(&read_buf[..n]),
+                    Err(e) => return Err(ESIError::WriterError(e)),
+                }
+            }
 
-        for event in src_events {
-            event_receiver(
-                event,
-                &mut root_task.queue,
-                self.configuration.is_escaped_content,
-                &original_request_metadata,
-                dispatch_fragment_request,
-                &mut ctx,
-            )?;
+            // Freeze the current buffer for parsing (shared, ref-counted view)
+            let frozen = buffer.split().freeze();
+
+            // Use streaming parser unless we're at EOF
+            let parse_result = if eof {
+                parser::parse_eof(&frozen)
+            } else {
+                parser::parse(&frozen)
+            };
+
+            match parse_result {
+                Ok((remaining, elements)) => {
+                    let mut handler = DocumentHandler {
+                        processor: self,
+                        output: output_writer,
+                        dispatch_fragment_request: dispatcher,
+                        fragment_response_handler: process_fragment_response,
+                    };
+                    for element in elements {
+                        handler.process(&element)?;
+                        handler.process_queue()?;
+                    }
+
+                    if eof {
+                        // Nothing left to read — we're done
+                        break;
+                    }
+                    if !remaining.is_empty() {
+                        // Carry unconsumed remainder back into the buffer for next iteration
+                        let consumed = frozen.len() - remaining.len();
+                        buffer.extend_from_slice(&frozen[consumed..]);
+                    }
+                }
+                Err(nom::Err::Incomplete(_)) => {
+                    // Streaming parser needs more data (parse_eof never returns
+                    // Incomplete — it converts it to Failure(Eof) instead)
+                    debug_assert!(!eof, "parse_eof should not return Incomplete");
+                    // Not at EOF - loop will read more data
+                }
+                Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
+                    if eof {
+                        // At EOF: check if this is a truncated-document failure from parse_eof
+                        if e.code == nom::error::ErrorKind::Eof {
+                            return Err(ESIError::UnexpectedEndOfDocument);
+                        }
+                        return Err(ESIError::ParseError(format!("parser error: {e:?}")));
+                    }
+                    // Not at EOF - maybe more data will help, output what we have and continue
+                    output_writer.write_all(&buffer)?;
+                    buffer.clear();
+                }
+            }
         }
 
-        Self::process_root_task(
-            root_task,
-            output_writer,
-            dispatch_fragment_request,
-            process_fragment_response,
-        )
-    }
-
-    /// Process an ESI document from a [`Reader`], handling includes and directives
-    ///
-    /// Processes ESI directives while streaming content to the output writer. Handles:
-    /// - ESI includes with fragment fetching
-    /// - Variable substitution
-    /// - Conditional processing
-    /// - Try/except blocks
-    ///
-    /// # Arguments
-    /// * `src_document` - Reader containing source XML/HTML with ESI markup
-    /// * `output_writer` - Writer to stream processed output to
-    /// * `dispatch_fragment_request` - Optional handler for fragment requests
-    /// * `process_fragment_response` - Optional processor for fragment responses
-    ///
-    /// # Returns
-    /// * `Result<()>` - Ok if processing completed successfully
-    ///
-    /// # Example
-    /// ```
-    /// use esi::{Reader, Writer, Processor, Configuration};
-    /// use std::io::Cursor;
-    ///
-    /// let xml = r#"<esi:include src="http://example.com/header.html"/>"#;
-    /// let reader = Reader::from_str(xml);
-    /// let mut writer = Writer::new(Cursor::new(Vec::new()));
-    ///
-    /// let processor = Processor::new(None, Configuration::default());
-    ///
-    ///  // Define a simple fragment dispatcher
-    /// fn default_fragment_dispatcher(req: fastly::Request) -> esi::Result<esi::PendingFragmentContent> {
-    ///     Ok(esi::PendingFragmentContent::CompletedRequest(
-    ///         fastly::Response::from_body("Fragment content")
-    ///     ))
-    /// }
-    /// processor.process_document(
-    ///     reader,
-    ///     &mut writer,
-    ///     Some(&default_fragment_dispatcher),
-    ///     None
-    /// )?;
-    /// # Ok::<(), esi::ExecutionError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// * ESI markup parsing fails
-    /// * Fragment requests fail
-    /// * Output writing fails
-    pub fn process_document(
-        self,
-        mut src_document: Reader<impl BufRead>,
-        output_writer: &mut Writer<impl Write>,
-        dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
-        process_fragment_response: Option<&FragmentResponseProcessor>,
-    ) -> Result<()> {
-        // Set up fragment request dispatcher. Use what's provided or use a default
-        let dispatch_fragment_request =
-            dispatch_fragment_request.unwrap_or(&default_fragment_dispatcher);
-
-        // If there is a source request to mimic, copy its metadata, otherwise use a default request.
-        let original_request_metadata = self.original_request_metadata.as_ref().map_or_else(
-            || Request::new(Method::GET, "http://localhost"),
-            Request::clone_without_body,
-        );
-
-        // `root_task` is the root task that will be used to fetch tags in recursive manner
-        let root_task = &mut Task::new();
-
-        // context for the interpreter
-        let mut ctx = EvalContext::new();
-        ctx.set_request(original_request_metadata.clone_without_body());
-
-        // Call the library to parse fn `parse_tags` which will call the callback function
-        // on each tag / event it finds in the document.
-        // The callback function `handle_events` will handle the event.
-        parse_tags(
-            &self.configuration.namespace,
-            &mut src_document,
-            &mut |event| {
-                event_receiver(
-                    event,
-                    &mut root_task.queue,
-                    self.configuration.is_escaped_content,
-                    &original_request_metadata,
-                    dispatch_fragment_request,
-                    &mut ctx,
-                )
-            },
-        )?;
-
-        Self::process_root_task(
-            root_task,
-            output_writer,
-            dispatch_fragment_request,
-            process_fragment_response,
-        )
-    }
-
-    fn process_root_task(
-        root_task: &mut Task,
-        output_writer: &mut Writer<impl Write>,
-        dispatch_fragment_request: &FragmentRequestDispatcher,
-        process_fragment_response: Option<&FragmentResponseProcessor>,
-    ) -> Result<()> {
-        // set the root depth to 0
-        let mut depth = 0;
-
-        debug!("Elements to fetch: {:?}", root_task.queue);
-
-        // Elements dependent on backend requests are queued up.
-        // The responses will need to be fetched and processed.
-        // Go over the list for any pending responses and write them to the client output stream.
-        fetch_elements(
-            &mut depth,
-            root_task,
-            output_writer,
-            dispatch_fragment_request,
-            process_fragment_response,
-        )?;
+        // DRAIN QUEUE: Wait for all remaining pending fragments (blocking waits)
+        self.drain_queue(output_writer, dispatcher, process_fragment_response)?;
 
         Ok(())
     }
-}
 
-fn default_fragment_dispatcher(req: Request) -> Result<PendingFragmentContent> {
-    debug!("no dispatch method configured, defaulting to hostname");
-    let backend = req
-        .get_url()
-        .host()
-        .unwrap_or_else(|| panic!("no host in request: {}", req.get_url()))
-        .to_string();
-    let pending_req = req.send_async(backend)?;
-    Ok(PendingFragmentContent::PendingRequest(pending_req))
-}
+    /// Evaluate request parameters from `IncludeAttributes` and return a `FragmentMetadata` struct
+    ///
+    /// Evaluate original tag attributes and compute all values needed for dispatching a fragment request
+    fn evaluate_request_params(&mut self, attrs: &IncludeAttributes) -> Result<FragmentMetadata> {
+        // Parse TTL if provided (it's a literal string like "120m", not an expression)
+        let ttl_override = attrs
+            .ttl
+            .as_ref()
+            .and_then(|ttl_str| cache::parse_ttl(ttl_str));
 
-// This function is responsible for fetching pending requests and writing their
-// responses to the client output stream. It also handles any queued source
-// content that needs to be written to the client output stream.
-fn fetch_elements(
-    depth: &mut usize,
-    task: &mut Task,
-    output_writer: &mut Writer<impl Write>,
-    dispatch_fragment_request: &FragmentRequestDispatcher,
-    process_fragment_response: Option<&FragmentResponseProcessor>,
-) -> Result<FetchState> {
-    while let Some(element) = task.queue.pop_front() {
-        match element {
-            Element::Raw(raw) => {
-                process_raw(task, output_writer, &raw, *depth)?;
-            }
-            Element::Include(fragment) => {
-                let result = process_include(
-                    task,
-                    *fragment,
-                    output_writer,
-                    *depth,
-                    dispatch_fragment_request,
-                    process_fragment_response,
-                )?;
-                if let FetchState::Failed(_, _) = result {
-                    return Ok(result);
-                }
-            }
-            Element::Try {
-                mut attempt_task,
-                mut except_task,
-            } => {
-                *depth += 1;
-                process_try(
-                    task,
-                    output_writer,
-                    &mut attempt_task,
-                    &mut except_task,
-                    depth,
-                    dispatch_fragment_request,
-                    process_fragment_response,
-                )?;
-                *depth -= 1;
-                if *depth == 0 {
-                    debug!(
-                        "Writing try result: {:?}",
-                        String::from_utf8(task.output.get_mut().as_slice().to_vec())
-                    );
-                    output_handler(output_writer, task.output.get_mut().as_ref())?;
-                    task.output.get_mut().clear();
-                }
+        // Evaluate method if provided
+        let method = attrs
+            .method
+            .as_ref()
+            .map(|e| eval_expr_to_bytes(e, &mut self.ctx))
+            .transpose()?;
+
+        // Evaluate entity if provided
+        let entity = attrs
+            .entity
+            .as_ref()
+            .map(|e| eval_expr_to_bytes(e, &mut self.ctx))
+            .transpose()?;
+
+        // Evaluate header values — each expr evaluates to "name: value",
+        // which is split at runtime to support dynamic header names per ESI spec.
+        let mut setheaders = Vec::with_capacity(attrs.setheaders.len());
+        for expr in &attrs.setheaders {
+            let full = eval_expr_to_bytes(expr, &mut self.ctx)?;
+            if let Some((name, val)) = split_header_value(&full) {
+                setheaders.push((name, val));
             }
         }
+
+        let mut appendheaders = Vec::with_capacity(attrs.appendheaders.len());
+        for expr in &attrs.appendheaders {
+            let full = eval_expr_to_bytes(expr, &mut self.ctx)?;
+            if let Some((name, val)) = split_header_value(&full) {
+                appendheaders.push((name, val));
+            }
+        }
+
+        let mut removeheaders = Vec::with_capacity(attrs.removeheaders.len());
+        for expr in &attrs.removeheaders {
+            let name_bytes = eval_expr_to_bytes(expr, &mut self.ctx)?;
+            if let Ok(s) = std::str::from_utf8(name_bytes.as_ref()) {
+                removeheaders.push(s.trim().to_string());
+            }
+        }
+
+        // Determine if the fragment should be cached
+        let cacheable = !attrs.no_store && self.configuration.cache.is_includes_cacheable;
+
+        Ok(FragmentMetadata {
+            method,
+            entity,
+            setheaders,
+            appendheaders,
+            removeheaders,
+            cacheable,
+            ttl_override,
+            continue_on_error: attrs.continue_on_error,
+            maxwait: attrs.maxwait,
+            dca: attrs.dca,
+        })
     }
-    Ok(FetchState::Succeeded)
-}
 
-fn process_include(
-    task: &mut Task,
-    fragment: Fragment,
-    output_writer: &mut Writer<impl Write>,
-    depth: usize,
-    dispatch_fragment_request: &FragmentRequestDispatcher,
-    process_fragment_response: Option<&FragmentResponseProcessor>,
-) -> Result<FetchState> {
-    // take the fragment and deconstruct it
-    let Fragment {
-        mut request,
-        alt,
-        continue_on_error,
-        pending_content,
-    } = fragment;
+    /// Dispatch an include and return a `QueuedElement` (for flexible queue insertion)
+    /// This is the single source of truth for include dispatching logic
+    fn dispatch_include(
+        &mut self,
+        attrs: &IncludeAttributes,
+        dispatcher: &FragmentRequestDispatcher,
+    ) -> Result<QueuedElement> {
+        // Evaluate src and alt expressions to get actual URLs
+        let src_bytes = eval_expr_to_bytes(&attrs.src, &mut self.ctx)?;
+        let alt_bytes = attrs
+            .alt
+            .as_ref()
+            .map(|e| eval_expr_to_bytes(e, &mut self.ctx))
+            .transpose()?;
 
-    // wait for `<esi:include>` request to complete
-    let resp = pending_content.wait_for_content()?;
+        // Evaluate all metadata once (includes request params and TTL)
+        let metadata = self.evaluate_request_params(attrs)?;
 
-    let processed_resp = if let Some(process_response) = process_fragment_response {
-        process_response(&mut request, resp)?
-    } else {
-        resp
-    };
-
-    // Request has completed, check the status code.
-    if processed_resp.get_status().is_success() {
-        if depth == 0 && task.output.get_mut().is_empty() {
-            debug!("Include is not nested, writing content to the output stream");
-            output_handler(output_writer, &processed_resp.into_body_bytes())?;
+        // Evaluate params and append to URL
+        // Use Cow to avoid allocation when params are empty and bytes are valid UTF-8
+        let final_src = if attrs.params.is_empty() {
+            src_bytes
         } else {
-            debug!("Include is nested, writing content to a buffer");
-            task.output
-                .get_mut()
-                .extend_from_slice(&processed_resp.into_body_bytes());
-        }
+            let url_cow = String::from_utf8_lossy(&src_bytes);
+            let mut url = String::with_capacity(url_cow.len() + attrs.params.len() * 20);
+            url.push_str(&url_cow);
 
-        Ok(FetchState::Succeeded)
-    } else {
-        // Response status is NOT success, either continue, fallback to an alt, or fail.
-        if let Some(request) = alt {
-            debug!("request poll DONE ERROR, trying alt");
-            if let Some(fragment) =
-                send_fragment_request(request?, None, continue_on_error, dispatch_fragment_request)?
-            {
-                task.queue.push_front(Element::Include(Box::new(fragment)));
-                return Ok(FetchState::Pending);
+            let mut separator = if url.contains('?') { '&' } else { '?' };
+            for (name, value_expr) in &attrs.params {
+                let value = eval_expr_to_bytes(value_expr, &mut self.ctx)?;
+                let value_str = String::from_utf8_lossy(&value);
+                // Direct string building is more efficient than format!
+                url.push(separator);
+                url.push_str(name);
+                url.push('=');
+                url.push_str(&value_str);
+                separator = '&';
             }
-            debug!("guest returned None, continuing");
-            return Ok(FetchState::Succeeded);
-        } else if continue_on_error {
-            debug!("request poll DONE ERROR, NO ALT, continuing");
-            return Ok(FetchState::Succeeded);
-        }
+            Bytes::from(url)
+        };
 
-        debug!("request poll DONE ERROR, NO ALT, failing");
-        Ok(FetchState::Failed(
-            request,
-            processed_resp.get_status().into(),
-        ))
-    }
-}
+        let req = build_fragment_request(
+            self.ctx.get_request().clone_without_body(),
+            &final_src,
+            &metadata,
+            &self.configuration,
+        )?;
 
-// Helper function to write raw content to the client output stream.
-// If the depth is 0 and no queue, the content is written directly to the client output stream.
-// Otherwise, the content is written to the task's output buffer.
-fn process_raw(
-    task: &mut Task,
-    output_writer: &mut Writer<impl Write>,
-    raw: &[u8],
-    depth: usize,
-) -> Result<()> {
-    if depth == 0 && task.output.get_mut().is_empty() {
-        debug!("writing previously queued content");
-        output_writer
-            .get_mut()
-            .write_all(raw)
-            .map_err(ExecutionError::WriterError)?;
-        output_writer.get_mut().flush()?;
-    } else {
-        trace!("-- Depth: {depth}");
-        debug!(
-            "writing blocked content to a queue {:?} ",
-            String::from_utf8(raw.to_owned())
-        );
-        task.output.get_mut().extend_from_slice(raw);
-    }
-    Ok(())
-}
-
-// Helper function to handle the end of a <esi:try> tag
-fn process_try(
-    task: &mut Task,
-    output_writer: &mut Writer<impl Write>,
-    attempt_task: &mut Task,
-    except_task: &mut Task,
-    depth: &mut usize,
-    dispatch_fragment_request: &FragmentRequestDispatcher,
-    process_fragment_response: Option<&FragmentResponseProcessor>,
-) -> Result<()> {
-    let attempt_state = fetch_elements(
-        depth,
-        attempt_task,
-        output_writer,
-        dispatch_fragment_request,
-        process_fragment_response,
-    )?;
-
-    let except_state = fetch_elements(
-        depth,
-        except_task,
-        output_writer,
-        dispatch_fragment_request,
-        process_fragment_response,
-    )?;
-
-    trace!("*** Depth: {depth}");
-
-    match (attempt_state, except_state) {
-        (FetchState::Succeeded, _) => {
-            task.output
-                .get_mut()
-                .extend_from_slice(&std::mem::take(attempt_task).output.into_inner());
-        }
-        (FetchState::Failed(_, _), FetchState::Succeeded) => {
-            task.output
-                .get_mut()
-                .extend_from_slice(&std::mem::take(except_task).output.into_inner());
-        }
-        (FetchState::Failed(req, res), FetchState::Failed(_req, _res)) => {
-            // both tasks failed
-            return Err(ExecutionError::UnexpectedStatus(
-                req.get_url_str().to_string(),
-                res,
-            ));
-        }
-        (FetchState::Pending, _) | (FetchState::Failed(_, _), FetchState::Pending) => {
-            // Request are still pending, re-add it to the front of the queue and wait for the next poll.
-            task.queue.push_front(Element::Try {
-                attempt_task: Box::new(std::mem::take(attempt_task)),
-                except_task: Box::new(std::mem::take(except_task)),
-            });
-        }
-    }
-    Ok(())
-}
-
-// Receives `Event` from the parser and process it.
-// The result is pushed to a queue of elements or written to the output stream.
-fn event_receiver(
-    event: Event,
-    queue: &mut VecDeque<Element>,
-    is_escaped: bool,
-    original_request_metadata: &Request,
-    dispatch_fragment_request: &FragmentRequestDispatcher,
-    ctx: &mut EvalContext,
-) -> Result<()> {
-    match event {
-        Event::ESI(Tag::Include {
-            src,
-            alt,
-            continue_on_error,
-        }) => {
-            debug!("Handling <esi:include> tag with src: {src}");
-            // Always interpolate src
-            let interpolated_src = try_evaluate_interpolated_string(&src, ctx)?;
-
-            // Always interpolate alt if present
-            let interpolated_alt = alt
-                .map(|a| try_evaluate_interpolated_string(&a, ctx))
-                .transpose()?;
-            let req = build_fragment_request(
-                original_request_metadata.clone_without_body(),
-                &interpolated_src,
-                is_escaped,
-            );
-            let alt_req = interpolated_alt.map(|alt| {
-                build_fragment_request(
-                    original_request_metadata.clone_without_body(),
-                    &alt,
-                    is_escaped,
-                )
-            });
-            if let Some(fragment) =
-                send_fragment_request(req?, alt_req, continue_on_error, dispatch_fragment_request)?
-            {
-                // add the pending request to the queue
-                queue.push_back(Element::Include(Box::new(fragment)));
+        let req_clone = req.clone_without_body();
+        match dispatcher(req_clone, metadata.maxwait) {
+            Ok(pending_fragment) => {
+                let fragment = Fragment {
+                    req,
+                    alt_bytes,
+                    pending_fragment,
+                    metadata,
+                };
+                Ok(QueuedElement::Include(Box::new(fragment)))
             }
-        }
-        Event::ESI(Tag::Try {
-            attempt_events,
-            except_events,
-        }) => {
-            let attempt_task = task_handler(
-                attempt_events,
-                is_escaped,
-                original_request_metadata,
-                dispatch_fragment_request,
-                ctx,
-            )?;
-            let except_task = task_handler(
-                except_events,
-                is_escaped,
-                original_request_metadata,
-                dispatch_fragment_request,
-                ctx,
-            )?;
+            Err(_) if metadata.continue_on_error => {
+                // Try alt or add error placeholder
+                if let Some(alt_src) = &alt_bytes {
+                    let alt_req = build_fragment_request(
+                        self.ctx.get_request().clone_without_body(),
+                        alt_src,
+                        &metadata,
+                        &self.configuration,
+                    )?;
 
-            trace!(
-                "*** pushing try content to queue: Attempt - {:?}, Except - {:?}",
-                attempt_task.queue,
-                except_task.queue
-            );
-            // push the elements
-            queue.push_back(Element::Try {
-                attempt_task: Box::new(attempt_task),
-                except_task: Box::new(except_task),
-            });
-        }
-        Event::ESI(Tag::Assign { name, value }) => {
-            // TODO: the 'name' here might have a subfield, we need to parse it
-            let result = evaluate_expression(&value, ctx)?;
-            ctx.set_variable(&name, None, result);
-        }
-        Event::ESI(Tag::Vars { name }) => {
-            debug!("Handling <esi:vars> tag with name: {name:?}");
-            if let Some(name) = name {
-                let result = evaluate_expression(&name, ctx)?;
-                debug!("Evaluated <esi:vars> result: {result:?}");
-                queue.push_back(Element::Raw(result.to_string().into_bytes()));
-            }
-        }
-        Event::ESI(Tag::When { .. }) => unreachable!(),
-        Event::ESI(Tag::Choose {
-            when_branches,
-            otherwise_events,
-        }) => {
-            let mut chose_branch = false;
-            for (when, events) in when_branches {
-                if let Tag::When { test, match_name } = when {
-                    if let Some(match_name) = match_name {
-                        ctx.set_match_name(&match_name);
-                    }
-                    let result = evaluate_expression(&test, ctx)?;
-                    if result.to_bool() {
-                        chose_branch = true;
-                        for event in events {
-                            event_receiver(
-                                event,
-                                queue,
-                                is_escaped,
-                                original_request_metadata,
-                                dispatch_fragment_request,
-                                ctx,
-                            )?;
-                        }
-                        break;
-                    }
+                    let alt_req_without_body = alt_req.clone_without_body();
+                    dispatcher(alt_req_without_body, metadata.maxwait).map_or_else(
+                        |_| {
+                            Ok(QueuedElement::Content(Bytes::from_static(
+                                self.fragment_req_failed(),
+                            )))
+                        },
+                        //
+                        |alt_pending| {
+                            let fragment = Fragment {
+                                req: alt_req,
+                                alt_bytes: None,
+                                pending_fragment: alt_pending,
+                                metadata,
+                            };
+                            Ok(QueuedElement::Include(Box::new(fragment)))
+                        },
+                    )
                 } else {
-                    unreachable!()
+                    Ok(QueuedElement::Content(Bytes::from_static(
+                        self.fragment_req_failed(),
+                    )))
                 }
             }
+            Err(e) => Err(ESIError::FragmentRequestError(format!(
+                "fragment dispatch failed: {e}"
+            ))),
+        }
+    }
 
-            if !chose_branch {
-                for event in otherwise_events {
-                    event_receiver(
-                        event,
-                        queue,
-                        is_escaped,
-                        original_request_metadata,
-                        dispatch_fragment_request,
-                        ctx,
+    /// Check ready queue items — non-blocking poll.
+    ///
+    /// Processes completed fragments, ready content, and try blocks from the front of the
+    /// queue without blocking. Stops as soon as it encounters a pending include.
+    fn process_queue(
+        &mut self,
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+        processor: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        loop {
+            match self.queue.pop_front() {
+                None => break,
+                Some(QueuedElement::Content(content)) => {
+                    // Content is always ready - write immediately
+                    output_writer.write_all(&content)?;
+                }
+                Some(QueuedElement::Include(mut fragment)) => {
+                    // If the fragment is already completed (cache hit / NoContent),
+                    // process immediately. Otherwise, leave it in place and exit
+                    // to avoid busy-wait polling.
+                    let pending_content = std::mem::replace(
+                        &mut fragment.pending_fragment,
+                        PendingFragmentContent::NoContent,
+                    );
+                    match pending_content {
+                        PendingFragmentContent::PendingRequest(request) => {
+                            fragment.pending_fragment =
+                                PendingFragmentContent::PendingRequest(request);
+                            self.queue.push_front(QueuedElement::Include(fragment));
+                            break;
+                        }
+                        ready => {
+                            fragment.pending_fragment = ready;
+                            self.process_include(*fragment, output_writer, dispatcher, processor)?;
+                        }
+                    }
+                }
+                Some(QueuedElement::Try {
+                    attempt_elements,
+                    except_elements,
+                }) => {
+                    // Process try blocks inline rather than stalling the queue.
+                    // Previously Try was skipped here, causing a stall whenever a Try block
+                    // reached the front after a preceding include was consumed.
+                    self.process_try_block(
+                        attempt_elements,
+                        &except_elements,
+                        output_writer,
+                        dispatcher,
+                        processor,
                     )?;
                 }
             }
         }
+        Ok(())
+    }
 
-        Event::InterpolatedContent(event) => {
-            debug!("Handling interpolated content: {event:?}");
-            let event_str = String::from_utf8(event.iter().copied().collect()).unwrap_or_default();
-
-            process_interpolated_chars(&event_str, ctx, |segment| {
-                queue.push_back(Element::Raw(segment.into_bytes()));
-                Ok(())
-            })?;
-        }
-        Event::Content(event) => {
-            debug!("pushing content to buffer, len: {}", queue.len());
-            let mut buf = vec![];
-            let mut writer = Writer::new(&mut buf);
-            writer.write_event(event)?;
-            queue.push_back(Element::Raw(buf));
+    /// Build a correlation key for matching `select()` results to dispatched requests.
+    fn make_request_key(req: &Request) -> RequestKey {
+        RequestKey {
+            method: req.get_method().clone(),
+            url: req.get_url_str().to_string(),
         }
     }
-    Ok(())
+
+    /// Drain the queue to completion, preserving document order while using
+    /// `fastly::http::request::select()` to process whichever in-flight include
+    /// finishes first.
+    ///
+    /// - All includes (bare and inside `<esi:try>`) are dispatched before any
+    ///   waits; a single pending pool feeds `select()`, removing the xN
+    ///   sequential penalty for many consecutive try blocks.
+    /// - Each queued element gets a slot in `buf`; try-block includes use the
+    ///   same `buf` slots as bare includes (no separate `content_slots` system).
+    ///   A `TryBlockTracker` records which buf indices belong to each attempt
+    ///   so they can be assembled into the outer slot when resolved.
+    /// - Request correlation uses (method + URL) keys via `SlotEntry`; the
+    ///   `try_info` field distinguishes bare includes from try-block includes.
+    fn drain_queue(
+        &mut self,
+        output_writer: &mut impl Write,
+        dispatch_fragment_request: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        // `buf[i]` is `None` while the slot is waiting for a response,
+        // `Some(bytes)` once it is ready.  Try-block includes use the SAME
+        // buf slots as bare includes — no separate `content_slots` system.
+        let mut buf: Vec<Option<Bytes>> = Vec::with_capacity(self.queue.len());
+        let mut next_out: usize = 0;
+
+        // RequestKey -> FIFO queue of SlotEntry for all in-flight requests.
+        // A single SlotEntry struct covers both bare includes and try-block
+        // includes; the `try_info` field distinguishes the two cases.
+        let mut url_map: HashMap<RequestKey, VecDeque<SlotEntry>> = HashMap::new();
+
+        // PendingRequests handed to select() on each iteration.
+        let mut pending: Vec<PendingRequest> = Vec::new();
+
+        // One tracker per <esi:try> block encountered during Step 1.
+        let mut try_trackers: Vec<TryBlockTracker> = Vec::new();
+
+        loop {
+            // ------------------------------------------------------------------
+            // Step 1: drain self.queue, assigning every element a slot.
+            //
+            // After this inner loop self.queue is guaranteed empty.  That
+            // invariant means DocumentHandler::write_bytes() called from within
+            // `process_include` writes directly to the caller-supplied
+            // slot_buf rather than re-queuing (the correct behaviour for
+            // dca="esi" fragment bodies that contain further ESI directives).
+            // ------------------------------------------------------------------
+            while let Some(elem) = self.queue.pop_front() {
+                match elem {
+                    QueuedElement::Content(bytes) => {
+                        buf.push(Some(bytes));
+                    }
+
+                    QueuedElement::Include(mut fragment) => {
+                        let slot = buf.len();
+                        buf.push(None); // placeholder; filled when response arrives
+
+                        let pending_content = std::mem::replace(
+                            &mut fragment.pending_fragment,
+                            PendingFragmentContent::NoContent,
+                        );
+                        match pending_content {
+                            PendingFragmentContent::PendingRequest(req) => {
+                                let key = Self::make_request_key(&fragment.req);
+                                url_map.entry(key).or_default().push_back(SlotEntry {
+                                    buf_slot: slot,
+                                    fragment,
+                                    try_info: None,
+                                });
+                                pending.push(*req);
+                            }
+                            ready => {
+                                // CompletedRequest or NoContent: process now.
+                                fragment.pending_fragment = ready;
+                                let mut slot_buf = Vec::new();
+                                self.process_include(
+                                    *fragment,
+                                    &mut slot_buf,
+                                    dispatch_fragment_request,
+                                    process_fragment_response,
+                                )?;
+                                buf[slot] = Some(Bytes::from(slot_buf));
+                                // dca="esi" may push new items onto self.queue;
+                                // the outer while picks them up next iteration.
+                            }
+                        }
+                    }
+
+                    QueuedElement::Try {
+                        attempt_elements,
+                        except_elements,
+                    } => {
+                        // Reserve one outer slot for the assembled output.
+                        let outer_slot = buf.len();
+                        buf.push(None);
+
+                        let tracker_idx = try_trackers.len();
+                        try_trackers.push(TryBlockTracker {
+                            outer_slot,
+                            attempts: Vec::with_capacity(attempt_elements.len()),
+                            except_elements,
+                            pending_count: 0,
+                        });
+
+                        // Walk each attempt through DocumentHandler to
+                        // dispatch includes, then flatten results into buf.
+                        for (attempt_idx, attempt_elems) in attempt_elements.into_iter().enumerate()
+                        {
+                            try_trackers[tracker_idx].attempts.push(AttemptTracker {
+                                buf_slots: Vec::new(),
+                                failed: false,
+                            });
+
+                            let mut pre_buf: Vec<u8> = Vec::new();
+                            let mut pre_failed = false;
+                            self.execute_isolated(
+                                &attempt_elems,
+                                &mut pre_buf,
+                                dispatch_fragment_request,
+                                process_fragment_response,
+                                |this, pre_out| {
+                                    // Static content before the first include.
+                                    if !pre_out.is_empty() {
+                                        let slot = buf.len();
+                                        buf.push(Some(Bytes::from(pre_out.clone())));
+                                        try_trackers[tracker_idx].attempts[attempt_idx]
+                                            .buf_slots
+                                            .push(slot);
+                                    }
+
+                                    // Remaining queued elements (document order).
+                                    while let Some(qe) = this.queue.pop_front() {
+                                        match qe {
+                                            QueuedElement::Content(bytes) => {
+                                                let slot = buf.len();
+                                                buf.push(Some(bytes));
+                                                try_trackers[tracker_idx].attempts[attempt_idx]
+                                                    .buf_slots
+                                                    .push(slot);
+                                            }
+
+                                            QueuedElement::Include(mut frag) => {
+                                                let slot = buf.len();
+                                                buf.push(None);
+                                                try_trackers[tracker_idx].attempts[attempt_idx]
+                                                    .buf_slots
+                                                    .push(slot);
+
+                                                let pc = std::mem::replace(
+                                                    &mut frag.pending_fragment,
+                                                    PendingFragmentContent::NoContent,
+                                                );
+                                                match pc {
+                                                    PendingFragmentContent::PendingRequest(req) => {
+                                                        let key = Self::make_request_key(&frag.req);
+                                                        url_map.entry(key).or_default().push_back(
+                                                            SlotEntry {
+                                                                buf_slot: slot,
+                                                                fragment: frag,
+                                                                try_info: Some((
+                                                                    tracker_idx,
+                                                                    attempt_idx,
+                                                                )),
+                                                            },
+                                                        );
+                                                        pending.push(*req);
+                                                        try_trackers[tracker_idx].pending_count +=
+                                                            1;
+                                                    }
+                                                    ready => {
+                                                        frag.pending_fragment = ready;
+                                                        let mut slot_buf = Vec::new();
+                                                        if this
+                                                            .process_include(
+                                                                *frag,
+                                                                &mut slot_buf,
+                                                                dispatch_fragment_request,
+                                                                process_fragment_response,
+                                                            )
+                                                            .is_err()
+                                                        {
+                                                            pre_failed = true;
+                                                        }
+                                                        buf[slot] = Some(Bytes::from(slot_buf));
+                                                    }
+                                                }
+                                            }
+
+                                            QueuedElement::Try {
+                                                attempt_elements: nested_attempts,
+                                                except_elements: nested_except,
+                                            } => {
+                                                // Nested try: process synchronously.
+                                                let slot = buf.len();
+                                                buf.push(None);
+                                                try_trackers[tracker_idx].attempts[attempt_idx]
+                                                    .buf_slots
+                                                    .push(slot);
+                                                let mut slot_buf = Vec::new();
+                                                this.process_try_block(
+                                                    nested_attempts,
+                                                    &nested_except,
+                                                    &mut slot_buf,
+                                                    dispatch_fragment_request,
+                                                    process_fragment_response,
+                                                )?;
+                                                buf[slot] = Some(Bytes::from(slot_buf));
+                                            }
+                                        }
+                                    }
+                                    Ok(())
+                                },
+                            )?;
+
+                            if pre_failed {
+                                try_trackers[tracker_idx].attempts[attempt_idx].failed = true;
+                            }
+                        }
+
+                        // If no includes are pending, assemble immediately.
+                        if try_trackers[tracker_idx].pending_count == 0 {
+                            Self::assemble_try_block(
+                                self,
+                                tracker_idx,
+                                &mut try_trackers,
+                                &mut buf,
+                                dispatch_fragment_request,
+                                process_fragment_response,
+                            )?;
+                        }
+                    }
+                }
+            }
+
+            // ------------------------------------------------------------------
+            // Step 2: flush consecutive ready slots at next_out.
+            // ------------------------------------------------------------------
+            while next_out < buf.len() {
+                match &buf[next_out] {
+                    Some(bytes) => {
+                        output_writer.write_all(bytes)?;
+                        buf[next_out] = Some(Bytes::new()); // release allocation
+                        next_out += 1;
+                    }
+                    None => break, // head slot still waiting
+                }
+            }
+
+            // ------------------------------------------------------------------
+            // Step 3: done when nothing is pending.
+            // ------------------------------------------------------------------
+            if pending.is_empty() {
+                break;
+            }
+
+            // ------------------------------------------------------------------
+            // Step 4: wait for the next completed request from the shared pool.
+            // ------------------------------------------------------------------
+            let (result, remaining) = select(pending);
+            pending = remaining;
+
+            // ------------------------------------------------------------------
+            // Step 5: correlate the response with its SlotEntry and act.
+            //
+            // Success -> Response::get_backend_request() carries the sent URL.
+            // Failure -> SendError::into_sent_req() recovers the URL; a 500 is
+            //            synthesised so existing alt/onerror logic is unchanged.
+            // ------------------------------------------------------------------
+            let (key, completed_content) = match result {
+                Ok(resp) => {
+                    let key = resp
+                        .get_backend_request()
+                        .map(Self::make_request_key)
+                        .ok_or_else(|| {
+                            ESIError::InternalError(
+                                "drain_queue: response missing backend request for correlation"
+                                    .into(),
+                            )
+                        })?;
+                    (
+                        key,
+                        PendingFragmentContent::CompletedRequest(Box::new(resp)),
+                    )
+                }
+                Err(e) => {
+                    let req = e.into_sent_req();
+                    let key = Self::make_request_key(&req);
+                    debug!(
+                        "Fragment request to {} {} failed; triggering alt/onerror handling",
+                        key.method, key.url
+                    );
+                    (
+                        key,
+                        PendingFragmentContent::CompletedRequest(Box::new(Response::from_status(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        ))),
+                    )
+                }
+            };
+
+            let entry = url_map
+                .get_mut(&key)
+                .and_then(VecDeque::pop_front)
+                .ok_or_else(|| {
+                    ESIError::InternalError(format!(
+                        "drain_queue: no in-flight fragment for {}/{}",
+                        key.method, key.url
+                    ))
+                })?;
+
+            let SlotEntry {
+                buf_slot,
+                mut fragment,
+                try_info,
+            } = entry;
+
+            match try_info {
+                // -------------------------------------------------------
+                // Bare <esi:include>: fill the buf slot directly.
+                // -------------------------------------------------------
+                None => {
+                    fragment.pending_fragment = completed_content;
+                    let mut slot_buf = Vec::new();
+                    self.process_include(
+                        *fragment,
+                        &mut slot_buf,
+                        dispatch_fragment_request,
+                        process_fragment_response,
+                    )?;
+                    buf[buf_slot] = Some(Bytes::from(slot_buf));
+                    // dca="esi" may push new QueuedElements onto self.queue.
+                    // Loop back to Step 1 to assign them slots.
+                }
+
+                // -------------------------------------------------------
+                // Include inside a <esi:try> attempt: fill the buf slot,
+                // then check if the entire try block is now resolved.
+                // -------------------------------------------------------
+                Some((tracker_idx, attempt_idx)) => {
+                    fragment.pending_fragment = completed_content;
+                    let mut slot_buf = Vec::new();
+                    let include_failed = self
+                        .process_include(
+                            *fragment,
+                            &mut slot_buf,
+                            dispatch_fragment_request,
+                            process_fragment_response,
+                        )
+                        .is_err();
+                    buf[buf_slot] = Some(Bytes::from(slot_buf));
+
+                    if include_failed {
+                        try_trackers[tracker_idx].attempts[attempt_idx].failed = true;
+                    }
+                    try_trackers[tracker_idx].pending_count -= 1;
+
+                    if try_trackers[tracker_idx].pending_count == 0 {
+                        Self::assemble_try_block(
+                            self,
+                            tracker_idx,
+                            &mut try_trackers,
+                            &mut buf,
+                            dispatch_fragment_request,
+                            process_fragment_response,
+                        )?;
+                    }
+                    // dca="esi" inside a try-attempt promotes sub-includes
+                    // to outer slots.  Loop back to Step 1.
+                }
+            }
+        }
+
+        // Final flush: every slot must be ready at this point.
+        while next_out < buf.len() {
+            match &buf[next_out] {
+                Some(bytes) => {
+                    output_writer.write_all(bytes)?;
+                    next_out += 1;
+                }
+                None => {
+                    return Err(ESIError::InternalError(
+                        "drain_queue: slot still pending after all requests resolved".into(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Assemble a fully-resolved try block: concatenate successful attempt
+    /// content from `buf` slots, clear inner slots, and set the outer slot.
+    fn assemble_try_block(
+        &mut self,
+        tracker_idx: usize,
+        try_trackers: &mut [TryBlockTracker],
+        buf: &mut [Option<Bytes>],
+        dispatch_fragment_request: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        let mut any_failed = false;
+        let mut output: Vec<u8> = Vec::new();
+
+        for attempt in &try_trackers[tracker_idx].attempts {
+            if attempt.failed {
+                any_failed = true;
+                // Clear failed attempt's inner slots so Step 2 skips them.
+                for &slot_idx in &attempt.buf_slots {
+                    buf[slot_idx] = Some(Bytes::new());
+                }
+            } else {
+                for &slot_idx in &attempt.buf_slots {
+                    if let Some(bytes) = &buf[slot_idx] {
+                        output.extend_from_slice(bytes);
+                    }
+                    // Clear inner slot so Step 2 flushes it as a no-op.
+                    buf[slot_idx] = Some(Bytes::new());
+                }
+            }
+        }
+
+        if any_failed {
+            let except_elements = std::mem::take(&mut try_trackers[tracker_idx].except_elements);
+            if !except_elements.is_empty() {
+                let except_buf = self.process_try_task(
+                    &except_elements,
+                    dispatch_fragment_request,
+                    process_fragment_response,
+                )?;
+                output.extend_from_slice(&except_buf);
+            }
+        }
+
+        buf[try_trackers[tracker_idx].outer_slot] = Some(Bytes::from(output));
+        Ok(())
+    }
+
+    /// Process a try block: execute ALL attempts in document order (they are
+    /// independent statements), then run the except clause if any failed.
+    fn process_try_block(
+        &mut self,
+        attempt_elements: Vec<Vec<Element>>,
+        except_elements: &[Element],
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+        processor: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        let mut any_failed = false;
+        for attempt in attempt_elements {
+            match self.process_try_task(&attempt, dispatcher, processor) {
+                Ok(buffer) => output_writer.write_all(&buffer)?,
+                Err(_) => any_failed = true,
+            }
+        }
+        if any_failed {
+            let buf = self.process_try_task(except_elements, dispatcher, processor)?;
+            output_writer.write_all(&buf)?;
+        }
+        Ok(())
+    }
+
+    /// Execute a `DocumentHandler` with an isolated queue.
+    ///
+    /// Saves `self.queue`, runs the handler writing into `output`, executes the
+    /// provided `after` closure (which can consume the temporary queue), then
+    /// restores the saved queue.
+    fn execute_isolated<R, W: Write>(
+        &mut self,
+        elements: &[Element],
+        output: &mut W,
+        dispatcher: &FragmentRequestDispatcher,
+        processor: Option<&FragmentResponseProcessor>,
+        after: impl FnOnce(&mut Self, &mut W) -> Result<R>,
+    ) -> Result<R> {
+        let saved_queue = std::mem::take(&mut self.queue);
+
+        {
+            let mut handler = DocumentHandler {
+                processor: self,
+                output,
+                dispatch_fragment_request: dispatcher,
+                fragment_response_handler: processor,
+            };
+            for elem in elements {
+                handler.process(elem)?;
+            }
+        }
+
+        let result = after(self, output);
+
+        // Always restore the outer queue, even if `after` failed.
+        self.queue = saved_queue;
+        result
+    }
+
+    /// Execute a list of raw ESI elements in document order into a fresh buffer.
+    ///
+    /// Elements are processed sequentially through a `DocumentHandler`:
+    ///   - Text / Html / Expr and complex tags (Choose, Foreach, Assign, …)
+    ///     execute immediately, writing into `buffer` directly when no
+    ///     in-flight includes precede them, or into `self.queue` as `Content`
+    ///     when an include is already queued (preserving document order).
+    ///   - `<esi:include>` is dispatched asynchronously at the exact point it
+    ///     is reached, **after** all preceding assigns have updated the context.
+    ///
+    /// After all elements have been walked, any queued includes are drained in
+    /// document order (blocking wait per include).
+    fn process_try_task(
+        &mut self,
+        elements: &[Element],
+        dispatcher: &FragmentRequestDispatcher,
+        processor: Option<&FragmentResponseProcessor>,
+    ) -> Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        self.execute_isolated(elements, &mut buffer, dispatcher, processor, |this, out| {
+            this.drain_queue(out, dispatcher, processor)?;
+            Ok(())
+        })?;
+
+        Ok(buffer)
+    }
+
+    /// Process an include from the queue (wait and write, handle alt)
+    fn process_include(
+        &mut self,
+        fragment: Fragment,
+        output_writer: &mut impl Write,
+        dispatch_fragment_request: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        let continue_on_error = fragment.metadata.continue_on_error;
+
+        // Wait for response
+        let response = fragment.pending_fragment.wait()?;
+
+        // Apply processor if provided (only clone the request when a processor exists)
+        let final_response = if let Some(proc) = process_fragment_response {
+            let mut req_for_processor = fragment.req.clone_without_body();
+            proc(&mut req_for_processor, response)?
+        } else {
+            response
+        };
+
+        // Track TTL for rendered document caching
+        if final_response.get_status().is_success()
+            && (self.configuration.cache.is_rendered_cacheable
+                || self.configuration.cache.rendered_cache_control)
+        {
+            let ttl = if let Some(override_ttl) = fragment.metadata.ttl_override {
+                debug!("Using TTL override from include tag: {override_ttl} seconds");
+                Some(override_ttl)
+            } else {
+                match cache::calculate_ttl(&final_response, &self.configuration.cache) {
+                    Ok(Some(ttl)) => {
+                        debug!("Calculated TTL from response: {ttl} seconds");
+                        Some(ttl)
+                    }
+                    Ok(None) => {
+                        debug!("Response not cacheable (private/no-cache/set-cookie)");
+                        self.ctx.mark_document_uncacheable();
+                        None
+                    }
+                    Err(e) => {
+                        debug!("Error calculating TTL: {e:?}");
+                        None
+                    }
+                }
+            };
+            if let Some(ttl_value) = ttl {
+                self.ctx.update_cache_min_ttl(ttl_value);
+                debug!("Tracking TTL {ttl_value} for rendered document");
+            }
+        }
+
+        // Check if successful
+        if final_response.get_status().is_success() {
+            let body_bytes = final_response.into_body_bytes();
+            self.process_fragment_body(
+                body_bytes,
+                fragment.metadata.dca,
+                output_writer,
+                dispatch_fragment_request,
+                process_fragment_response,
+            )?;
+            Ok(())
+        } else if let Some(alt_src) = fragment.alt_bytes {
+            // Try alt - reuse pre-evaluated params
+            debug!("Main request failed, trying alt");
+            let alt_req = build_fragment_request(
+                self.ctx.get_request().clone_without_body(),
+                &alt_src,
+                &fragment.metadata,
+                &self.configuration,
+            )?;
+
+            let alt_req_without_body = alt_req.clone_without_body();
+            match dispatch_fragment_request(alt_req_without_body, fragment.metadata.maxwait) {
+                Ok(alt_pending) => {
+                    let alt_response = alt_pending.wait()?;
+                    let final_alt = if let Some(proc) = process_fragment_response {
+                        let mut alt_req_for_proc = alt_req.clone_without_body();
+                        proc(&mut alt_req_for_proc, alt_response)?
+                    } else {
+                        alt_response
+                    };
+
+                    let body_bytes = final_alt.into_body_bytes();
+                    self.process_fragment_body(
+                        body_bytes,
+                        fragment.metadata.dca,
+                        output_writer,
+                        dispatch_fragment_request,
+                        process_fragment_response,
+                    )?;
+                    Ok(())
+                }
+                Err(_) if continue_on_error => {
+                    output_writer.write_all(self.fragment_req_failed())?;
+                    Ok(())
+                }
+                Err(_) => Err(ESIError::FragmentRequestError(
+                    "both main and alt failed".into(),
+                )),
+            }
+        } else if continue_on_error {
+            output_writer.write_all(self.fragment_req_failed())?;
+            Ok(())
+        } else {
+            Err(ESIError::FragmentRequestError(format!(
+                "fragment request failed with status: {}",
+                final_response.get_status()
+            )))
+        }
+    }
+
+    /// Process fragment body based on dca mode
+    /// - dca="esi": Parse and process content as ESI
+    /// - dca="none": Write raw content
+    fn process_fragment_body(
+        &mut self,
+        body_bytes: Vec<u8>,
+        dca_mode: DcaMode,
+        output_writer: &mut impl Write,
+        dispatcher: &FragmentRequestDispatcher,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        if dca_mode == DcaMode::Esi {
+            // Parse and process the content as ESI
+            let body_as_bytes = Bytes::from(body_bytes);
+            let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
+                ESIError::ParseError(format!("failed to parse fragment with dca=esi: {e}",))
+            })?;
+
+            if !rest.is_empty() {
+                return Err(ESIError::ParseError(
+                    "incomplete parse of fragment with dca=esi".into(),
+                ));
+            }
+
+            // Process each element in the current namespace
+            let mut handler = DocumentHandler {
+                processor: self,
+                output: output_writer,
+                dispatch_fragment_request: dispatcher,
+                fragment_response_handler: process_fragment_response,
+            };
+            for element in elements {
+                if matches!(handler.process(&element)?, Flow::Break) {
+                    return Ok(()); // Break from foreach, stop processing
+                }
+            }
+        } else {
+            // dca="none" (default): Write raw content
+            output_writer.write_all(&body_bytes)?;
+        }
+        Ok(())
+    }
 }
 
-// Helper function to process a list of events and return a task.
-// It's called from `event_receiver` and calls `event_receiver` to process each event in recursion.
-fn task_handler(
-    events: Vec<Event>,
-    is_escaped: bool,
-    original_request_metadata: &Request,
-    dispatch_fragment_request: &FragmentRequestDispatcher,
-    ctx: &mut EvalContext,
-) -> Result<Task> {
-    let mut task = Task::new();
-    for event in events {
-        event_receiver(
-            event,
-            &mut task.queue,
-            is_escaped,
-            original_request_metadata,
-            dispatch_fragment_request,
-            ctx,
-        )?;
+/// Placeholder HTML comment written when a fragment could not be fetched and `onerror="continue"`.
+/// Only emitted for HTML content (when `is_escaped_content` is true).
+const FRAGMENT_REQUEST_FAILED: &[u8] = b"<!-- fragment request failed -->";
+
+/// Evaluate an [`Expr`] to a [`Bytes`] value.
+///
+/// Free function (not a `Processor` method) so callers can independently borrow other
+/// `Processor` fields alongside `ctx`.
+fn eval_expr_to_bytes(expr: &Expr, ctx: &mut EvalContext) -> Result<Bytes> {
+    let result = expression::eval_expr(expr, ctx)?;
+    Ok(result.to_bytes())
+}
+
+// Default fragment request dispatcher that uses the request's hostname as backend
+// Uses dynamic backends to support maxwait attribute as first_byte_timeout
+fn default_fragment_dispatcher(
+    req: Request,
+    maxwait: Option<u32>,
+) -> Result<PendingFragmentContent> {
+    debug!("no dispatch method configured, defaulting to hostname");
+    let host = req
+        .get_url()
+        .host()
+        .unwrap_or_else(|| panic!("no host in request: {}", req.get_url()))
+        .to_string();
+
+    // Build a dynamic backend with appropriate settings
+    let mut builder = Backend::builder(&host, &host)
+        .override_host(&host)
+        .enable_ssl()
+        .sni_hostname(&host);
+
+    // Add timeout if `maxwait` is specified
+    if let Some(timeout_ms) = maxwait {
+        builder = builder.first_byte_timeout(Duration::from_millis(u64::from(timeout_ms)));
     }
-    Ok(task)
+
+    let backend = builder
+        .finish()
+        .map_err(|e| ESIError::FragmentRequestError(format!("failed to create backend: {e}")))?;
+
+    let pending_req = req.send_async(backend)?;
+    Ok(PendingFragmentContent::PendingRequest(Box::new(
+        pending_req,
+    )))
 }
 
 // Helper function to build a fragment request from a URL
 // For HTML content the URL is unescaped if it's escaped (default).
 // It can be disabled in the processor configuration for a non-HTML content.
-fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> Result<Request> {
-    let escaped_url = if is_escaped {
-        match quick_xml::escape::unescape(url) {
-            Ok(url) => url.to_string(),
-            Err(err) => {
-                return Err(ExecutionError::InvalidRequestUrl(err.to_string()));
-            }
-        }
+fn build_fragment_request(
+    mut request: Request,
+    url: &Bytes,
+    metadata: &FragmentMetadata,
+    config: &Configuration,
+) -> Result<Request> {
+    // Convert Bytes to str for URL parsing
+    let url_str = std::str::from_utf8(url)
+        .map_err(|_| ESIError::InvalidFragmentConfig("invalid UTF-8 in URL".to_string()))?;
+
+    let escaped_url = if config.is_escaped_content {
+        Cow::Owned(html_escape::decode_html_entities(url_str).into_owned())
     } else {
-        url.to_string()
+        Cow::Borrowed(url_str)
     };
 
     if escaped_url.starts_with('/') {
@@ -809,14 +1694,14 @@ fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> 
                 request.get_url_mut().set_query(u.query());
             }
             Err(_err) => {
-                return Err(ExecutionError::InvalidRequestUrl(escaped_url));
+                return Err(ESIError::InvalidRequestUrl(escaped_url.into_owned()));
             }
         }
     } else {
         request.set_url(match Url::parse(&escaped_url) {
             Ok(url) => url,
             Err(_err) => {
-                return Err(ExecutionError::InvalidRequestUrl(escaped_url));
+                return Err(ESIError::InvalidRequestUrl(escaped_url.into_owned()));
             }
         });
     }
@@ -825,122 +1710,63 @@ fn build_fragment_request(mut request: Request, url: &str, is_escaped: bool) -> 
 
     request.set_header(header::HOST, &hostname);
 
-    Ok(request)
-}
+    // Set HTTP method (default is GET) - use pre-evaluated value
+    if let Some(method_bytes) = &metadata.method {
+        let method_str = std::str::from_utf8(method_bytes)
+            .map_err(|_| ESIError::InvalidFragmentConfig("invalid UTF-8 in method".to_string()))?
+            .to_uppercase();
 
-fn send_fragment_request(
-    req: Request,
-    alt: Option<Result<Request>>,
-    continue_on_error: bool,
-    dispatch_request: &FragmentRequestDispatcher,
-) -> Result<Option<Fragment>> {
-    debug!("Requesting ESI fragment: {}", req.get_url());
-
-    let request = req.clone_without_body();
-
-    let pending_content: PendingFragmentContent = dispatch_request(req)?;
-
-    Ok(Some(Fragment {
-        request,
-        alt,
-        continue_on_error,
-        pending_content,
-    }))
-}
-
-// Helper function to create an XML reader from a body.
-fn reader_from_body(body: Body) -> Reader<Body> {
-    let mut reader = Reader::from_reader(body);
-
-    // TODO: make this configurable
-    let config = reader.config_mut();
-    config.check_end_names = false;
-
-    reader
-}
-
-// helper function to drive output to a response stream
-fn output_handler(output_writer: &mut Writer<impl Write>, buffer: &[u8]) -> Result<()> {
-    output_writer.get_mut().write_all(buffer)?;
-    output_writer.get_mut().flush()?;
-    Ok(())
-}
-
-/// Processes a string containing interpolated expressions using a character-based approach
-///
-/// This function evaluates expressions like $(`HTTP_HOST``) in text content and
-/// provides the processed segments to the caller through a callback function.
-///
-/// # Arguments
-/// * `input` - The input string containing potential interpolated expressions
-/// * `ctx` - Evaluation context containing variables and state
-/// * `segment_handler` - A function that handles each segment (raw text or evaluated expression)
-///
-/// # Returns
-/// * `Result<()>` - Success or error during processing
-///
-pub fn process_interpolated_chars<F>(
-    input: &str,
-    ctx: &mut EvalContext,
-    mut segment_handler: F,
-) -> Result<()>
-where
-    F: FnMut(String) -> Result<()>,
-{
-    let mut buf = vec![];
-    let mut cur = input.chars().peekable();
-
-    while let Some(c) = cur.peek() {
-        if *c == '$' {
-            let mut new_cur = cur.clone();
-
-            if let Some(value) = try_evaluate_interpolated(&mut new_cur, ctx) {
-                // If we have accumulated text, output it first
-                if !buf.is_empty() {
-                    segment_handler(buf.into_iter().collect())?;
-                    buf = vec![];
-                }
-
-                // Output the evaluated expression result
-                segment_handler(value.to_string())?;
+        match method_str.as_str() {
+            "GET" => request.set_method(Method::GET),
+            "POST" => request.set_method(Method::POST),
+            _ => {
+                return Err(ESIError::InvalidFragmentConfig(format!(
+                    "unsupported HTTP method: {method_str}"
+                )))
             }
-            // Update our position
-            cur = new_cur;
-        } else {
-            buf.push(cur.next().unwrap());
         }
     }
 
-    // Output any remaining text
-    if !buf.is_empty() {
-        segment_handler(buf.into_iter().collect())?;
+    // Set POST body if provided - use pre-evaluated value
+    if let Some(entity_bytes) = &metadata.entity {
+        if request.get_method() == Method::POST {
+            request.set_body(entity_bytes.as_ref());
+        }
     }
 
-    Ok(())
+    // Process header manipulations in the correct order:
+    // 1. Remove headers
+    for header_name in &metadata.removeheaders {
+        request.remove_header(header_name);
+    }
+
+    // 2. Set headers (replace existing) - use pre-evaluated values
+    for (name, value) in &metadata.setheaders {
+        request.set_header(name, value.as_ref());
+    }
+
+    // 3. Append headers (add to existing) - use pre-evaluated values
+    for (name, value) in &metadata.appendheaders {
+        request.append_header(name, value.as_ref());
+    }
+
+    // Set pass option to bypass cache if fragment is not cacheable
+    if !metadata.cacheable {
+        request.set_pass(true);
+    }
+
+    Ok(request)
 }
 
-/// Evaluates all interpolated expressions in a string and returns the complete result
-///
-/// This is a convenience wrapper around `process_interpolated_chars` that collects
-/// all output into a single string.
-///
-/// # Arguments
-/// * `input` - The input string containing potential interpolated expressions
-/// * `ctx` - Evaluation context containing variables and state
-///
-/// # Returns
-/// * `Result<String>` - The fully processed string with all expressions evaluated
-///
-/// # Errors
-/// Returns error if expression evaluation fails
-///
-pub fn try_evaluate_interpolated_string(input: &str, ctx: &mut EvalContext) -> Result<String> {
-    let mut result = String::new();
-
-    process_interpolated_chars(input, ctx, |segment| {
-        result.push_str(&segment);
-        Ok(())
-    })?;
-
-    Ok(result)
+/// Split an evaluated header expression ("Name: value") into (name, value).
+/// Returns `None` if there is no ':' separator.
+fn split_header_value(full: &Bytes) -> Option<(String, Bytes)> {
+    let s = std::str::from_utf8(full.as_ref()).ok()?;
+    let (name, val) = s.split_once(':')?;
+    Some((
+        name.trim().to_string(),
+        Bytes::copy_from_slice(val.trim().as_bytes()),
+    ))
 }
+
+// Helper Functions
