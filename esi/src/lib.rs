@@ -294,7 +294,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                         return Ok(Flow::Continue);
                     }
                     return Err(ESIError::UnexpectedStatus {
-                        url: "eval".to_string(),
+                        url: fragment.req.get_url_str().to_string(),
                         status: response.get_status().as_u16(),
                     });
                 }
@@ -304,14 +304,15 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                 let body_as_bytes = Bytes::from(body_bytes);
 
                 // ALWAYS parse as ESI (this is the key difference from include)
+                let eval_url = fragment.req.get_url_str().to_string();
                 let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
-                    ESIError::ParseError(format!("failed to parse eval fragment: {e}"))
+                    ESIError::ParseError(format!("failed to parse eval fragment {eval_url}: {e}"))
                 })?;
 
                 if !rest.is_empty() {
-                    return Err(ESIError::ParseError(
-                        "incomplete parse of eval fragment".into(),
-                    ));
+                    return Err(ESIError::ParseError(format!(
+                        "incomplete parse of eval fragment {eval_url}"
+                    )));
                 }
 
                 if fragment.metadata.dca == DcaMode::Esi {
@@ -870,7 +871,8 @@ impl Processor {
                 }
             }
             Err(e) => Err(ESIError::FragmentRequestError(format!(
-                "fragment dispatch failed: {e}"
+                "fragment dispatch failed for {}: {e}",
+                req.get_url_str()
             ))),
         }
     }
@@ -1471,6 +1473,7 @@ impl Processor {
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
         let continue_on_error = fragment.metadata.continue_on_error;
+        let fragment_url = fragment.req.get_url_str().to_string();
 
         // Wait for response
         let response = fragment.pending_fragment.wait()?;
@@ -1520,6 +1523,7 @@ impl Processor {
             self.process_fragment_body(
                 body_bytes,
                 fragment.metadata.dca,
+                &fragment_url,
                 output_writer,
                 dispatch_fragment_request,
                 process_fragment_response,
@@ -1550,6 +1554,7 @@ impl Processor {
                     self.process_fragment_body(
                         body_bytes,
                         fragment.metadata.dca,
+                        &String::from_utf8_lossy(&alt_src),
                         output_writer,
                         dispatch_fragment_request,
                         process_fragment_response,
@@ -1560,18 +1565,19 @@ impl Processor {
                     output_writer.write_all(self.fragment_req_failed())?;
                     Ok(())
                 }
-                Err(_) => Err(ESIError::FragmentRequestError(
-                    "both main and alt failed".into(),
-                )),
+                Err(_) => Err(ESIError::FragmentRequestError(format!(
+                    "both main and alt failed: main={fragment_url}, alt={}",
+                    String::from_utf8_lossy(&alt_src)
+                ))),
             }
         } else if continue_on_error {
             output_writer.write_all(self.fragment_req_failed())?;
             Ok(())
         } else {
-            Err(ESIError::FragmentRequestError(format!(
-                "fragment request failed with status: {}",
-                final_response.get_status()
-            )))
+            Err(ESIError::UnexpectedStatus {
+                url: fragment_url,
+                status: final_response.get_status().as_u16(),
+            })
         }
     }
 
@@ -1582,6 +1588,7 @@ impl Processor {
         &mut self,
         body_bytes: Vec<u8>,
         dca_mode: DcaMode,
+        url: &str,
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
         process_fragment_response: Option<&FragmentResponseProcessor>,
@@ -1590,13 +1597,13 @@ impl Processor {
             // Parse and process the content as ESI
             let body_as_bytes = Bytes::from(body_bytes);
             let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
-                ESIError::ParseError(format!("failed to parse fragment with dca=esi: {e}",))
+                ESIError::ParseError(format!("failed to parse fragment {url} with dca=esi: {e}"))
             })?;
 
             if !rest.is_empty() {
-                return Err(ESIError::ParseError(
-                    "incomplete parse of fragment with dca=esi".into(),
-                ));
+                return Err(ESIError::ParseError(format!(
+                    "incomplete parse of fragment {url} with dca=esi"
+                )));
             }
 
             // Process each element in the current namespace
@@ -1628,7 +1635,8 @@ const FRAGMENT_REQUEST_FAILED: &[u8] = b"<!-- fragment request failed -->";
 /// Free function (not a `Processor` method) so callers can independently borrow other
 /// `Processor` fields alongside `ctx`.
 fn eval_expr_to_bytes(expr: &Expr, ctx: &mut EvalContext) -> Result<Bytes> {
-    let result = expression::eval_expr(expr, ctx)?;
+    let result = expression::eval_expr(expr, ctx)
+        .map_err(|e| ESIError::ExpressionError(format!("{e}, in expression: {expr}")))?;
     Ok(result.to_bytes())
 }
 
@@ -1656,9 +1664,9 @@ fn default_fragment_dispatcher(
         builder = builder.first_byte_timeout(Duration::from_millis(u64::from(timeout_ms)));
     }
 
-    let backend = builder
-        .finish()
-        .map_err(|e| ESIError::FragmentRequestError(format!("failed to create backend: {e}")))?;
+    let backend = builder.finish().map_err(|e| {
+        ESIError::FragmentRequestError(format!("failed to create backend for {host}: {e}"))
+    })?;
 
     let pending_req = req.send_async(backend)?;
     Ok(PendingFragmentContent::PendingRequest(Box::new(
@@ -1676,8 +1684,12 @@ fn build_fragment_request(
     config: &Configuration,
 ) -> Result<Request> {
     // Convert Bytes to str for URL parsing
-    let url_str = std::str::from_utf8(url)
-        .map_err(|_| ESIError::InvalidFragmentConfig("invalid UTF-8 in URL".to_string()))?;
+    let url_str = std::str::from_utf8(url).map_err(|_| {
+        ESIError::InvalidFragmentConfig(format!(
+            "invalid UTF-8 in URL: {}",
+            String::from_utf8_lossy(url)
+        ))
+    })?;
 
     let escaped_url = if config.is_escaped_content {
         Cow::Owned(html_escape::decode_html_entities(url_str).into_owned())
@@ -1713,7 +1725,12 @@ fn build_fragment_request(
     // Set HTTP method (default is GET) - use pre-evaluated value
     if let Some(method_bytes) = &metadata.method {
         let method_str = std::str::from_utf8(method_bytes)
-            .map_err(|_| ESIError::InvalidFragmentConfig("invalid UTF-8 in method".to_string()))?
+            .map_err(|_| {
+                ESIError::InvalidFragmentConfig(format!(
+                    "invalid UTF-8 in method for {}",
+                    request.get_url_str()
+                ))
+            })?
             .to_uppercase();
 
         match method_str.as_str() {
