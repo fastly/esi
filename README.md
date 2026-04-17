@@ -170,7 +170,7 @@ These functions modify the HTTP response sent to the client:
   ```
 - `$set_redirect(url)` - Set HTTP redirect (302 Moved Temporarily)
   ```html
-  <esi:vars>$set_redirect('https://example.com/new-location')</esi:vars> <esi:vars>$set_redirect('https://example.com/moved'</esi:vars>
+  <esi:vars>$set_redirect('https://example.com/new-location')</esi:vars>
   ```
 
 **Note:** Response manipulation functions are buffered during ESI processing and applied when `process_response()` sends the final response to the client. They have no effect when using `process_response_streaming()` (response headers are already committed) — a warning is printed to stdout if they are invoked in that mode.
@@ -222,7 +222,7 @@ The following variables are available in ESI expressions:
 let config = esi::Configuration::default()
     .with_escaped(true)                      // unescape HTML entities in URLs (default: true)
     .with_chunk_size(32768)                  // streaming read buffer, in bytes (default: 16384)
-    .with_function_recursion_depth(10)       // max depth for user-defined function calls (default: 10)
+    .with_function_recursion_depth(10)       // max depth for user-defined function calls (default: 5)
     .with_caching(esi::CacheConfig {
         is_rendered_cacheable: true,
         rendered_cache_control: true,
@@ -233,12 +233,12 @@ let config = esi::Configuration::default()
     });
 ```
 
-| Field                      | Builder method                        | Default   | Description                                                                                                                        |
-| -------------------------- | ------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `is_escaped_content`       | `with_escaped(bool)`                  | `true`    | Unescape HTML entities in URLs. Set to `false` for non-HTML templates (e.g. JSON).                                                 |
-| `chunk_size`               | `with_chunk_size(usize)`              | `16384`   | Size (bytes) of the read buffer used when streaming ESI input. Larger values may improve throughput; smaller values reduce memory. |
-| `function_recursion_depth` | `max_function_recursion_depth(usize)` | `5`       | Maximum call-stack depth for user-defined ESI functions.                                                                           |
-| `cache`                    | `with_caching(CacheConfig)`           | see below | Cache settings for rendered output and included fragments.                                                                         |
+| Field                      | Builder method                         | Default   | Description                                                                                                                        |
+| -------------------------- | -------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `is_escaped_content`       | `with_escaped(bool)`                   | `true`    | Unescape HTML entities in URLs. Set to `false` for non-HTML templates (e.g. JSON).                                                 |
+| `chunk_size`               | `with_chunk_size(usize)`               | `16384`   | Size (bytes) of the read buffer used when streaming ESI input. Larger values may improve throughput; smaller values reduce memory. |
+| `function_recursion_depth` | `with_function_recursion_depth(usize)` | `5`       | Maximum call-stack depth for user-defined ESI functions.                                                                           |
+| `cache`                    | `with_caching(CacheConfig)`            | see below | Cache settings for rendered output and included fragments.                                                                         |
 
 **`CacheConfig` fields:**
 
@@ -247,7 +247,7 @@ let config = esi::Configuration::default()
 | `is_rendered_cacheable`  | `false` | Whether the final rendered output is cacheable.                                                                                                                                                                                               |
 | `rendered_cache_control` | `false` | Emit a `Cache-Control` header on the rendered response. Only applies when using `process_response()`; has no effect with `process_response_streaming()` (headers already committed) or `process_stream()` (does not manage response headers). |
 | `rendered_ttl`           | `None`  | TTL (seconds) for the rendered response.                                                                                                                                                                                                      |
-| `is_includes_cacheable`  | `false` | Whether individual include responses should be cached.                                                                                                                                                                                        |
+| `is_includes_cacheable`  | `true`  | Whether individual include responses should be cached.                                                                                                                                                                                        |
 | `includes_default_ttl`   | `None`  | Default TTL (seconds) for cached includes.                                                                                                                                                                                                    |
 | `includes_force_ttl`     | `None`  | Force a specific TTL on all includes, overriding origin headers.                                                                                                                                                                              |
 

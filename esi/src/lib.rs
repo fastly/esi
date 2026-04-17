@@ -480,11 +480,10 @@ impl Processor {
     /// <esi:vars>$set_response_code(404, 'Page not found')</esi:vars>
     /// ```
     ///
-    /// ### `$set_redirect(url [, code])`
-    /// Sets up an HTTP redirect (default 302):
+    /// ### `$set_redirect(url)`
+    /// Sets up an HTTP redirect (302 Moved Temporarily):
     /// ```text
     /// <esi:vars>$set_redirect('https://example.com/new-page')</esi:vars>
-    /// <esi:vars>$set_redirect('https://example.com/moved', 301)</esi:vars>
     /// ```
     ///
     /// **Note:** These functions modify the response metadata that `process_response` will use
