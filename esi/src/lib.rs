@@ -491,6 +491,14 @@ impl Processor {
     /// when sending the response to the client. The headers, status code, and body override are
     /// buffered during processing and applied when the response is sent.
     ///
+    /// **Important:** This method buffers the entire processed output in memory
+    /// before sending it to the client.  For true streaming output (lower
+    /// time-to-first-byte, lower memory usage), use
+    /// [`process_response_streaming`](Self::process_response_streaming) instead.
+    /// The streaming variant cannot apply response-manipulation functions
+    /// (`$add_header`, `$set_response_code`, `$set_redirect`) — see its
+    /// documentation for details.
+    ///
     /// # Arguments
     /// * `src_stream` - Source HTTP response containing ESI markup to process
     /// * `client_response_metadata` - Optional response metadata (headers, status) to send to client
@@ -518,7 +526,7 @@ impl Processor {
     ///         Box::new(fastly::Response::from_body("Fragment content"))
     ///     ))
     /// }
-    /// // Process the response, streaming the resulting document directly to the client
+    /// // Process the response (buffered — metadata functions are applied before sending)
     /// processor.process_response(
     ///     &mut response,
     ///     None,
@@ -586,6 +594,132 @@ impl Processor {
         Ok(())
     }
 
+    /// Process a response body as an ESI document with **true streaming output**.
+    ///
+    /// Unlike [`process_response`](Self::process_response), which buffers the
+    /// entire processed output before sending it to the client, this method
+    /// commits the response headers immediately and streams body bytes to the
+    /// client as they are produced.  This minimises time-to-first-byte and
+    /// memory usage for large documents.
+    ///
+    /// ## Trade-off
+    ///
+    /// Because the response headers are sent before ESI processing begins,
+    /// **response-manipulation functions** (`$add_header`, `$set_response_code`,
+    /// `$set_redirect`) **have no effect** in streaming mode.  If any of these
+    /// functions are invoked during processing a warning is printed to stdout.
+    /// If you need those functions, use the buffered [`process_response`](Self::process_response)
+    /// instead.
+    ///
+    /// Similarly, the `Cache-Control` header derived from fragment TTLs
+    /// (`rendered_cache_control` configuration) cannot be applied because the
+    /// minimum TTL is only known after all fragments have been fetched.
+    ///
+    /// # Arguments
+    /// * `src_stream` - Source HTTP response containing ESI markup to process
+    /// * `client_response_metadata` - Optional response metadata (headers, status) to send to client.
+    ///   Headers and status are committed immediately before processing begins.
+    /// * `dispatch_fragment_request` - Optional callback for customising fragment request handling
+    /// * `process_fragment_response` - Optional callback for processing fragment responses
+    ///
+    /// # Returns
+    /// * `Result<()>` - Ok if processing completed successfully, Error if processing failed
+    ///
+    /// # Example
+    /// ```no_run
+    /// use fastly::{http::StatusCode, mime, Request, Response};
+    /// use esi::{Processor, Configuration};
+    ///
+    /// let req = Request::from_client();
+    /// let mut beresp = req.clone_without_body().send("origin_0").unwrap();
+    ///
+    /// let processor = Processor::new(Some(req), Configuration::default());
+    /// processor.process_response_streaming(
+    ///     &mut beresp,
+    ///     Some(Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML)),
+    ///     Some(&|req, _maxwait| {
+    ///         Ok(req.with_ttl(120).send_async("mock-s3")?.into())
+    ///     }),
+    ///     None,
+    /// ).unwrap();
+    /// ```
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// * ESI processing fails
+    /// * Stream writing fails
+    /// * Fragment requests fail
+    pub fn process_response_streaming(
+        mut self,
+        src_stream: &mut Response,
+        client_response_metadata: Option<Response>,
+        dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        let resp = client_response_metadata.unwrap_or_else(|| {
+            Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML)
+        });
+
+        // Commit headers immediately — opens a streaming body writer
+        let mut output_writer = resp.stream_to_client();
+
+        let result = self.process_stream(
+            src_stream.take_body(),
+            &mut output_writer,
+            dispatch_fragment_request,
+            process_fragment_response,
+        );
+
+        // Warn about any response metadata that was set but cannot be applied
+        self.warn_ignored_streaming_metadata();
+
+        // Finish the streaming body (flushes remaining data)
+        output_writer.finish().map_err(ESIError::WriterError)?;
+
+        result
+    }
+
+    /// Check for response metadata set during processing that could not be
+    /// applied because headers were already committed (streaming mode).
+    /// Prints a warning to stdout for each ignored value.
+    fn warn_ignored_streaming_metadata(&self) {
+        let headers = self.ctx.response_headers();
+        if !headers.is_empty() {
+            for (name, value) in headers {
+                println!(
+                    "warning: $add_header('{name}', '{value}') has no effect in streaming mode \
+                     — response headers were already sent to the client"
+                );
+            }
+        }
+
+        if let Some(status) = self.ctx.response_status() {
+            println!(
+                "warning: $set_response_code({status}) has no effect in streaming mode \
+                 — response headers were already sent to the client"
+            );
+        }
+
+        if self.ctx.response_body_override().is_some() {
+            println!(
+                "warning: $set_response_code() body override has no effect in streaming mode \
+                 — response body is already being streamed to the client"
+            );
+        }
+
+        if self.configuration.cache.rendered_cache_control
+            && self
+                .ctx
+                .cache_control_header(self.configuration.cache.rendered_ttl)
+                .is_some()
+        {
+            println!(
+                "warning: Cache-Control header cannot be applied in streaming mode \
+                     — response headers were already sent to the client"
+            );
+        }
+    }
+
     /// Process an ESI stream from any `BufRead` into a `Write`.
     ///
     /// - Reads in configurable-size chunks (default 16 KB), buffering only what the parser needs
@@ -593,8 +727,10 @@ impl Processor {
     /// - Dispatches includes immediately; waits for them later in document order
     /// - Uses `select()` to harvest in-flight includes while preserving output order
     ///
-    /// For Fastly `Response` bodies, prefer `process_response`, which wires up
-    /// cache headers and response metadata for you.
+    /// For Fastly `Response` bodies, prefer [`process_response`](Self::process_response)
+    /// (buffered, supports response metadata functions) or
+    /// [`process_response_streaming`](Self::process_response_streaming) (true streaming
+    /// output), which wire up cache headers and response sending for you.
     ///
     /// # Arguments
     /// * `src_stream` - `BufRead` source containing ESI markup (streams in chunks)

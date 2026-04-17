@@ -13,6 +13,22 @@ pub struct CacheConfig {
     /// Enable caching of the rendered document (with a common minimum TTL tracked across includes)
     pub is_rendered_cacheable: bool,
     /// Emit Cache-Control header on final response (independent of `is_rendered_cacheable`)
+    ///
+    /// Only takes effect with
+    /// [`Processor::process_response()`](crate::Processor::process_response).
+    /// Has no effect with
+    /// [`process_response_streaming()`](crate::Processor::process_response_streaming)
+    /// (response headers are committed before the minimum TTL is known).
+    ///
+    /// When using [`process_stream()`](crate::Processor::process_stream) directly,
+    /// retrieve the computed value after processing and apply it yourself:
+    ///
+    /// ```rust,ignore
+    /// processor.process_stream(reader, &mut output, dispatcher, None)?;
+    /// if let Some(value) = processor.context().cache_control_header(config.cache.rendered_ttl) {
+    ///     resp.set_header(header::CACHE_CONTROL, value);
+    /// }
+    /// ```
     pub rendered_cache_control: bool,
     /// TTL in seconds for the rendered document (overrides tracked minimum TTL from includes)
     pub rendered_ttl: Option<u32>,

@@ -33,6 +33,9 @@ fn handle_request(req: Request) -> Result<(), Error> {
     {
         let processor = esi::Processor::new(Some(req), esi::Configuration::default());
 
+        // Process the ESI response (buffered — supports $add_header,
+        // $set_response_code, $set_redirect). For true streaming output
+        // use process_response_streaming() instead.
         processor.process_response(
             &mut beresp,
             None,
