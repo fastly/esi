@@ -1741,18 +1741,32 @@ impl Processor {
                 )));
             }
 
-            // Process each element in the current namespace
-            let mut handler = DocumentHandler {
-                processor: self,
-                output: output_writer,
-                dispatch_fragment_request: dispatcher,
-                fragment_response_handler: process_fragment_response,
-            };
-            for element in elements {
-                if matches!(handler.process(&element)?, Flow::Break) {
-                    return Ok(()); // Break from foreach, stop processing
+            // Process in an isolated context: per ESI spec, include cannot
+            // affect the parent's namespace, and dca="esi" only controls
+            // pre-processing of the fragment before insertion.  Using a
+            // separate Processor also gives us a clean queue, preventing
+            // nested includes from escaping to the parent's slot scope.
+            let mut isolated_processor = Processor::new(
+                Some(self.ctx.get_request().clone_without_body()),
+                self.configuration.clone(),
+            );
+
+            {
+                let mut handler = DocumentHandler {
+                    processor: &mut isolated_processor,
+                    output: output_writer,
+                    dispatch_fragment_request: dispatcher,
+                    fragment_response_handler: process_fragment_response,
+                };
+                for element in elements {
+                    if matches!(handler.process(&element)?, Flow::Break) {
+                        return Ok(());
+                    }
                 }
             }
+
+            // Drain any nested includes dispatched during processing.
+            isolated_processor.drain_queue(output_writer, dispatcher, process_fragment_response)?;
         } else {
             // dca="none" (default): Write raw content
             output_writer.write_all(&body_bytes)?;
