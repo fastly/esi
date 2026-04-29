@@ -20,6 +20,7 @@
 use bytes::Bytes;
 
 use crate::{
+    error::ESIError,
     expression::{eval_expr, EvalContext, Value},
     parser_types::{Element, Expr, IncludeAttributes, Tag, WhenBranch},
     Result,
@@ -119,7 +120,9 @@ pub trait ElementHandler {
             }
 
             Element::Expr(expr) => {
-                let val = eval_expr(expr, self.ctx())?;
+                let val = eval_expr(expr, self.ctx()).map_err(|e| {
+                    ESIError::ExpressionError(format!("{e}, in expression: {expr}"))
+                })?;
                 if !matches!(val, Value::Null) {
                     let bytes = val.to_bytes();
                     if !bytes.is_empty() {
@@ -182,8 +185,10 @@ pub trait ElementHandler {
         subscript: Option<&Expr>,
         value: &Expr,
     ) -> Result<Flow> {
-        // Propage the error if evaluation fails
-        let val = eval_expr(value, self.ctx())?;
+        // Propagate the error if evaluation fails
+        let val = eval_expr(value, self.ctx()).map_err(|e| {
+            ESIError::ExpressionError(format!("{e}, in assignment '{name}' = {value}"))
+        })?;
 
         // If there's a subscript, this is an assignment to an existing collection item
         if let Some(subscript_expr) = subscript {

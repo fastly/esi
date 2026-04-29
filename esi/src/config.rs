@@ -46,6 +46,9 @@ impl Configuration {
     }
 
     /// Configure caching for ESI includes
+    ///
+    /// See [`CacheConfig::rendered_cache_control`] for important notes on
+    /// which processing methods support automatic `Cache-Control` header emission.
     pub const fn with_caching(mut self, cache: CacheConfig) -> Self {
         self.cache = cache;
         self

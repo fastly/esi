@@ -281,9 +281,9 @@ fn eval_comparison(
             match (left_val, right_val) {
                 (Value::Integer(l), Value::Integer(r)) => l.checked_add(*r).map_or_else(
                     || {
-                        Err(ESIError::ExpressionError(
-                            "Integer overflow in addition".to_string(),
-                        ))
+                        Err(ESIError::ExpressionError(format!(
+                            "Integer overflow in addition: {l} + {r}"
+                        )))
                     },
                     |result| Ok(Value::Integer(result)),
                 ),
@@ -303,34 +303,34 @@ fn eval_comparison(
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
                 l.checked_sub(*r).map_or_else(
                     || {
-                        Err(ESIError::ExpressionError(
-                            "Integer overflow in subtraction".to_string(),
-                        ))
+                        Err(ESIError::ExpressionError(format!(
+                            "Integer overflow in subtraction: {l} - {r}"
+                        )))
                     },
                     |result| Ok(Value::Integer(result)),
                 )
             } else {
-                Err(ESIError::ExpressionError(
-                    "Subtraction requires numeric operands".to_string(),
-                ))
+                Err(ESIError::ExpressionError(format!(
+                    "Subtraction requires numeric operands, got {left_val} - {right_val}"
+                )))
             }
         }
         Operator::Multiply => {
             match (left_val, right_val) {
                 (Value::Integer(l), Value::Integer(r)) => l.checked_mul(*r).map_or_else(
                     || {
-                        Err(ESIError::ExpressionError(
-                            "Integer overflow in multiplication".to_string(),
-                        ))
+                        Err(ESIError::ExpressionError(format!(
+                            "Integer overflow in multiplication: {l} * {r}"
+                        )))
                     },
                     |result| Ok(Value::Integer(result)),
                 ),
                 // String repetition: n * 'string' or 'string' * n
                 (Value::Integer(n), Value::Text(s)) | (Value::Text(s), Value::Integer(n)) => {
                     if *n < 0 {
-                        Err(ESIError::ExpressionError(
-                            "String repetition count must be non-negative".to_string(),
-                        ))
+                        Err(ESIError::ExpressionError(format!(
+                            "String repetition count must be non-negative, got {n}"
+                        )))
                     } else {
                         let text = String::from_utf8_lossy(s.as_ref());
                         let result = text.repeat(*n as usize);
@@ -341,9 +341,9 @@ fn eval_comparison(
                 (Value::Integer(n), Value::List(items))
                 | (Value::List(items), Value::Integer(n)) => {
                     if *n < 0 {
-                        Err(ESIError::ExpressionError(
-                            "List repetition count must be non-negative".to_string(),
-                        ))
+                        Err(ESIError::ExpressionError(format!(
+                            "List repetition count must be non-negative, got {n}"
+                        )))
                     } else {
                         let borrowed = items.borrow();
                         let mut result = Vec::with_capacity(borrowed.len() * (*n as usize));
@@ -353,36 +353,39 @@ fn eval_comparison(
                         Ok(Value::new_list(result))
                     }
                 }
-                _ => Err(ESIError::ExpressionError(
-                    "Multiplication requires numeric operands, or integer with string/list"
-                        .to_string(),
-                )),
+                _ => Err(ESIError::ExpressionError(format!(
+                    "Multiplication requires numeric operands, or integer with string/list, got {left_val} * {right_val}"
+                ))),
             }
         }
         Operator::Divide => {
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
                 if *r == 0 {
-                    Err(ESIError::ExpressionError("Division by zero".to_string()))
+                    Err(ESIError::ExpressionError(format!(
+                        "Division by zero: {l} / 0"
+                    )))
                 } else {
                     Ok(Value::Integer(l / r))
                 }
             } else {
-                Err(ESIError::ExpressionError(
-                    "Division requires numeric operands".to_string(),
-                ))
+                Err(ESIError::ExpressionError(format!(
+                    "Division requires numeric operands, got {left_val} / {right_val}"
+                )))
             }
         }
         Operator::Modulo => {
             if let (Value::Integer(l), Value::Integer(r)) = (left_val, right_val) {
                 if *r == 0 {
-                    Err(ESIError::ExpressionError("Modulo by zero".to_string()))
+                    Err(ESIError::ExpressionError(format!(
+                        "Modulo by zero: {l} % 0"
+                    )))
                 } else {
                     Ok(Value::Integer(l % r))
                 }
             } else {
-                Err(ESIError::ExpressionError(
-                    "Modulo requires numeric operands".to_string(),
-                ))
+                Err(ESIError::ExpressionError(format!(
+                    "Modulo requires numeric operands, got {left_val} % {right_val}"
+                )))
             }
         }
     }

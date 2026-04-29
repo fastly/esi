@@ -180,14 +180,15 @@ fn test_include_dca_esi_processes_content() -> esi::Result<()> {
     Ok(())
 }
 
-/// Test that include with dca="esi" processes in parent namespace (like eval)
+/// Test that include with dca="esi" does NOT leak variables to parent namespace.
+/// Per ESI spec: "It is impossible for a child to affect a parent's namespace" for include.
 #[test]
-fn test_include_dca_esi_parent_namespace() -> esi::Result<()> {
+fn test_include_dca_esi_isolates_namespace() -> esi::Result<()> {
     let input = r#"<esi:include src="http://example.com/fragment" dca="esi"/><esi:vars>After include: $(shared_var)</esi:vars>"#;
 
     let dispatcher =
         |_req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
-            // Set a variable in the included ESI
+            // Set a variable in the included ESI — should NOT leak to parent
             Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
                 Response::from_body(r#"<esi:assign name="shared_var" value="'shared'"/>"#),
             )))
@@ -200,8 +201,8 @@ fn test_include_dca_esi_parent_namespace() -> esi::Result<()> {
 
     let result = String::from_utf8(output).unwrap();
     assert_eq!(
-        result, "After include: shared",
-        "Include with dca='esi' should process in parent namespace"
+        result, "After include: ",
+        "Include with dca='esi' must not leak variables to parent namespace"
     );
     Ok(())
 }
@@ -319,6 +320,101 @@ fn test_eval_with_nested_esi() -> esi::Result<()> {
         *call_count.lock().unwrap(),
         1,
         "Should only call dispatcher once"
+    );
+    Ok(())
+}
+
+/// Test that nested dca="esi" includes are rendered in correct document order (issue #45).
+///
+/// /page includes /header with dca="esi", and /header includes /menu with dca="esi".
+/// The menu content must appear inline inside <nav>, NOT appended after </html>.
+#[test]
+fn test_nested_dca_esi_document_order() -> esi::Result<()> {
+    let input = r#"<html>
+<body>
+  <header>
+    <esi:include src="http://example.com/header" dca="esi" />
+  </header>
+  <main>Main content</main>
+</body>
+</html>"#;
+
+    let dispatcher =
+        |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            let url = req.get_url_str();
+            let content = if url.contains("/header") {
+                r#"<h1>Site Title</h1>
+<nav>
+  <esi:include src="http://example.com/menu" dca="esi" />
+</nav>"#
+            } else if url.contains("/menu") {
+                "<ul><li>Home</li><li>About</li></ul>"
+            } else {
+                ""
+            };
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                Response::from_body(content),
+            )))
+        };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default());
+    processor.process_stream(reader, &mut output, Some(&dispatcher), None)?;
+
+    let result = String::from_utf8(output).unwrap();
+
+    // The menu must appear inside <nav>, inside <header>, before <main>.
+    let nav_start = result.find("<nav>").expect("<nav> should be present");
+    let menu_pos = result
+        .find("<ul><li>Home</li>")
+        .expect("menu content should be present");
+    let nav_end = result.find("</nav>").expect("</nav> should be present");
+    let main_pos = result.find("<main>").expect("<main> should be present");
+
+    assert!(
+        menu_pos > nav_start && menu_pos < nav_end,
+        "Menu must appear inside <nav>. Got:\n{result}"
+    );
+    assert!(
+        nav_end < main_pos,
+        "</nav> must appear before <main>. Got:\n{result}"
+    );
+    Ok(())
+}
+
+/// Test three-level nested dca="esi" includes preserve document order.
+#[test]
+fn test_triple_nested_dca_esi_document_order() -> esi::Result<()> {
+    let input =
+        r#"<div class="root"><esi:include src="http://example.com/level1" dca="esi" /></div>"#;
+
+    let dispatcher =
+        |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            let url = req.get_url_str();
+            let content = if url.contains("/level1") {
+                r#"[L1-before]<esi:include src="http://example.com/level2" dca="esi" />[L1-after]"#
+            } else if url.contains("/level2") {
+                r#"[L2-before]<esi:include src="http://example.com/level3" dca="esi" />[L2-after]"#
+            } else if url.contains("/level3") {
+                "[L3-content]"
+            } else {
+                ""
+            };
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                Response::from_body(content),
+            )))
+        };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default());
+    processor.process_stream(reader, &mut output, Some(&dispatcher), None)?;
+
+    let result = String::from_utf8(output).unwrap();
+    assert_eq!(
+        result, r#"<div class="root">[L1-before][L2-before][L3-content][L2-after][L1-after]</div>"#,
+        "Three-level nested dca='esi' must preserve document order"
     );
     Ok(())
 }

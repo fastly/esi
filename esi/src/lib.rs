@@ -294,7 +294,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                         return Ok(Flow::Continue);
                     }
                     return Err(ESIError::UnexpectedStatus {
-                        url: "eval".to_string(),
+                        url: fragment.req.get_url_str().to_string(),
                         status: response.get_status().as_u16(),
                     });
                 }
@@ -304,14 +304,15 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                 let body_as_bytes = Bytes::from(body_bytes);
 
                 // ALWAYS parse as ESI (this is the key difference from include)
+                let eval_url = fragment.req.get_url_str().to_string();
                 let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
-                    ESIError::ParseError(format!("failed to parse eval fragment: {e}"))
+                    ESIError::ParseError(format!("failed to parse eval fragment {eval_url}: {e}"))
                 })?;
 
                 if !rest.is_empty() {
-                    return Err(ESIError::ParseError(
-                        "incomplete parse of eval fragment".into(),
-                    ));
+                    return Err(ESIError::ParseError(format!(
+                        "incomplete parse of eval fragment {eval_url}"
+                    )));
                 }
 
                 if fragment.metadata.dca == DcaMode::Esi {
@@ -479,16 +480,23 @@ impl Processor {
     /// <esi:vars>$set_response_code(404, 'Page not found')</esi:vars>
     /// ```
     ///
-    /// ### `$set_redirect(url [, code])`
-    /// Sets up an HTTP redirect (default 302):
+    /// ### `$set_redirect(url)`
+    /// Sets up an HTTP redirect (302 Moved Temporarily):
     /// ```text
     /// <esi:vars>$set_redirect('https://example.com/new-page')</esi:vars>
-    /// <esi:vars>$set_redirect('https://example.com/moved', 301)</esi:vars>
     /// ```
     ///
     /// **Note:** These functions modify the response metadata that `process_response` will use
     /// when sending the response to the client. The headers, status code, and body override are
     /// buffered during processing and applied when the response is sent.
+    ///
+    /// **Important:** This method buffers the entire processed output in memory
+    /// before sending it to the client.  For true streaming output (lower
+    /// time-to-first-byte, lower memory usage), use
+    /// [`process_response_streaming`](Self::process_response_streaming) instead.
+    /// The streaming variant cannot apply response-manipulation functions
+    /// (`$add_header`, `$set_response_code`, `$set_redirect`) — see its
+    /// documentation for details.
     ///
     /// # Arguments
     /// * `src_stream` - Source HTTP response containing ESI markup to process
@@ -517,7 +525,7 @@ impl Processor {
     ///         Box::new(fastly::Response::from_body("Fragment content"))
     ///     ))
     /// }
-    /// // Process the response, streaming the resulting document directly to the client
+    /// // Process the response (buffered — metadata functions are applied before sending)
     /// processor.process_response(
     ///     &mut response,
     ///     None,
@@ -585,6 +593,132 @@ impl Processor {
         Ok(())
     }
 
+    /// Process a response body as an ESI document with **true streaming output**.
+    ///
+    /// Unlike [`process_response`](Self::process_response), which buffers the
+    /// entire processed output before sending it to the client, this method
+    /// commits the response headers immediately and streams body bytes to the
+    /// client as they are produced.  This minimises time-to-first-byte and
+    /// memory usage for large documents.
+    ///
+    /// ## Trade-off
+    ///
+    /// Because the response headers are sent before ESI processing begins,
+    /// **response-manipulation functions** (`$add_header`, `$set_response_code`,
+    /// `$set_redirect`) **have no effect** in streaming mode.  If any of these
+    /// functions are invoked during processing a warning is printed to stdout.
+    /// If you need those functions, use the buffered [`process_response`](Self::process_response)
+    /// instead.
+    ///
+    /// Similarly, the `Cache-Control` header derived from fragment TTLs
+    /// (`rendered_cache_control` configuration) cannot be applied because the
+    /// minimum TTL is only known after all fragments have been fetched.
+    ///
+    /// # Arguments
+    /// * `src_stream` - Source HTTP response containing ESI markup to process
+    /// * `client_response_metadata` - Optional response metadata (headers, status) to send to client.
+    ///   Headers and status are committed immediately before processing begins.
+    /// * `dispatch_fragment_request` - Optional callback for customising fragment request handling
+    /// * `process_fragment_response` - Optional callback for processing fragment responses
+    ///
+    /// # Returns
+    /// * `Result<()>` - Ok if processing completed successfully, Error if processing failed
+    ///
+    /// # Example
+    /// ```no_run
+    /// use fastly::{http::StatusCode, mime, Request, Response};
+    /// use esi::{Processor, Configuration};
+    ///
+    /// let req = Request::from_client();
+    /// let mut beresp = req.clone_without_body().send("origin_0").unwrap();
+    ///
+    /// let processor = Processor::new(Some(req), Configuration::default());
+    /// processor.process_response_streaming(
+    ///     &mut beresp,
+    ///     Some(Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML)),
+    ///     Some(&|req, _maxwait| {
+    ///         Ok(req.with_ttl(120).send_async("mock-s3")?.into())
+    ///     }),
+    ///     None,
+    /// ).unwrap();
+    /// ```
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// * ESI processing fails
+    /// * Stream writing fails
+    /// * Fragment requests fail
+    pub fn process_response_streaming(
+        mut self,
+        src_stream: &mut Response,
+        client_response_metadata: Option<Response>,
+        dispatch_fragment_request: Option<&FragmentRequestDispatcher>,
+        process_fragment_response: Option<&FragmentResponseProcessor>,
+    ) -> Result<()> {
+        let resp = client_response_metadata.unwrap_or_else(|| {
+            Response::from_status(StatusCode::OK).with_content_type(mime::TEXT_HTML)
+        });
+
+        // Commit headers immediately — opens a streaming body writer
+        let mut output_writer = resp.stream_to_client();
+
+        let result = self.process_stream(
+            src_stream.take_body(),
+            &mut output_writer,
+            dispatch_fragment_request,
+            process_fragment_response,
+        );
+
+        // Warn about any response metadata that was set but cannot be applied
+        self.warn_ignored_streaming_metadata();
+
+        // Finish the streaming body (flushes remaining data)
+        output_writer.finish().map_err(ESIError::WriterError)?;
+
+        result
+    }
+
+    /// Check for response metadata set during processing that could not be
+    /// applied because headers were already committed (streaming mode).
+    /// Prints a warning to stdout for each ignored value.
+    fn warn_ignored_streaming_metadata(&self) {
+        let headers = self.ctx.response_headers();
+        if !headers.is_empty() {
+            for (name, value) in headers {
+                println!(
+                    "warning: $add_header('{name}', '{value}') has no effect in streaming mode \
+                     — response headers were already sent to the client"
+                );
+            }
+        }
+
+        if let Some(status) = self.ctx.response_status() {
+            println!(
+                "warning: $set_response_code({status}) has no effect in streaming mode \
+                 — response headers were already sent to the client"
+            );
+        }
+
+        if self.ctx.response_body_override().is_some() {
+            println!(
+                "warning: $set_response_code() body override has no effect in streaming mode \
+                 — response body is already being streamed to the client"
+            );
+        }
+
+        if self.configuration.cache.rendered_cache_control
+            && self
+                .ctx
+                .cache_control_header(self.configuration.cache.rendered_ttl)
+                .is_some()
+        {
+            println!(
+                "warning: Cache-Control header cannot be applied in streaming mode \
+                     — response headers were already sent to the client"
+            );
+        }
+    }
+
     /// Process an ESI stream from any `BufRead` into a `Write`.
     ///
     /// - Reads in configurable-size chunks (default 16 KB), buffering only what the parser needs
@@ -592,8 +726,10 @@ impl Processor {
     /// - Dispatches includes immediately; waits for them later in document order
     /// - Uses `select()` to harvest in-flight includes while preserving output order
     ///
-    /// For Fastly `Response` bodies, prefer `process_response`, which wires up
-    /// cache headers and response metadata for you.
+    /// For Fastly `Response` bodies, prefer [`process_response`](Self::process_response)
+    /// (buffered, supports response metadata functions) or
+    /// [`process_response_streaming`](Self::process_response_streaming) (true streaming
+    /// output), which wire up cache headers and response sending for you.
     ///
     /// # Arguments
     /// * `src_stream` - `BufRead` source containing ESI markup (streams in chunks)
@@ -870,7 +1006,8 @@ impl Processor {
                 }
             }
             Err(e) => Err(ESIError::FragmentRequestError(format!(
-                "fragment dispatch failed: {e}"
+                "fragment dispatch failed for {}: {e}",
+                req.get_url_str()
             ))),
         }
     }
@@ -1471,6 +1608,7 @@ impl Processor {
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
         let continue_on_error = fragment.metadata.continue_on_error;
+        let fragment_url = fragment.req.get_url_str().to_string();
 
         // Wait for response
         let response = fragment.pending_fragment.wait()?;
@@ -1520,6 +1658,7 @@ impl Processor {
             self.process_fragment_body(
                 body_bytes,
                 fragment.metadata.dca,
+                &fragment_url,
                 output_writer,
                 dispatch_fragment_request,
                 process_fragment_response,
@@ -1550,6 +1689,7 @@ impl Processor {
                     self.process_fragment_body(
                         body_bytes,
                         fragment.metadata.dca,
+                        &String::from_utf8_lossy(&alt_src),
                         output_writer,
                         dispatch_fragment_request,
                         process_fragment_response,
@@ -1560,18 +1700,19 @@ impl Processor {
                     output_writer.write_all(self.fragment_req_failed())?;
                     Ok(())
                 }
-                Err(_) => Err(ESIError::FragmentRequestError(
-                    "both main and alt failed".into(),
-                )),
+                Err(_) => Err(ESIError::FragmentRequestError(format!(
+                    "both main and alt failed: main={fragment_url}, alt={}",
+                    String::from_utf8_lossy(&alt_src)
+                ))),
             }
         } else if continue_on_error {
             output_writer.write_all(self.fragment_req_failed())?;
             Ok(())
         } else {
-            Err(ESIError::FragmentRequestError(format!(
-                "fragment request failed with status: {}",
-                final_response.get_status()
-            )))
+            Err(ESIError::UnexpectedStatus {
+                url: fragment_url,
+                status: final_response.get_status().as_u16(),
+            })
         }
     }
 
@@ -1582,6 +1723,7 @@ impl Processor {
         &mut self,
         body_bytes: Vec<u8>,
         dca_mode: DcaMode,
+        url: &str,
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
         process_fragment_response: Option<&FragmentResponseProcessor>,
@@ -1590,27 +1732,41 @@ impl Processor {
             // Parse and process the content as ESI
             let body_as_bytes = Bytes::from(body_bytes);
             let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
-                ESIError::ParseError(format!("failed to parse fragment with dca=esi: {e}",))
+                ESIError::ParseError(format!("failed to parse fragment {url} with dca=esi: {e}"))
             })?;
 
             if !rest.is_empty() {
-                return Err(ESIError::ParseError(
-                    "incomplete parse of fragment with dca=esi".into(),
-                ));
+                return Err(ESIError::ParseError(format!(
+                    "incomplete parse of fragment {url} with dca=esi"
+                )));
             }
 
-            // Process each element in the current namespace
-            let mut handler = DocumentHandler {
-                processor: self,
-                output: output_writer,
-                dispatch_fragment_request: dispatcher,
-                fragment_response_handler: process_fragment_response,
-            };
-            for element in elements {
-                if matches!(handler.process(&element)?, Flow::Break) {
-                    return Ok(()); // Break from foreach, stop processing
+            // Process in an isolated context: per ESI spec, include cannot
+            // affect the parent's namespace, and dca="esi" only controls
+            // pre-processing of the fragment before insertion.  Using a
+            // separate Processor also gives us a clean queue, preventing
+            // nested includes from escaping to the parent's slot scope.
+            let mut isolated_processor = Processor::new(
+                Some(self.ctx.get_request().clone_without_body()),
+                self.configuration.clone(),
+            );
+
+            {
+                let mut handler = DocumentHandler {
+                    processor: &mut isolated_processor,
+                    output: output_writer,
+                    dispatch_fragment_request: dispatcher,
+                    fragment_response_handler: process_fragment_response,
+                };
+                for element in elements {
+                    if matches!(handler.process(&element)?, Flow::Break) {
+                        return Ok(());
+                    }
                 }
             }
+
+            // Drain any nested includes dispatched during processing.
+            isolated_processor.drain_queue(output_writer, dispatcher, process_fragment_response)?;
         } else {
             // dca="none" (default): Write raw content
             output_writer.write_all(&body_bytes)?;
@@ -1628,7 +1784,8 @@ const FRAGMENT_REQUEST_FAILED: &[u8] = b"<!-- fragment request failed -->";
 /// Free function (not a `Processor` method) so callers can independently borrow other
 /// `Processor` fields alongside `ctx`.
 fn eval_expr_to_bytes(expr: &Expr, ctx: &mut EvalContext) -> Result<Bytes> {
-    let result = expression::eval_expr(expr, ctx)?;
+    let result = expression::eval_expr(expr, ctx)
+        .map_err(|e| ESIError::ExpressionError(format!("{e}, in expression: {expr}")))?;
     Ok(result.to_bytes())
 }
 
@@ -1656,9 +1813,9 @@ fn default_fragment_dispatcher(
         builder = builder.first_byte_timeout(Duration::from_millis(u64::from(timeout_ms)));
     }
 
-    let backend = builder
-        .finish()
-        .map_err(|e| ESIError::FragmentRequestError(format!("failed to create backend: {e}")))?;
+    let backend = builder.finish().map_err(|e| {
+        ESIError::FragmentRequestError(format!("failed to create backend for {host}: {e}"))
+    })?;
 
     let pending_req = req.send_async(backend)?;
     Ok(PendingFragmentContent::PendingRequest(Box::new(
@@ -1676,8 +1833,12 @@ fn build_fragment_request(
     config: &Configuration,
 ) -> Result<Request> {
     // Convert Bytes to str for URL parsing
-    let url_str = std::str::from_utf8(url)
-        .map_err(|_| ESIError::InvalidFragmentConfig("invalid UTF-8 in URL".to_string()))?;
+    let url_str = std::str::from_utf8(url).map_err(|_| {
+        ESIError::InvalidFragmentConfig(format!(
+            "invalid UTF-8 in URL: {}",
+            String::from_utf8_lossy(url)
+        ))
+    })?;
 
     let escaped_url = if config.is_escaped_content {
         Cow::Owned(html_escape::decode_html_entities(url_str).into_owned())
@@ -1713,7 +1874,12 @@ fn build_fragment_request(
     // Set HTTP method (default is GET) - use pre-evaluated value
     if let Some(method_bytes) = &metadata.method {
         let method_str = std::str::from_utf8(method_bytes)
-            .map_err(|_| ESIError::InvalidFragmentConfig("invalid UTF-8 in method".to_string()))?
+            .map_err(|_| {
+                ESIError::InvalidFragmentConfig(format!(
+                    "invalid UTF-8 in method for {}",
+                    request.get_url_str()
+                ))
+            })?
             .to_uppercase();
 
         match method_str.as_str() {

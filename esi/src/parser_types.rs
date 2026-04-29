@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use std::fmt;
 
 /// Dynamic Content Assembly mode for esi:include and esi:eval
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
@@ -249,4 +250,111 @@ pub enum Operator {
     Modulo,
     // Range operator (for list creation)
     Range,
+}
+
+impl fmt::Display for Operator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Matches => "matches",
+            Self::MatchesInsensitive => "matches_i",
+            Self::Has => "has",
+            Self::HasInsensitive => "has_i",
+            Self::Equals => "==",
+            Self::NotEquals => "!=",
+            Self::LessThan => "<",
+            Self::LessThanOrEqual => "<=",
+            Self::GreaterThan => ">",
+            Self::GreaterThanOrEqual => ">=",
+            Self::And => "&",
+            Self::Or => "|",
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Modulo => "%",
+            Self::Range => "..",
+        })
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer(i) => write!(f, "{i}"),
+            Self::String(None) => f.write_str("''"),
+            Self::String(Some(b)) => {
+                let s = String::from_utf8_lossy(b.as_ref());
+                if s.len() > 60 {
+                    write!(f, "'{:.60}…'", s)
+                } else {
+                    write!(f, "'{s}'")
+                }
+            }
+            Self::Variable(name, None, None) => write!(f, "$({name})"),
+            Self::Variable(name, Some(key), None) => write!(f, "$({name}{{{key}}})"),
+            Self::Variable(name, None, Some(default)) => {
+                write!(f, "$({name}|{default})")
+            }
+            Self::Variable(name, Some(key), Some(default)) => {
+                write!(f, "$({name}{{{key}}}|{default})")
+            }
+            Self::Comparison {
+                left,
+                operator,
+                right,
+            } => write!(f, "{left} {operator} {right}"),
+            Self::Call(name, args) => {
+                write!(f, "${name}(")?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{arg}")?;
+                }
+                f.write_str(")")
+            }
+            Self::Not(inner) => write!(f, "!({inner})"),
+            Self::Interpolated(elements) => {
+                for elem in elements {
+                    match elem {
+                        Element::Content(b) | Element::Html(b) => {
+                            let s = String::from_utf8_lossy(b.as_ref());
+                            f.write_str(&s)?;
+                        }
+                        Element::Expr(expr) => write!(f, "{expr}")?,
+                        Element::Esi(_) => f.write_str("<esi:…>")?,
+                    }
+                }
+                Ok(())
+            }
+            Self::DictLiteral(pairs) => {
+                f.write_str("{")?;
+                for (i, (k, v)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    if i >= 3 {
+                        write!(f, "…+{}", pairs.len() - 3)?;
+                        break;
+                    }
+                    write!(f, "{k}: {v}")?;
+                }
+                f.write_str("}")
+            }
+            Self::ListLiteral(items) => {
+                f.write_str("[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    if i >= 5 {
+                        write!(f, "…+{}", items.len() - 5)?;
+                        break;
+                    }
+                    write!(f, "{item}")?;
+                }
+                f.write_str("]")
+            }
+        }
+    }
 }
