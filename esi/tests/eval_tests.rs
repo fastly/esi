@@ -418,3 +418,86 @@ fn test_triple_nested_dca_esi_document_order() -> esi::Result<()> {
     );
     Ok(())
 }
+
+/// A writer that records every flush() call along with the data written so far.
+/// This lets us assert that content is flushed at the right points during streaming.
+struct FlushTrackingWriter {
+    data: Vec<u8>,
+    /// Snapshots of `data` taken at each flush() call.
+    flush_snapshots: Vec<Vec<u8>>,
+}
+
+impl FlushTrackingWriter {
+    fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            flush_snapshots: Vec::new(),
+        }
+    }
+}
+
+impl std::io::Write for FlushTrackingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.data.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_snapshots.push(self.data.clone());
+        Ok(())
+    }
+}
+
+/// Test that process_stream flushes output before blocking on pending includes.
+///
+/// Content written before the first include must be flushed so that a streaming
+/// client (e.g. Fastly StreamingBody) sends it immediately rather than buffering
+/// until all includes have resolved (issue #45 streaming complaint).
+#[test]
+fn test_streaming_flush_before_pending_include() -> esi::Result<()> {
+    let input = r#"<html><body>
+<header>Header</header>
+<esi:include src="http://example.com/slow-fragment" />
+<footer>Footer</footer>
+</body></html>"#;
+
+    let dispatcher =
+        |_req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                Response::from_body("FRAGMENT"),
+            )))
+        };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut writer = FlushTrackingWriter::new();
+    let mut processor = Processor::new(None, Configuration::default());
+    processor.process_stream(reader, &mut writer, Some(&dispatcher), None)?;
+
+    // Final output must be correct
+    let result = String::from_utf8(writer.data).unwrap();
+    assert!(
+        result.contains("<header>Header</header>"),
+        "Should contain header"
+    );
+    assert!(result.contains("FRAGMENT"), "Should contain fragment");
+    assert!(
+        result.contains("<footer>Footer</footer>"),
+        "Should contain footer"
+    );
+
+    // At least one flush must have occurred BEFORE the final output,
+    // meaning the first flush snapshot should NOT contain everything.
+    assert!(
+        !writer.flush_snapshots.is_empty(),
+        "flush() should have been called at least once during processing"
+    );
+
+    // The first flush should contain content written before the include
+    let first_flush = String::from_utf8_lossy(&writer.flush_snapshots[0]);
+    assert!(
+        first_flush.contains("<header>Header</header>"),
+        "First flush should contain content before the include. Got: {first_flush}"
+    );
+
+    Ok(())
+}

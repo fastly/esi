@@ -797,16 +797,23 @@ impl Processor {
 
             match parse_result {
                 Ok((remaining, elements)) => {
-                    let mut handler = DocumentHandler {
-                        processor: self,
-                        output: output_writer,
-                        dispatch_fragment_request: dispatcher,
-                        fragment_response_handler: process_fragment_response,
-                    };
-                    for element in elements {
-                        handler.process(&element)?;
-                        handler.process_queue()?;
+                    {
+                        let mut handler = DocumentHandler {
+                            processor: self,
+                            output: output_writer,
+                            dispatch_fragment_request: dispatcher,
+                            fragment_response_handler: process_fragment_response,
+                        };
+                        for element in elements {
+                            handler.process(&element)?;
+                            handler.process_queue()?;
+                        }
                     }
+
+                    // Flush any content written during this parse batch so it
+                    // reaches the client immediately (progressive streaming)
+                    // rather than buffering until drain_queue completes.
+                    output_writer.flush()?;
 
                     if eof {
                         // Nothing left to read — we're done
@@ -1324,6 +1331,11 @@ impl Processor {
                     None => break, // head slot still waiting
                 }
             }
+
+            // Flush written content to the client before potentially blocking
+            // on select().  Without this, data sits in the writer's buffer
+            // while we wait for slow includes, defeating streaming.
+            output_writer.flush()?;
 
             // ------------------------------------------------------------------
             // Step 3: done when nothing is pending.
