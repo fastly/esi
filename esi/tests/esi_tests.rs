@@ -202,11 +202,8 @@ fn test_esi_choose_compatibility_not_equal() {
 // Test for nested variable expansion - INVALID ESI SYNTAX
 // The construct $($(outer){param}) is NOT valid Akamai ESI syntax.
 // Akamai's ESI does not support nested variable expansion like this.
-// This test was checking that it doesn't work, but the syntax is so invalid
-// that different parsers may handle it differently (error vs. pass-through).
 #[test]
-#[ignore] // Invalid ESI syntax - $($(var){key}) is not supported by Akamai ESI spec
-fn test_nested_subfields() {
+fn test_nested_subfields_is_invalid() {
     let input = r#"
         <esi:assign name="outer" value="'QUERY_STRING'" />
         <esi:vars>
@@ -214,11 +211,10 @@ fn test_nested_subfields() {
         </esi:vars>
     "#;
     let req = Request::get("http://example.com?param=value");
-    let result = process_esi_document(input, req).expect("Processing should succeed");
-    assert_ne!(
-        result.trim(),
-        "value",
-        "Nested variable expansion is not valid ESI syntax and should not work"
+    let result = process_esi_document(input, req);
+    assert!(
+        result.is_err(),
+        "Nested variable expansion $($(var){{key}}) is not valid ESI syntax and should fail"
     );
 }
 
