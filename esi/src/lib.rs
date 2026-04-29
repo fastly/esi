@@ -1158,14 +1158,41 @@ impl Processor {
                             ready => {
                                 // CompletedRequest or NoContent: process now.
                                 fragment.pending_fragment = ready;
-                                let mut slot_buf = Vec::new();
-                                self.process_include(
-                                    *fragment,
-                                    &mut slot_buf,
-                                    dispatch_fragment_request,
-                                    process_fragment_response,
-                                )?;
-                                buf[slot] = Some(Bytes::from(slot_buf));
+
+                                if slot == next_out {
+                                    // Head-of-line: stream directly to the
+                                    // client rather than buffering.
+                                    self.process_include(
+                                        *fragment,
+                                        output_writer,
+                                        dispatch_fragment_request,
+                                        process_fragment_response,
+                                    )?;
+                                    buf[slot] = Some(Bytes::new());
+                                    next_out += 1;
+
+                                    // Flush any subsequent ready slots.
+                                    while next_out < buf.len() {
+                                        match &buf[next_out] {
+                                            Some(bytes) => {
+                                                output_writer.write_all(bytes)?;
+                                                buf[next_out] = Some(Bytes::new());
+                                                next_out += 1;
+                                            }
+                                            None => break,
+                                        }
+                                    }
+                                    output_writer.flush()?;
+                                } else {
+                                    let mut slot_buf = Vec::new();
+                                    self.process_include(
+                                        *fragment,
+                                        &mut slot_buf,
+                                        dispatch_fragment_request,
+                                        process_fragment_response,
+                                    )?;
+                                    buf[slot] = Some(Bytes::from(slot_buf));
+                                }
                                 // dca="esi" may push new items onto self.queue;
                                 // the outer while picks them up next iteration.
                             }
@@ -1411,16 +1438,47 @@ impl Processor {
                 // -------------------------------------------------------
                 None => {
                     fragment.pending_fragment = completed_content;
-                    let mut slot_buf = Vec::new();
-                    self.process_include(
-                        *fragment,
-                        &mut slot_buf,
-                        dispatch_fragment_request,
-                        process_fragment_response,
-                    )?;
-                    buf[buf_slot] = Some(Bytes::from(slot_buf));
-                    // dca="esi" may push new QueuedElements onto self.queue.
-                    // Loop back to Step 1 to assign them slots.
+
+                    if buf_slot == next_out {
+                        // Head-of-line: write directly to the streaming
+                        // output instead of buffering into a slot.  This
+                        // lets nested dca="esi" fragments stream
+                        // incrementally — their isolated drain_queue
+                        // writes (and flushes) to the real client writer
+                        // rather than to a Vec that only surfaces later.
+                        self.process_include(
+                            *fragment,
+                            output_writer,
+                            dispatch_fragment_request,
+                            process_fragment_response,
+                        )?;
+                        buf[buf_slot] = Some(Bytes::new()); // mark consumed
+                        next_out += 1;
+
+                        // Advance past any subsequent ready slots that
+                        // can now be flushed contiguously.
+                        while next_out < buf.len() {
+                            match &buf[next_out] {
+                                Some(bytes) => {
+                                    output_writer.write_all(bytes)?;
+                                    buf[next_out] = Some(Bytes::new());
+                                    next_out += 1;
+                                }
+                                None => break,
+                            }
+                        }
+                        output_writer.flush()?;
+                    } else {
+                        let mut slot_buf = Vec::new();
+                        self.process_include(
+                            *fragment,
+                            &mut slot_buf,
+                            dispatch_fragment_request,
+                            process_fragment_response,
+                        )?;
+                        buf[buf_slot] = Some(Bytes::from(slot_buf));
+                    }
+                    // Loop back to Step 1 to pick up any new queue items.
                 }
 
                 // -------------------------------------------------------

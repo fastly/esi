@@ -1,5 +1,5 @@
 use esi::{Configuration, Processor};
-use fastly::{Request, Response};
+use fastly::{Backend, Request, Response};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -419,8 +419,8 @@ fn test_triple_nested_dca_esi_document_order() -> esi::Result<()> {
     Ok(())
 }
 
-/// A writer that records every flush() call along with the data written so far.
-/// This lets us assert that content is flushed at the right points during streaming.
+/// Writer that snapshots its buffer on every flush(), so we can check
+/// what data was available to the client at each flush point.
 struct FlushTrackingWriter {
     data: Vec<u8>,
     /// Snapshots of `data` taken at each flush() call.
@@ -448,11 +448,9 @@ impl std::io::Write for FlushTrackingWriter {
     }
 }
 
-/// Test that process_stream flushes output before blocking on pending includes.
-///
-/// Content written before the first include must be flushed so that a streaming
-/// client (e.g. Fastly StreamingBody) sends it immediately rather than buffering
-/// until all includes have resolved (issue #45 streaming complaint).
+/// Regression: content before an include should be flushed, not held
+/// until the include resolves. Without flush() the StreamingBody buffers
+/// everything and the client sees nothing until processing finishes.
 #[test]
 fn test_streaming_flush_before_pending_include() -> esi::Result<()> {
     let input = r#"<html><body>
@@ -473,7 +471,6 @@ fn test_streaming_flush_before_pending_include() -> esi::Result<()> {
     let mut processor = Processor::new(None, Configuration::default());
     processor.process_stream(reader, &mut writer, Some(&dispatcher), None)?;
 
-    // Final output must be correct
     let result = String::from_utf8(writer.data).unwrap();
     assert!(
         result.contains("<header>Header</header>"),
@@ -485,18 +482,90 @@ fn test_streaming_flush_before_pending_include() -> esi::Result<()> {
         "Should contain footer"
     );
 
-    // At least one flush must have occurred BEFORE the final output,
-    // meaning the first flush snapshot should NOT contain everything.
     assert!(
         !writer.flush_snapshots.is_empty(),
-        "flush() should have been called at least once during processing"
+        "expected at least one flush during processing"
     );
 
-    // The first flush should contain content written before the include
+    // The content before the include must already be present at the first flush.
     let first_flush = String::from_utf8_lossy(&writer.flush_snapshots[0]);
     assert!(
         first_flush.contains("<header>Header</header>"),
         "First flush should contain content before the include. Got: {first_flush}"
+    );
+
+    Ok(())
+}
+
+/// End-to-end streaming test with a real slow backend (httpbin.org/delay/1).
+///
+/// The outer doc has fast content before a dca="esi" include whose fragment
+/// itself contains a slow nested include. We verify that the fast content
+/// is flushed to the client *before* the slow include resolves — i.e. the
+/// stream doesn't stall at the outermost include boundary.
+///
+/// Requires network; ~1s. Run with: `cargo test -- --ignored`
+#[test]
+#[ignore]
+fn test_nested_dca_esi_real_async_streaming() -> esi::Result<()> {
+    let input = r#"<h1>Title</h1>
+<esi:include src="http://example.com/parent" dca="esi" />
+<footer>End</footer>"#;
+
+    let dispatcher =
+        |req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            let url = req.get_url_str().to_string();
+            if url.contains("example.com/parent") {
+                // Immediate response; body has a nested include that hits a slow endpoint
+                Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                    Response::from_body(
+                        "<p>Fast content</p>\n<esi:include src=\"https://httpbin.org/delay/1\" />",
+                    ),
+                )))
+            } else {
+                // Actually hit httpbin — this is the slow request
+                let backend = Backend::builder("httpbin.org", "httpbin.org")
+                    .enable_ssl()
+                    .sni_hostname("httpbin.org")
+                    .finish()
+                    .map_err(|e| {
+                        esi::ESIError::FragmentRequestError(format!(
+                            "failed to create httpbin backend: {e}"
+                        ))
+                    })?;
+                let pending = req.send_async(backend)?;
+                Ok(esi::PendingFragmentContent::PendingRequest(Box::new(
+                    pending,
+                )))
+            }
+        };
+
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut writer = FlushTrackingWriter::new();
+    let mut processor = Processor::new(None, Configuration::default());
+    processor.process_stream(reader, &mut writer, Some(&dispatcher), None)?;
+
+    let result = String::from_utf8(writer.data).unwrap();
+
+    assert!(result.contains("<h1>Title</h1>"));
+    assert!(result.contains("<p>Fast content</p>"));
+    assert!(result.contains("<footer>End</footer>"));
+
+    // The key check: some flush snapshot must contain the fast content but
+    // NOT the footer. The footer can't appear until the slow nested include
+    // finishes, so if we see this split it means the stream didn't stall.
+    let has_incremental_flush = writer.flush_snapshots.iter().any(|snap| {
+        let s = String::from_utf8_lossy(snap);
+        s.contains("<p>Fast content</p>") && !s.contains("<footer>End</footer>")
+    });
+    assert!(
+        has_incremental_flush,
+        "fast content should be flushed before the footer; snapshots: {:?}",
+        writer
+            .flush_snapshots
+            .iter()
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .collect::<Vec<_>>()
     );
 
     Ok(())
