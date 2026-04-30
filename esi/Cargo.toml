@@ -13,7 +13,7 @@ expose-internals = []
 
 [dependencies]
 thiserror = "2.0.6"
-fastly = "^0.11"
+fastly = "^0.12"
 log = "^0.4"
 regex = "1.11.1"
 html-escape = "0.2.13"
