@@ -35,6 +35,11 @@ pub struct Configuration {
     /// statements are supported. When the limit is reached, fragment content
     /// is passed through as raw bytes without ESI processing.
     pub max_include_depth: usize,
+    /// Enable parsing of `Edge-Control` response headers for per-fragment DCA
+    /// directives (e.g. `Edge-Control: dca=esi`). When enabled, the header
+    /// value overrides `default_dca` but is itself overridden by an explicit
+    /// `dca` attribute on the tag. Default: `false`.
+    pub enable_edge_control: bool,
 }
 
 impl Default for Configuration {
@@ -46,6 +51,7 @@ impl Default for Configuration {
             chunk_size: 16384,
             default_dca: DcaMode::None,
             max_include_depth: 15,
+            enable_edge_control: false,
         }
     }
 }
@@ -104,6 +110,21 @@ impl Configuration {
     /// Default: `15`.
     pub const fn with_max_include_depth(mut self, depth: usize) -> Self {
         self.max_include_depth = depth;
+        self
+    }
+
+    /// Enable or disable `Edge-Control` response header parsing.
+    ///
+    /// When enabled, fragment responses may include an `Edge-Control` header
+    /// with a `dca=esi` or `dca=none` directive to control per-fragment ESI
+    /// processing. This matches Akamai's "Enable Through Response Headers"
+    /// property setting.
+    ///
+    /// Precedence (highest wins): tag attribute → Edge-Control header → `default_dca`.
+    ///
+    /// Default: `false` (disabled).
+    pub const fn with_edge_control(mut self, enabled: bool) -> Self {
+        self.enable_edge_control = enabled;
         self
     }
 }

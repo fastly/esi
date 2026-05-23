@@ -81,8 +81,10 @@ struct FragmentMetadata {
     continue_on_error: bool,
     /// Optional timeout in milliseconds for this specific request
     maxwait: Option<u32>,
-    /// Dynamic Content Assembly mode for this request I(controls pre-processing)
-    dca: DcaMode,
+    /// Dynamic Content Assembly mode from the tag attribute.
+    /// `None` means no explicit attribute — resolved at response time using
+    /// Edge-Control header (if enabled) or config default.
+    dca: Option<DcaMode>,
 }
 
 /// Representation of an ESI fragment request with its metadata and pending response
@@ -302,6 +304,9 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     });
                 }
 
+                // Resolve DCA mode from tag attr / Edge-Control header / config default
+                let dca_mode = self.processor.resolve_dca(fragment.metadata.dca, &response);
+
                 // Get the response body
                 let body_bytes = response.into_body_bytes();
                 let body_as_bytes = Bytes::from(body_bytes);
@@ -318,7 +323,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     )));
                 }
 
-                if fragment.metadata.dca == DcaMode::Esi {
+                if dca_mode == DcaMode::Esi {
                     // Depth limit reached — silently omit fragment (per Akamai behaviour)
                     if self.processor.include_depth
                         >= self.processor.configuration.max_include_depth
@@ -939,7 +944,7 @@ impl Processor {
             ttl_override,
             continue_on_error: attrs.continue_on_error,
             maxwait: attrs.maxwait,
-            dca: attrs.dca.unwrap_or(self.configuration.default_dca),
+            dca: attrs.dca,
         })
     }
 
@@ -1748,10 +1753,11 @@ impl Processor {
 
         // Check if successful
         if final_response.get_status().is_success() {
+            let dca_mode = self.resolve_dca(fragment.metadata.dca, &final_response);
             let body_bytes = final_response.into_body_bytes();
             self.process_fragment_body(
                 body_bytes,
-                fragment.metadata.dca,
+                dca_mode,
                 &fragment_url,
                 output_writer,
                 dispatch_fragment_request,
@@ -1779,10 +1785,11 @@ impl Processor {
                         alt_response
                     };
 
+                    let dca_mode = self.resolve_dca(fragment.metadata.dca, &final_alt);
                     let body_bytes = final_alt.into_body_bytes();
                     self.process_fragment_body(
                         body_bytes,
-                        fragment.metadata.dca,
+                        dca_mode,
                         &String::from_utf8_lossy(&alt_src),
                         output_writer,
                         dispatch_fragment_request,
@@ -1808,6 +1815,25 @@ impl Processor {
                 status: final_response.get_status().as_u16(),
             })
         }
+    }
+
+    /// Resolve the effective DCA mode for a fragment, applying precedence:
+    /// tag attribute > Edge-Control response header > Configuration.default_dca
+    fn resolve_dca(&self, tag_dca: Option<DcaMode>, response: &Response) -> DcaMode {
+        // 1. Explicit tag attribute wins
+        if let Some(mode) = tag_dca {
+            return mode;
+        }
+
+        // 2. Edge-Control header (if enabled)
+        if self.configuration.enable_edge_control {
+            if let Some(dca) = parse_edge_control_dca(response) {
+                return dca;
+            }
+        }
+
+        // 3. Configuration default
+        self.configuration.default_dca
     }
 
     /// Process fragment body based on dca mode
@@ -1882,6 +1908,26 @@ impl Processor {
 /// Placeholder HTML comment written when a fragment could not be fetched and `onerror="continue"`.
 /// Only emitted for HTML content (when `is_escaped_content` is true).
 const FRAGMENT_REQUEST_FAILED: &[u8] = b"<!-- fragment request failed -->";
+
+/// Parse the `Edge-Control` response header for a `dca=` directive.
+///
+/// Per the EdgeSuite ESI spec, the header form is `Edge-control:dca=esi`.
+/// The `dca=` directive may appear alongside other directives (e.g.
+/// `Edge-Control: no-store, dca=esi`).
+/// Recognised values: `esi` (process as ESI) and `noop` (do not process).
+/// Returns `None` if the header is absent or the value is unrecognised.
+fn parse_edge_control_dca(response: &Response) -> Option<DcaMode> {
+    let header_value = response.get_header_str("edge-control")?;
+    let lower = header_value.to_ascii_lowercase();
+    let dca_pos = lower.find("dca=")?;
+    let after_eq = &lower[dca_pos + 4..];
+    let value = after_eq.split([',', ' ']).next()?;
+    match value {
+        "esi" => Some(DcaMode::Esi),
+        "noop" => Some(DcaMode::None),
+        _ => None,
+    }
+}
 
 /// Evaluate an [`Expr`] to a [`Bytes`] value.
 ///
