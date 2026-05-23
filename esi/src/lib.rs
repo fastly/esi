@@ -1818,7 +1818,7 @@ impl Processor {
     }
 
     /// Resolve the effective DCA mode for a fragment, applying precedence:
-    /// tag attribute > Edge-Control response header > Configuration.default_dca
+    /// tag attribute > Edge-Control header > inherited parent (if enabled & depth>0) > default_dca
     fn resolve_dca(&self, tag_dca: Option<DcaMode>, response: &Response) -> DcaMode {
         // 1. Explicit tag attribute wins
         if let Some(mode) = tag_dca {
@@ -1832,7 +1832,12 @@ impl Processor {
             }
         }
 
-        // 3. Configuration default
+        // 3. Inherit parent DCA (if enabled and inside an ESI subtree)
+        if self.configuration.inherit_parent_dca && self.include_depth > 0 {
+            return DcaMode::Esi;
+        }
+
+        // 4. Configuration default
         self.configuration.default_dca
     }
 

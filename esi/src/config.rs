@@ -40,6 +40,11 @@ pub struct Configuration {
     /// value overrides `default_dca` but is itself overridden by an explicit
     /// `dca` attribute on the tag. Default: `false`.
     pub enable_edge_control: bool,
+    /// When true, an unspecified child fragment inside an explicit `dca=esi`
+    /// subtree inherits ESI processing instead of falling back to `default_dca`.
+    /// This lets `dca=esi` "stick" to its children without forcing all
+    /// top-level includes to default to ESI. Default: `false`.
+    pub inherit_parent_dca: bool,
 }
 
 impl Default for Configuration {
@@ -52,6 +57,7 @@ impl Default for Configuration {
             default_dca: DcaMode::None,
             max_include_depth: 15,
             enable_edge_control: false,
+            inherit_parent_dca: false,
         }
     }
 }
@@ -125,6 +131,22 @@ impl Configuration {
     /// Default: `false` (disabled).
     pub const fn with_edge_control(mut self, enabled: bool) -> Self {
         self.enable_edge_control = enabled;
+        self
+    }
+
+    /// Enable or disable subtree DCA inheritance.
+    ///
+    /// When enabled, an unspecified child fragment inside an explicit
+    /// `dca=esi` subtree is processed as ESI, rather than falling back to
+    /// the global `default_dca`. Top-level includes (not inside any ESI
+    /// subtree) still use `default_dca`.
+    ///
+    /// Precedence (highest wins): tag attribute → Edge-Control header →
+    /// inherited parent DCA (if enabled & inside subtree) → `default_dca`.
+    ///
+    /// Default: `false` (disabled).
+    pub const fn with_inherit_parent_dca(mut self, enabled: bool) -> Self {
+        self.inherit_parent_dca = enabled;
         self
     }
 }
