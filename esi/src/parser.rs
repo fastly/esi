@@ -1048,11 +1048,11 @@ fn extract_include_attrs(mut attrs: Attrs<'_>, params: Vec<(String, Expr)>) -> I
     let alt = attrs_remove(&mut attrs, "alt").map(parse_attr_as_expr);
     let continue_on_error = attrs_get(&attrs, "onerror").is_some_and(|v| v == "continue");
 
-    // Parse dca attribute - default to None
-    let dca = if attrs_get(&attrs, "dca").is_some_and(|v| v.eq_ignore_ascii_case("esi")) {
-        DcaMode::Esi
-    } else {
-        DcaMode::None
+    // Parse dca attribute - None means not specified (inherits config default)
+    let dca = match attrs_get(&attrs, "dca") {
+        Some(v) if v.eq_ignore_ascii_case("esi") => Some(DcaMode::Esi),
+        Some(_) => Some(DcaMode::None),
+        None => None,
     };
 
     let ttl = attrs_remove(&mut attrs, "ttl").map(ToOwned::to_owned);

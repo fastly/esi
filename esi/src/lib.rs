@@ -12,7 +12,8 @@ pub(crate) mod parser_types;
 
 use crate::element_handler::{ElementHandler, Flow};
 use crate::expression::EvalContext;
-use crate::parser_types::{DcaMode, IncludeAttributes};
+pub use crate::parser_types::DcaMode;
+use crate::parser_types::IncludeAttributes;
 #[cfg(not(feature = "expose-internals"))]
 use crate::parser_types::{Element, Expr};
 use bytes::{Bytes, BytesMut};
@@ -915,7 +916,7 @@ impl Processor {
             ttl_override,
             continue_on_error: attrs.continue_on_error,
             maxwait: attrs.maxwait,
-            dca: attrs.dca,
+            dca: attrs.dca.unwrap_or(self.configuration.default_dca),
         })
     }
 

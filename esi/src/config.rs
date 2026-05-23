@@ -1,4 +1,5 @@
 use crate::cache::CacheConfig;
+use crate::parser_types::DcaMode;
 
 /// This struct is used to configure optional behaviour within the ESI processor.
 ///
@@ -25,6 +26,10 @@ pub struct Configuration {
     pub function_recursion_depth: usize,
     /// Size of the read buffer (in bytes) used when streaming ESI input (default: 16384)
     pub chunk_size: usize,
+    /// Default DCA mode for includes/evals without an explicit `dca` attribute.
+    /// When set to `DcaMode::Esi`, fragments are processed as ESI by default
+    /// (matching Akamai-style behaviour). Default: `DcaMode::None`.
+    pub default_dca: DcaMode,
 }
 
 impl Default for Configuration {
@@ -34,6 +39,7 @@ impl Default for Configuration {
             cache: CacheConfig::default(),
             function_recursion_depth: 5,
             chunk_size: 16384,
+            default_dca: DcaMode::None,
         }
     }
 }
@@ -66,6 +72,19 @@ impl Configuration {
     /// reduce memory usage.  Default: 16384 (16 KB).
     pub const fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size;
+        self
+    }
+
+    /// Configure the default DCA mode for `<esi:include>` and `<esi:eval>` tags
+    /// that do not specify an explicit `dca` attribute.
+    ///
+    /// Set to `DcaMode::Esi` to enable Akamai-style behaviour where all
+    /// fragments are ESI-processed by default. An explicit `dca="none"` on a
+    /// tag still opts out.
+    ///
+    /// Default: `DcaMode::None`.
+    pub const fn with_default_dca(mut self, dca: DcaMode) -> Self {
+        self.default_dca = dca;
         self
     }
 }
