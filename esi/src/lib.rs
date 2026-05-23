@@ -20,7 +20,7 @@ use bytes::{Bytes, BytesMut};
 use fastly::http::request::{select, PendingRequest};
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Backend, Request, Response};
-use log::debug;
+use log::{debug, warn};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
@@ -215,6 +215,8 @@ pub struct Processor {
     configuration: Configuration,
     // Queue for pending fragments and blocked content
     queue: VecDeque<QueuedElement>,
+    // Current include nesting depth (0 = top-level document)
+    include_depth: usize,
 }
 
 /// [`ElementHandler`] implementation for top-level ESI document processing.
@@ -317,6 +319,14 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                 }
 
                 if fragment.metadata.dca == DcaMode::Esi {
+                    // Depth limit reached — silently omit fragment (per Akamai behaviour)
+                    if self.processor.include_depth
+                        >= self.processor.configuration.max_include_depth
+                    {
+                        warn!("ESI include depth limit ({}) exceeded for eval fragment {eval_url}, omitting", self.processor.configuration.max_include_depth);
+                        return Ok(Flow::Continue);
+                    }
+
                     // dca="esi": TWO-PHASE processing
                     // Phase 1: Process fragment in ISOLATED context
                     // Reborrow before the exclusive borrow of self.processor below
@@ -326,6 +336,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                         Some(self.processor.ctx.get_request().clone_without_body()),
                         self.processor.configuration.clone(),
                     );
+                    isolated_processor.include_depth = self.processor.include_depth + 1;
                     let mut isolated_output = Vec::new();
 
                     {
@@ -371,13 +382,24 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                         }
                     }
                 } else {
+                    // Depth limit reached — silently omit fragment (per Akamai behaviour)
+                    if self.processor.include_depth
+                        >= self.processor.configuration.max_include_depth
+                    {
+                        warn!("ESI include depth limit ({}) exceeded for eval fragment {eval_url}, omitting", self.processor.configuration.max_include_depth);
+                        return Ok(Flow::Continue);
+                    }
+
                     // dca="none": SINGLE-PHASE processing in PARENT's context
                     // Fragment included first, then executed in parent (variables affect parent)
+                    self.processor.include_depth += 1;
                     for element in elements {
                         if matches!(self.process(&element)?, Flow::Break) {
+                            self.processor.include_depth -= 1;
                             return Ok(Flow::Break); // Propagate break from eval'd content
                         }
                     }
+                    self.processor.include_depth -= 1;
                 }
 
                 Ok(Flow::Continue)
@@ -434,6 +456,7 @@ impl Processor {
             ctx,
             configuration,
             queue: VecDeque::new(),
+            include_depth: 0,
         }
     }
 
@@ -1800,6 +1823,15 @@ impl Processor {
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
         if dca_mode == DcaMode::Esi {
+            // Depth limit reached — silently omit fragment (per Akamai behaviour)
+            if self.include_depth >= self.configuration.max_include_depth {
+                warn!(
+                    "ESI include depth limit ({}) exceeded for fragment {url}, omitting",
+                    self.configuration.max_include_depth
+                );
+                return Ok(());
+            }
+
             // Parse and process the content as ESI
             let body_as_bytes = Bytes::from(body_bytes);
             let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
@@ -1821,6 +1853,7 @@ impl Processor {
                 Some(self.ctx.get_request().clone_without_body()),
                 self.configuration.clone(),
             );
+            isolated_processor.include_depth = self.include_depth + 1;
 
             {
                 let mut handler = DocumentHandler {

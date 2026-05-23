@@ -30,6 +30,11 @@ pub struct Configuration {
     /// When set to `DcaMode::Esi`, fragments are processed as ESI by default
     /// (matching Akamai-style behaviour). Default: `DcaMode::None`.
     pub default_dca: DcaMode,
+    /// Maximum nesting depth for ESI includes/evals (default: 15).
+    /// Per the EdgeSuite ESI spec, up to fifteen levels of nested include
+    /// statements are supported. When the limit is reached, fragment content
+    /// is passed through as raw bytes without ESI processing.
+    pub max_include_depth: usize,
 }
 
 impl Default for Configuration {
@@ -40,6 +45,7 @@ impl Default for Configuration {
             function_recursion_depth: 5,
             chunk_size: 16384,
             default_dca: DcaMode::None,
+            max_include_depth: 15,
         }
     }
 }
@@ -85,6 +91,19 @@ impl Configuration {
     /// Default: `DcaMode::None`.
     pub const fn with_default_dca(mut self, dca: DcaMode) -> Self {
         self.default_dca = dca;
+        self
+    }
+
+    /// Configure the maximum nesting depth for ESI includes and evals.
+    ///
+    /// Per the EdgeSuite ESI spec, up to fifteen levels of nested include
+    /// statements are supported by default.  When the limit is reached,
+    /// fragment content is passed through as raw bytes without further ESI
+    /// processing.
+    ///
+    /// Default: `15`.
+    pub const fn with_max_include_depth(mut self, depth: usize) -> Self {
+        self.max_include_depth = depth;
         self
     }
 }

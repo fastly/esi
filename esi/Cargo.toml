@@ -27,7 +27,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "clock",
     "std",
 ] }
-rand = "0.10.0"
+rand = "0.10.1"
 
 [dev-dependencies]
 esi = { path = ".", features = ["expose-internals"] }
