@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>DCA Configuration Example</title>
+  </head>
+  <body>
+    <header style="background: #f1f1f1; padding: 16px">
+      <h1>DCA Configuration Example</h1>
+    </header>
+
+    <!-- This fragment is ESI-processed by default (default_dca = Esi) -->
+    <div class="default-dca">
+      <esi:include src="/_fragments/content.html" onerror="continue"/>
+    </div>
+
+    <!-- Explicit dca="none" overrides the default, so this fragment is included raw -->
+    <div class="explicit-none">
+      <esi:include src="/_fragments/sidebar.html" dca="none" onerror="continue"/>
+    </div>
+
+    <!-- Explicit dca="esi" ensures ESI processing regardless of config -->
+    <div class="explicit-esi">
+      <esi:include src="/_fragments/content.html" dca="esi" onerror="continue"/>
+    </div>
+
+    <!-- Nested includes: children inherit DCA from the parent when
+         inherit_parent_dca is enabled -->
+    <div class="nested">
+      <esi:include src="/_fragments/content.html" dca="esi" onerror="continue"/>
+    </div>
+  </body>
+</html>
