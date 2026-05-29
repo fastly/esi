@@ -12,14 +12,15 @@ pub(crate) mod parser_types;
 
 use crate::element_handler::{ElementHandler, Flow};
 use crate::expression::EvalContext;
-use crate::parser_types::{DcaMode, IncludeAttributes};
+pub use crate::parser_types::DcaMode;
+use crate::parser_types::IncludeAttributes;
 #[cfg(not(feature = "expose-internals"))]
 use crate::parser_types::{Element, Expr};
 use bytes::{Bytes, BytesMut};
 use fastly::http::request::{select, PendingRequest};
 use fastly::http::{header, Method, StatusCode, Url};
 use fastly::{mime, Backend, Request, Response};
-use log::debug;
+use log::{debug, warn};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
@@ -80,8 +81,10 @@ struct FragmentMetadata {
     continue_on_error: bool,
     /// Optional timeout in milliseconds for this specific request
     maxwait: Option<u32>,
-    /// Dynamic Content Assembly mode for this request I(controls pre-processing)
-    dca: DcaMode,
+    /// Dynamic Content Assembly mode from the tag attribute.
+    /// `None` means no explicit attribute — resolved at response time using
+    /// Edge-Control header (if enabled) or config default.
+    dca: Option<DcaMode>,
 }
 
 /// Representation of an ESI fragment request with its metadata and pending response
@@ -214,6 +217,8 @@ pub struct Processor {
     configuration: Configuration,
     // Queue for pending fragments and blocked content
     queue: VecDeque<QueuedElement>,
+    // Current include nesting depth (0 = top-level document)
+    include_depth: usize,
 }
 
 /// [`ElementHandler`] implementation for top-level ESI document processing.
@@ -299,6 +304,9 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     });
                 }
 
+                // Resolve DCA mode from tag attr / Edge-Control header / config default
+                let dca_mode = self.processor.resolve_dca(fragment.metadata.dca, &response);
+
                 // Get the response body
                 let body_bytes = response.into_body_bytes();
                 let body_as_bytes = Bytes::from(body_bytes);
@@ -315,7 +323,15 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     )));
                 }
 
-                if fragment.metadata.dca == DcaMode::Esi {
+                if dca_mode == DcaMode::Esi {
+                    // Depth limit reached — silently omit fragment (per Akamai behaviour)
+                    if self.processor.include_depth
+                        >= self.processor.configuration.max_include_depth
+                    {
+                        warn!("ESI include depth limit ({}) exceeded for eval fragment {eval_url}, omitting", self.processor.configuration.max_include_depth);
+                        return Ok(Flow::Continue);
+                    }
+
                     // dca="esi": TWO-PHASE processing
                     // Phase 1: Process fragment in ISOLATED context
                     // Reborrow before the exclusive borrow of self.processor below
@@ -325,6 +341,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                         Some(self.processor.ctx.get_request().clone_without_body()),
                         self.processor.configuration.clone(),
                     );
+                    isolated_processor.include_depth = self.processor.include_depth + 1;
                     let mut isolated_output = Vec::new();
 
                     {
@@ -370,13 +387,24 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                         }
                     }
                 } else {
+                    // Depth limit reached — silently omit fragment (per Akamai behaviour)
+                    if self.processor.include_depth
+                        >= self.processor.configuration.max_include_depth
+                    {
+                        warn!("ESI include depth limit ({}) exceeded for eval fragment {eval_url}, omitting", self.processor.configuration.max_include_depth);
+                        return Ok(Flow::Continue);
+                    }
+
                     // dca="none": SINGLE-PHASE processing in PARENT's context
                     // Fragment included first, then executed in parent (variables affect parent)
+                    self.processor.include_depth += 1;
                     for element in elements {
                         if matches!(self.process(&element)?, Flow::Break) {
+                            self.processor.include_depth -= 1;
                             return Ok(Flow::Break); // Propagate break from eval'd content
                         }
                     }
+                    self.processor.include_depth -= 1;
                 }
 
                 Ok(Flow::Continue)
@@ -433,6 +461,7 @@ impl Processor {
             ctx,
             configuration,
             queue: VecDeque::new(),
+            include_depth: 0,
         }
     }
 
@@ -1724,10 +1753,11 @@ impl Processor {
 
         // Check if successful
         if final_response.get_status().is_success() {
+            let dca_mode = self.resolve_dca(fragment.metadata.dca, &final_response);
             let body_bytes = final_response.into_body_bytes();
             self.process_fragment_body(
                 body_bytes,
-                fragment.metadata.dca,
+                dca_mode,
                 &fragment_url,
                 output_writer,
                 dispatch_fragment_request,
@@ -1755,10 +1785,11 @@ impl Processor {
                         alt_response
                     };
 
+                    let dca_mode = self.resolve_dca(fragment.metadata.dca, &final_alt);
                     let body_bytes = final_alt.into_body_bytes();
                     self.process_fragment_body(
                         body_bytes,
-                        fragment.metadata.dca,
+                        dca_mode,
                         &String::from_utf8_lossy(&alt_src),
                         output_writer,
                         dispatch_fragment_request,
@@ -1786,6 +1817,30 @@ impl Processor {
         }
     }
 
+    /// Resolve the effective DCA mode for a fragment, applying precedence:
+    /// tag attribute > Edge-Control header > inherited parent (if enabled & depth>0) > default_dca
+    fn resolve_dca(&self, tag_dca: Option<DcaMode>, response: &Response) -> DcaMode {
+        // 1. Explicit tag attribute wins
+        if let Some(mode) = tag_dca {
+            return mode;
+        }
+
+        // 2. Edge-Control header (if enabled)
+        if self.configuration.enable_edge_control {
+            if let Some(dca) = parse_edge_control_dca(response) {
+                return dca;
+            }
+        }
+
+        // 3. Inherit parent DCA (if enabled and inside an ESI subtree)
+        if self.configuration.inherit_parent_dca && self.include_depth > 0 {
+            return DcaMode::Esi;
+        }
+
+        // 4. Configuration default
+        self.configuration.default_dca
+    }
+
     /// Process fragment body based on dca mode
     /// - dca="esi": Parse and process content as ESI
     /// - dca="none": Write raw content
@@ -1799,6 +1854,15 @@ impl Processor {
         process_fragment_response: Option<&FragmentResponseProcessor>,
     ) -> Result<()> {
         if dca_mode == DcaMode::Esi {
+            // Depth limit reached — silently omit fragment (per Akamai behaviour)
+            if self.include_depth >= self.configuration.max_include_depth {
+                warn!(
+                    "ESI include depth limit ({}) exceeded for fragment {url}, omitting",
+                    self.configuration.max_include_depth
+                );
+                return Ok(());
+            }
+
             // Parse and process the content as ESI
             let body_as_bytes = Bytes::from(body_bytes);
             let (rest, elements) = parser::parse_complete(&body_as_bytes).map_err(|e| {
@@ -1820,6 +1884,7 @@ impl Processor {
                 Some(self.ctx.get_request().clone_without_body()),
                 self.configuration.clone(),
             );
+            isolated_processor.include_depth = self.include_depth + 1;
 
             {
                 let mut handler = DocumentHandler {
@@ -1848,6 +1913,26 @@ impl Processor {
 /// Placeholder HTML comment written when a fragment could not be fetched and `onerror="continue"`.
 /// Only emitted for HTML content (when `is_escaped_content` is true).
 const FRAGMENT_REQUEST_FAILED: &[u8] = b"<!-- fragment request failed -->";
+
+/// Parse the `Edge-Control` response header for a `dca=` directive.
+///
+/// Per the EdgeSuite ESI spec, the header form is `Edge-control:dca=esi`.
+/// The `dca=` directive may appear alongside other directives (e.g.
+/// `Edge-Control: no-store, dca=esi`).
+/// Recognised values: `esi` (process as ESI) and `noop` (do not process).
+/// Returns `None` if the header is absent or the value is unrecognised.
+fn parse_edge_control_dca(response: &Response) -> Option<DcaMode> {
+    let header_value = response.get_header_str("edge-control")?;
+    let lower = header_value.to_ascii_lowercase();
+    let dca_pos = lower.find("dca=")?;
+    let after_eq = &lower[dca_pos + 4..];
+    let value = after_eq.split([',', ' ']).next()?;
+    match value {
+        "esi" => Some(DcaMode::Esi),
+        "noop" => Some(DcaMode::None),
+        _ => None,
+    }
+}
 
 /// Evaluate an [`Expr`] to a [`Bytes`] value.
 ///

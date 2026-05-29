@@ -20,8 +20,9 @@ pub struct IncludeAttributes {
     pub alt: Option<Expr>,
     /// Whether to continue on error (from onerror="continue")
     pub continue_on_error: bool,
-    /// Dynamic Content Assembly mode - controls pre-processing
-    pub dca: DcaMode,
+    /// Dynamic Content Assembly mode - controls pre-processing.
+    /// `None` means no explicit attribute was set (inherits config default).
+    pub dca: Option<DcaMode>,
     /// Time-To-Live for caching (e.g., "120m", "1h", "2d", "0s")
     pub ttl: Option<String>,
     /// Timeout in milliseconds for the request

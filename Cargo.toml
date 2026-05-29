@@ -7,6 +7,7 @@ members = [
     "examples/esi_try_example",
     "examples/esi_vars_example",
     "examples/esi_example_variants",
+    "examples/esi_dca_example",
 ]
 resolver = "2"
 

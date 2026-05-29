@@ -406,6 +406,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "esi_dca_example"
+version = "0.7.0"
+dependencies = [
+ "env_logger",
+ "esi",
+ "fastly",
+ "log",
+]
+
+[[package]]
 name = "esi_example_advanced_error_handling"
 version = "0.7.0"
 dependencies = [
