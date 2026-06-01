@@ -1,0 +1,16 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+jobs:
+  publish:
+    permissions:
+      id-token: write
+      contents: read
+    uses: fastly/devex-reusable-workflows/.github/workflows/publish-rust-crates-io-v1.yml@main
+    with:
+      crate_name: esi
+      expected_version: ${{ github.ref_name }}
