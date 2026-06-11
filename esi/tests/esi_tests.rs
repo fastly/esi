@@ -2380,3 +2380,84 @@ fn test_list_mutation_visible_through_alias() -> Result<(), Error> {
     );
     Ok(())
 }
+
+// =============================================================================
+// <!--esi ...--> comment block tests (ESI spec 3.7)
+// =============================================================================
+
+#[test]
+fn test_esi_comment_block_plain_html() {
+    init_logs();
+    let input = r#"before<!--esi <p>hello</p> -->after"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(
+        result.contains("<p>hello</p>"),
+        "Inner HTML should appear in output. Got: {result}"
+    );
+    assert!(
+        !result.contains("<!--"),
+        "Comment delimiters should be stripped. Got: {result}"
+    );
+    assert!(
+        result.contains("before"),
+        "Content before <!--esi should appear. Got: {result}"
+    );
+    assert!(
+        result.contains("after"),
+        "Content after --> should appear. Got: {result}"
+    );
+}
+
+#[test]
+fn test_esi_comment_block_with_vars() {
+    init_logs();
+    let input = r#"<!--esi <esi:assign name="x" value="'hello'" /><esi:vars>$(x)</esi:vars> -->"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(
+        result.contains("hello"),
+        "ESI vars inside <!--esi --> should be processed. Got: {result}"
+    );
+}
+
+#[test]
+fn test_esi_comment_block_with_choose() {
+    init_logs();
+    let input = r#"<!--esi
+        <esi:choose>
+            <esi:when test="1 == 1">yes</esi:when>
+            <esi:otherwise>no</esi:otherwise>
+        </esi:choose>
+    -->"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(
+        result.contains("yes"),
+        "esi:choose inside <!--esi --> should be processed. Got: {result}"
+    );
+    assert!(
+        !result.contains("no"),
+        "otherwise branch should not appear. Got: {result}"
+    );
+}
+
+#[test]
+fn test_esi_comment_block_mixed_with_regular() {
+    init_logs();
+    let input = r#"<!-- regular comment --><!--esi <p>visible</p> -->"#;
+    let req = Request::get("http://example.com/test");
+    let result = process_esi_document(input, req).expect("Processing should succeed");
+
+    assert!(
+        result.contains("<!-- regular comment -->"),
+        "Regular HTML comments should pass through. Got: {result}"
+    );
+    assert!(
+        result.contains("<p>visible</p>"),
+        "<!--esi --> content should be processed. Got: {result}"
+    );
+}
