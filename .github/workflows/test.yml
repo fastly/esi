@@ -5,14 +5,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
-      - name: Add wasm32-wasip1 Rust target
-        run: rustup target add wasm32-wasip1
-      - name: Install rustfmt
-        run: rustup component add rustfmt
-        shell: bash
+        run: |
+          rustup show
+          rustup component add rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
         shell: bash
