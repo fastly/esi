@@ -1086,20 +1086,13 @@ impl Processor {
                         }
                     }
                 }
-                Some(QueuedElement::Try {
-                    attempt_elements,
-                    except_elements,
-                }) => {
-                    // Process try blocks inline rather than stalling the queue.
-                    // Previously Try was skipped here, causing a stall whenever a Try block
-                    // reached the front after a preceding include was consumed.
-                    self.process_try_block(
-                        attempt_elements,
-                        &except_elements,
-                        output_writer,
-                        dispatcher,
-                        processor,
-                    )?;
+                Some(try_elem @ QueuedElement::Try { .. }) => {
+                    // Defer try blocks to `drain_queue`, which dispatches every
+                    // attempt's includes into a single `select()` pool so that
+                    // multiple top-level try blocks are awaited in parallel
+                    // rather than serialized one-by-one.
+                    self.queue.push_front(try_elem);
+                    break;
                 }
             }
         }
