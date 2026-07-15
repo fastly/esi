@@ -3388,13 +3388,18 @@ exception!
         assert_eq!(rest.len(), 0);
 
         // Should NOT produce Element::Html (i.e., not passed through as a comment)
-        let has_html_comment = elements.iter().any(|e| {
-            matches!(e, Element::Html(h) if h.as_ref().starts_with(b"<!--"))
-        });
-        assert!(!has_html_comment, "<!--esi --> should not produce an HTML comment element");
+        let has_html_comment = elements
+            .iter()
+            .any(|e| matches!(e, Element::Html(h) if h.as_ref().starts_with(b"<!--")));
+        assert!(
+            !has_html_comment,
+            "<!--esi --> should not produce an HTML comment element"
+        );
 
         // Should contain an ESI include
-        let has_include = elements.iter().any(|e| matches!(e, Element::Esi(Tag::Include { .. })));
+        let has_include = elements
+            .iter()
+            .any(|e| matches!(e, Element::Esi(Tag::Include { .. })));
         assert!(has_include, "<!--esi --> should parse inner ESI tags");
     }
 
@@ -3417,10 +3422,22 @@ exception!
             .collect();
 
         let output_str = String::from_utf8_lossy(&output);
-        assert!(output_str.contains("before"), "Should have content before <!--esi");
-        assert!(output_str.contains("<p>hello</p>"), "Should have inner HTML without comment delimiters");
-        assert!(output_str.contains("after"), "Should have content after -->");
-        assert!(!output_str.contains("<!--"), "Comment delimiters should be stripped");
+        assert!(
+            output_str.contains("before"),
+            "Should have content before <!--esi"
+        );
+        assert!(
+            output_str.contains("<p>hello</p>"),
+            "Should have inner HTML without comment delimiters"
+        );
+        assert!(
+            output_str.contains("after"),
+            "Should have content after -->"
+        );
+        assert!(
+            !output_str.contains("<!--"),
+            "Comment delimiters should be stripped"
+        );
     }
 
     #[test]
@@ -3446,10 +3463,12 @@ exception!
         assert_eq!(rest.len(), 0);
 
         // esi:vars inlines its content directly — should produce an Expr element
-        let has_expr = elements
-            .iter()
-            .any(|e| matches!(e, Element::Expr(_)));
-        assert!(has_expr, "<!--esi --> should parse esi:vars content into expressions, got: {:?}", elements);
+        let has_expr = elements.iter().any(|e| matches!(e, Element::Expr(_)));
+        assert!(
+            has_expr,
+            "<!--esi --> should parse esi:vars content into expressions, got: {:?}",
+            elements
+        );
     }
 
     #[test]
