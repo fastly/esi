@@ -1450,17 +1450,35 @@ fn tag_handler<'a>(
 }
 
 /// Parse HTML comment - input starts at <!--
+///
+/// Handles two cases:
+/// 1. `<!--esi ...-->` - strips the comment delimiters and parses
+///    the inner content as ESI. Cannot be nested per spec.
+///    See: <https://www.w3.org/TR/esi-lang> §3.7
+/// 2. Regular `<!-- ...-->` - passed through verbatim as `Element::Html`.
 fn html_comment_content<'a>(
     original: &Bytes,
     input: &'a [u8],
 ) -> IResult<&'a [u8], ParseResult, Error<&'a [u8]>> {
     let start = input;
-    let (rest, _) = delimited(
+    // Consume <!-- ... -->
+    let (rest, body) = delimited(
         streaming_bytes::tag(HTML_COMMENT_OPEN),
         streaming_bytes::take_until(HTML_COMMENT_CLOSE),
         streaming_bytes::tag(HTML_COMMENT_CLOSE),
     )
     .parse(input)?;
+
+    // <!--esi ...-->: strip delimiters, parse inner content as ESI
+    // https://www.w3.org/TR/esi-lang §3.7
+    if let Some(inner) = body.strip_prefix(b"esi") {
+        let inner_bytes = slice_as_bytes(original, inner);
+        if let Ok((_, elements)) = parse_complete(&inner_bytes) {
+            return Ok((rest, ParseResult::Multiple(elements)));
+        }
+    }
+
+    // Regular HTML comment (or failed <!--esi parse) - pass through verbatim
     let full_comment = &start[..start.len() - rest.len()];
     Ok((
         rest,
@@ -3355,5 +3373,127 @@ exception!
             .flatten()
             .collect();
         assert_eq!(text, b"hello$world");
+    }
+
+    // =========================================================================
+    // <!--esi ...--> comment block tests
+    // =========================================================================
+
+    #[test]
+    fn test_esi_comment_block_with_include() {
+        // <!--esi ...--> should strip delimiters and parse inner ESI content
+        let input = b"<!--esi <esi:include src=\"/test.html\"/> -->";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+
+        // Should NOT produce Element::Html (i.e., not passed through as a comment)
+        let has_html_comment = elements
+            .iter()
+            .any(|e| matches!(e, Element::Html(h) if h.as_ref().starts_with(b"<!--")));
+        assert!(
+            !has_html_comment,
+            "<!--esi --> should not produce an HTML comment element"
+        );
+
+        // Should contain an ESI include
+        let has_include = elements
+            .iter()
+            .any(|e| matches!(e, Element::Esi(Tag::Include { .. })));
+        assert!(has_include, "<!--esi --> should parse inner ESI tags");
+    }
+
+    #[test]
+    fn test_esi_comment_block_with_plain_html() {
+        // <!--esi <p>hello</p> --> should strip delimiters and output inner content
+        let input = b"before<!--esi <p>hello</p> -->after";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+
+        // Collect all text/html content
+        let output: Vec<u8> = elements
+            .iter()
+            .filter_map(|e| match e {
+                Element::Content(b) | Element::Html(b) => Some(b.as_ref().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            output_str.contains("before"),
+            "Should have content before <!--esi"
+        );
+        assert!(
+            output_str.contains("<p>hello</p>"),
+            "Should have inner HTML without comment delimiters"
+        );
+        assert!(
+            output_str.contains("after"),
+            "Should have content after -->"
+        );
+        assert!(
+            !output_str.contains("<!--"),
+            "Comment delimiters should be stripped"
+        );
+    }
+
+    #[test]
+    fn test_regular_html_comment_unchanged() {
+        // Regular HTML comments should still pass through as Element::Html
+        let input = b"<!-- regular comment -->";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+        assert!(matches!(
+            &elements[0],
+            Element::Html(h) if h.as_ref() == b"<!-- regular comment -->"
+        ));
+    }
+
+    #[test]
+    fn test_esi_comment_block_with_vars() {
+        // <!--esi ...--> with esi:vars should parse the expression inside
+        let input = b"<!--esi <esi:vars>$(HTTP_HOST)</esi:vars> -->";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+
+        // esi:vars inlines its content directly — should produce an Expr element
+        let has_expr = elements.iter().any(|e| matches!(e, Element::Expr(_)));
+        assert!(
+            has_expr,
+            "<!--esi --> should parse esi:vars content into expressions, got: {:?}",
+            elements
+        );
+    }
+
+    #[test]
+    fn test_esi_comment_block_streaming_incomplete() {
+        // Partial <!--esi --> in streaming mode should return Incomplete
+        let input = b"<!--esi <p>hello</p>";
+        let bytes = Bytes::from_static(input);
+        let result = parse(&bytes);
+        assert!(
+            matches!(result, Err(nom::Err::Incomplete(_))),
+            "Partial <!--esi without --> should be Incomplete in streaming mode"
+        );
+    }
+
+    #[test]
+    fn test_esi_comment_block_case_sensitive() {
+        // <!--ESI ...--> should NOT be treated as ESI comment (case-sensitive)
+        let input = b"<!--ESI <p>hello</p> -->";
+        let bytes = Bytes::from_static(input);
+        let (rest, elements) = parse_complete(&bytes).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(elements.len(), 1);
+        assert!(matches!(
+            &elements[0],
+            Element::Html(h) if h.as_ref() == b"<!--ESI <p>hello</p> -->"
+        ));
     }
 }
