@@ -858,7 +858,14 @@ impl Processor {
                     // Streaming parser needs more data (parse_eof never returns
                     // Incomplete — it converts it to Failure(Eof) instead)
                     debug_assert!(!eof, "parse_eof should not return Incomplete");
-                    // Not at EOF - loop will read more data
+                    // `split()` removed every byte from `buffer`. Preserve this
+                    // incomplete element so the next iteration appends to it instead
+                    // of parsing only the next read chunk.
+                    //
+                    // Drop the empty split tail first so converting `frozen` back to
+                    // `BytesMut` can reclaim the shared allocation without copying.
+                    drop(std::mem::take(&mut buffer));
+                    buffer = frozen.into();
                 }
                 Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
                     if eof {
@@ -868,9 +875,10 @@ impl Processor {
                         }
                         return Err(ESIError::ParseError(format!("parser error: {e:?}")));
                     }
-                    // Not at EOF - maybe more data will help, output what we have and continue
-                    output_writer.write_all(&buffer)?;
-                    buffer.clear();
+                    // Not at EOF - maybe more data will help. Pass through the
+                    // bytes that failed to parse and continue with the next read.
+                    // `split()` left `buffer` empty, so the input is in `frozen`.
+                    output_writer.write_all(&frozen)?;
                 }
             }
         }
