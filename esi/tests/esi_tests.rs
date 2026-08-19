@@ -902,6 +902,222 @@ fn test_streaming_input_with_small_chunks() {
         "Should contain assigned variable value"
     );
 }
+
+#[test]
+fn process_stream_preserves_an_html_element_larger_than_the_read_chunk() {
+    let payload = "x".repeat(120_000);
+    let input = format!(
+        "<!doctype html><html><body><p>before</p>\
+         <script>self.__next_f.push([1,\"{payload}\"])</script>\
+         <p>after</p></body></html>"
+    );
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default().with_chunk_size(16_384));
+
+    processor
+        .process_stream(reader, &mut output, None, None)
+        .expect("processing should succeed");
+
+    assert_eq!(
+        output.len(),
+        input.len(),
+        "streaming must not drop chunks while waiting for the script's closing tag"
+    );
+    assert_eq!(output, input.as_bytes());
+}
+
+#[test]
+fn process_stream_preserves_a_non_eof_parse_error_chunk() {
+    let input = b"<?xml version=\"1.0\"?><html><body>after</body></html>";
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default().with_chunk_size(8));
+
+    processor
+        .process_stream(reader, &mut output, None, None)
+        .expect("recoverable parsing should succeed");
+
+    assert_eq!(
+        output, input,
+        "the recoverable parse-error path must pass through the bytes it could not parse"
+    );
+}
+
+#[test]
+fn process_stream_preserves_multiple_large_elements_at_chunk_boundaries() {
+    for chunk_size in [
+        1_usize, 2, 7, 15, 16, 31, 255, 1_023, 16_383, 16_384, 16_385,
+    ] {
+        let payload_len = chunk_size.saturating_mul(3).saturating_add(17).max(96);
+        let script_payload = "$<>&\\\"x💥".repeat(payload_len.div_ceil(11));
+        let comment_payload = "comment-".repeat(payload_len.div_ceil(8));
+        let input = format!(
+            "<!doctype html><html><body>\
+             <script>self.__next_f.push([1,\"{script_payload}\"])</script>\
+             <!--{comment_payload}-->\
+             <script>self.__next_f.push([2,\"{script_payload}\"])</script>\
+             </body></html>"
+        );
+        let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+        let mut output = Vec::new();
+        let mut processor =
+            Processor::new(None, Configuration::default().with_chunk_size(chunk_size));
+
+        processor
+            .process_stream(reader, &mut output, None, None)
+            .expect("processing should succeed");
+
+        assert_eq!(
+            output,
+            input.as_bytes(),
+            "streaming changed bytes with chunk_size={chunk_size}"
+        );
+    }
+}
+
+#[test]
+fn process_stream_preserves_a_large_script_across_irregular_short_reads() {
+    struct FragmentedReader<'a> {
+        input: &'a [u8],
+        position: usize,
+        next_size: usize,
+    }
+
+    impl std::io::Read for FragmentedReader<'_> {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            if self.position == self.input.len() || output.is_empty() {
+                return Ok(0);
+            }
+            const READ_SIZES: [usize; 8] = [1, 3, 17, 4_093, 2, 8_191, 257, 16_383];
+            let requested = READ_SIZES[self.next_size % READ_SIZES.len()];
+            self.next_size += 1;
+            let available = self.input.len() - self.position;
+            let len = requested.min(available).min(output.len());
+            output[..len].copy_from_slice(&self.input[self.position..self.position + len]);
+            self.position += len;
+            Ok(len)
+        }
+    }
+
+    impl std::io::BufRead for FragmentedReader<'_> {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Ok(&self.input[self.position..])
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.position = self.position.saturating_add(amount).min(self.input.len());
+        }
+    }
+
+    let payload = "$<>&\\\"x💥".repeat(60_000);
+    let input = format!(
+        "<!doctype html><html><body><script>self.__next_f.push([1,\"{payload}\"])</script></body></html>"
+    );
+    let reader = FragmentedReader {
+        input: input.as_bytes(),
+        position: 0,
+        next_size: 0,
+    };
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default().with_chunk_size(16_384));
+
+    processor
+        .process_stream(reader, &mut output, None, None)
+        .expect("processing should succeed");
+
+    assert_eq!(output, input.as_bytes());
+}
+
+#[test]
+fn process_stream_preserves_large_esi_element_semantics() {
+    let payload = "$<>&\\\"x💥".repeat(20_000);
+    let cases = [
+        (
+            format!("before<esi:text>{payload}</esi:text>after"),
+            format!("before{payload}after"),
+        ),
+        (
+            format!("before<esi:remove>{payload}</esi:remove>after"),
+            "beforeafter".to_string(),
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+        let mut output = Vec::new();
+        let mut processor = Processor::new(None, Configuration::default().with_chunk_size(16_384));
+
+        processor
+            .process_stream(reader, &mut output, None, None)
+            .expect("processing should succeed");
+
+        assert_eq!(output, expected.as_bytes());
+    }
+}
+
+#[test]
+fn process_stream_resolves_an_include_after_a_large_script() {
+    let payload = "x".repeat(120_000);
+    let include = r#"<esi:include src="http://example.com/fragment"/>"#;
+    let input = format!(
+        "<html><body><script>self.__next_f.push([1,\"{payload}\"])</script>{include}</body></html>"
+    );
+    let expected = input.replace(include, "reader-ad-state");
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let dispatcher =
+        |_req: Request, _maxwait: Option<u32>| -> esi::Result<esi::PendingFragmentContent> {
+            Ok(esi::PendingFragmentContent::CompletedRequest(Box::new(
+                fastly::Response::from_body("reader-ad-state"),
+            )))
+        };
+    let mut processor = Processor::new(
+        Some(Request::get("http://example.com/")),
+        Configuration::default().with_chunk_size(16_384),
+    );
+
+    processor
+        .process_stream(reader, &mut output, Some(&dispatcher), None)
+        .expect("processing should succeed");
+
+    assert_eq!(output, expected.as_bytes());
+}
+
+#[test]
+fn process_stream_preserves_a_real_page_sized_script() {
+    let payload = "x".repeat(1_500_000);
+    let input = format!(
+        "<!doctype html><html><body><script>self.__next_f.push([1,\"{payload}\"])</script></body></html>"
+    );
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default().with_chunk_size(16_384));
+
+    processor
+        .process_stream(reader, &mut output, None, None)
+        .expect("processing should succeed");
+
+    assert_eq!(output, input.as_bytes());
+}
+
+#[test]
+fn process_stream_rejects_a_truncated_large_script_at_eof() {
+    let input = format!("<html><script>{}", "x".repeat(120_000));
+    let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+    let mut output = Vec::new();
+    let mut processor = Processor::new(None, Configuration::default().with_chunk_size(16_384));
+
+    let error = processor
+        .process_stream(reader, &mut output, None, None)
+        .expect_err("a truncated script should fail at EOF");
+
+    assert!(
+        matches!(error, esi::ESIError::UnexpectedEndOfDocument),
+        "unexpected error: {error:?}"
+    );
+}
+
 // Test foreach with a list variable
 #[test]
 fn test_foreach_with_list() {
