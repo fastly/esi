@@ -338,7 +338,7 @@ impl<W: Write> ElementHandler for DocumentHandler<'_, W> {
                     let dispatcher = self.dispatch_fragment_request;
                     let resp_handler = self.fragment_response_handler;
                     let mut isolated_processor = Processor::new(
-                        Some(self.processor.ctx.get_request().clone_without_body()),
+                        Some(fragment.req.clone_without_body()),
                         self.processor.configuration.clone(),
                     );
                     isolated_processor.include_depth = self.processor.include_depth + 1;
@@ -1760,6 +1760,7 @@ impl Processor {
                 body_bytes,
                 dca_mode,
                 &fragment_url,
+                &fragment.req,
                 output_writer,
                 dispatch_fragment_request,
                 process_fragment_response,
@@ -1792,6 +1793,7 @@ impl Processor {
                         body_bytes,
                         dca_mode,
                         &String::from_utf8_lossy(&alt_src),
+                        &alt_req,
                         output_writer,
                         dispatch_fragment_request,
                         process_fragment_response,
@@ -1850,6 +1852,7 @@ impl Processor {
         body_bytes: Vec<u8>,
         dca_mode: DcaMode,
         url: &str,
+        fragment_request: &Request,
         output_writer: &mut impl Write,
         dispatcher: &FragmentRequestDispatcher,
         process_fragment_response: Option<&FragmentResponseProcessor>,
@@ -1882,7 +1885,7 @@ impl Processor {
             // separate Processor also gives us a clean queue, preventing
             // nested includes from escaping to the parent's slot scope.
             let mut isolated_processor = Processor::new(
-                Some(self.ctx.get_request().clone_without_body()),
+                Some(fragment_request.clone_without_body()),
                 self.configuration.clone(),
             );
             isolated_processor.include_depth = self.include_depth + 1;

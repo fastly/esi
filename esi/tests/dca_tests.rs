@@ -17,9 +17,21 @@ fn run<F>(input: &str, config: Configuration, dispatcher: &F) -> esi::Result<Str
 where
     F: Fn(Request, Option<u32>) -> esi::Result<esi::PendingFragmentContent> + 'static,
 {
+    run_with_request(input, None, config, dispatcher)
+}
+
+fn run_with_request<F>(
+    input: &str,
+    request: Option<Request>,
+    config: Configuration,
+    dispatcher: &F,
+) -> esi::Result<String>
+where
+    F: Fn(Request, Option<u32>) -> esi::Result<esi::PendingFragmentContent> + 'static,
+{
     let reader = std::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
     let mut output = Vec::new();
-    let mut processor = Processor::new(None, config);
+    let mut processor = Processor::new(request, config);
     processor.process_stream(
         reader,
         &mut output,
@@ -484,5 +496,52 @@ fn test_inherit_on_eval_subtree() -> esi::Result<()> {
         &d,
     )?;
     assert_eq!(result, "E0[88]");
+    Ok(())
+}
+
+// ===========================================================================
+// 5. REQUEST_PATH / QUERY_STRING in nested dca=esi (issue #49)
+// ===========================================================================
+
+/// $(REQUEST_PATH) in a nested dca=esi fragment should reflect the fragment's
+/// URL, not the top-level client request path.
+#[test]
+fn test_request_path_reflects_fragment_url_in_nested_dca_esi() -> esi::Result<()> {
+    let d = static_body(r#"<esi:vars>$(REQUEST_PATH)</esi:vars>"#);
+    let result = run_with_request(
+        r#"<esi:include src="/path/to/fragment" dca="esi"/>"#,
+        Some(Request::get("http://localhost/original")),
+        Configuration::default(),
+        &d,
+    )?;
+    assert_eq!(result, "/path/to/fragment");
+    Ok(())
+}
+
+/// $(QUERY_STRING) in a nested dca=esi fragment should reflect the fragment's
+/// query string when the include src specifies one.
+#[test]
+fn test_query_string_reflects_fragment_url_in_nested_dca_esi() -> esi::Result<()> {
+    let d = static_body(r#"<esi:vars>$(QUERY_STRING{key})</esi:vars>"#);
+    let result = run_with_request(
+        r#"<esi:include src="/frag?key=from_fragment" dca="esi"/>"#,
+        Some(Request::get("http://localhost/original?key=from_parent")),
+        Configuration::default(),
+        &d,
+    )?;
+    assert_eq!(result, "from_fragment");
+    Ok(())
+}
+
+/// $(REQUEST_PATH) at top level still reflects the client request.
+#[test]
+fn test_request_path_top_level_unchanged() -> esi::Result<()> {
+    let result = run_with_request(
+        r#"<esi:vars>$(REQUEST_PATH)</esi:vars>"#,
+        Some(Request::get("http://localhost/original")),
+        Configuration::default(),
+        &|_req, _maxwait| unreachable!(),
+    )?;
+    assert_eq!(result, "/original");
     Ok(())
 }
